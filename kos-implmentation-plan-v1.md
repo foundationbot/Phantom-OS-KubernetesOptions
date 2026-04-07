@@ -22,8 +22,7 @@ After evaluating KubeEdge, MicroShift, k3s, and k0s against PhantomOS hard const
 These must be answered before a single line of k0s config is written. Skipping these causes rework.
 
 ### P0.1 — Audit current container state on the robot
-**Owner:** Siddhant  
-**Effort:** 1 day  
+**Effort:** half day  
 **Goal:** Understand what is currently running so migration scope is known.
 
 - SSH into the robot and document every running container (`docker ps` or equivalent)
@@ -33,8 +32,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 - Output: a simple table of services → current deployment method
 
 ### P0.2 — Map the CPU layout on the Ubuntu dev machine
-**Owner:** Siddhant + Gaurav  
-**Effort:** 1 day  
+**Effort:** half day  
 **Goal:** Know exactly which cores to isolate before touching the kernel or k0s config.
 
 - Get core count and topology (`lscpu`, `numactl --hardware`)
@@ -44,9 +42,21 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 > **Note:** This step focuses on the x86 Ubuntu dev environment. The same exercise will need to be repeated for Jetson Thor (AARCH64) when the deployment target moves to production hardware.
 
-### P0.3 — Confirm k0s runs on x86 Ubuntu LTS
-**Owner:** Siddhant  
-**Effort:** half day  
+### P0.3 — Migrate from NixOS to Ubuntu LTS
+**Effort:** 1 day  
+**Goal:** Replace the current NixOS-based environment with Ubuntu LTS so that the rest of the implementation has a stable, supported base.
+
+- Install Ubuntu LTS (x86-64) on the target dev machine / robot
+- Reinstall all required system packages (containerd, systemd services, EtherCAT drivers, etc.)
+- Re-deploy the motor controller as a host systemd service and confirm it runs
+- Migrate any NixOS-specific configuration (nix flakes, `/etc/nixos/` config) to standard Ubuntu equivalents (`apt`, `/etc/systemd/`, `/etc/network/`)
+- Validate all existing containers start and behave identically to the NixOS environment
+- Output: Ubuntu LTS machine with the same working state as the previous NixOS setup
+
+> **Why:** NixOS is not the target OS for PhantomOS — Ubuntu LTS is. Continuing to develop on NixOS risks accumulating NixOS-specific workarounds that will not transfer. This migration must happen before k0s installation to avoid doing it twice.
+
+### P0.4 — Confirm k0s runs on x86 Ubuntu LTS
+**Effort:** 2 hours  
 **Goal:** Verify k0s binary boots cleanly on the Ubuntu LTS version in use.
 
 - Download k0s binary, run `k0s version` on the Ubuntu dev machine
@@ -61,7 +71,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 > **Note:** All Phase 1–5 work targets Ubuntu x86 first. Once validated, the same configuration will be ported to Jetson Thor (AARCH64) for production deployment. Thor-specific concerns (JetPack BSP, arm64 binary, GPU memory allocation) are deferred until the Ubuntu deployment is proven.
 
-**Effort:** ~3 days  
+**Effort:** ~1.5 days  
 **Target date:** April 10 (aligns with roadmap k3s architecture design gate)
 
 ### Tasks
@@ -95,7 +105,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 **Target:** All existing containers running as k0s pods. Motor controller remains as host systemd service.
 
-**Effort:** ~2 weeks  
+**Effort:** ~1 week  
 **Target date:** April 25 (aligns with roadmap container migration gate)
 
 ### Containers to migrate (to be confirmed from P0.1 audit)
@@ -127,7 +137,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 **Target:** All pods deployed and managed via ArgoCD from the config repo. No manual `kubectl apply`.
 
-**Effort:** ~1 week  
+**Effort:** ~2.5 days  
 **Target date:** May 2 (aligns with roadmap ArgoCD gate)
 
 ### Tasks
@@ -152,7 +162,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 **Target:** Robot has a local image registry. New container images can be pushed from cloud and pulled without SSH.
 
-**Effort:** ~3 days  
+**Effort:** ~1.5 days  
 **Target date:** May 7 (aligns with roadmap registry updater gate)
 
 ### Tasks
@@ -167,7 +177,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 **Target:** All container logs stream to cloud via Fluentd. Operator error snapshot works.
 
-**Effort:** ~1 week  
+**Effort:** ~2.5 days  
 **Target date:** May 9 (aligns with roadmap Fluentd gate)
 
 ### Tasks
@@ -192,14 +202,14 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 ## Timeline Summary
 
-| Phase | What | Owner | Target |
+| Phase | What | Effort | Target |
 |---|---|---|---|
-| Phase 0 | Audit + CPU map + AARCH64 verify | Siddhant | Apr 8–9 |
-| Phase 1 | k0s baseline + CPU isolation | Siddhant | Apr 10 |
-| Phase 2 | Container migration | Siddhant | Apr 25 |
-| Phase 3 | ArgoCD GitOps | Siddhant | May 2 |
-| Phase 4 | Local registry + OTA | Siddhant | May 7 |
-| Phase 5 | Logging pipeline | Siddhant | May 9 |
+| Phase 0 | Audit + CPU map + NixOS→Ubuntu migration + k0s verify | ~3 days | Apr 8–10 |
+| Phase 1 | k0s baseline + CPU isolation | ~1.5 days | Apr 10 |
+| Phase 2 | Container migration | ~1 week | Apr 25 |
+| Phase 3 | ArgoCD GitOps | ~2.5 days | May 2 |
+| Phase 4 | Local registry + OTA | ~1.5 days | May 7 |
+| Phase 5 | Logging pipeline | ~2.5 days | May 9 |
 
 **Phase 1 complete = May 12** (matches roadmap gate)
 
