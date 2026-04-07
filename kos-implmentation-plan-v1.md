@@ -2,7 +2,7 @@
 > **Author:** Siddhant  
 > **Date:** 2026-04-07  
 > **Status:** Draft v1  
-> **Companion doc:** [Edge Kubernetes Fit Analysis](https://github.com/foundationbot/Phantom-OS-KubernetesOptions)
+> **Companion doc:** [Edge Kubernetes Fit Analysis](https://github.com/foundationbot/Phantom-OS-KubernetesOptions/blob/main/edge-kubernetes-git-analysis.md)
 
 ---
 
@@ -32,30 +32,34 @@ These must be answered before a single line of k0s config is written. Skipping t
 - Confirm motor controller is running as a host systemd service (not containerized)
 - Output: a simple table of services → current deployment method
 
-### P0.2 — Map the Jetson Thor CPU layout
+### P0.2 — Map the CPU layout on the Ubuntu dev machine
 **Owner:** Siddhant + Gaurav  
 **Effort:** 1 day  
 **Goal:** Know exactly which cores to isolate before touching the kernel or k0s config.
 
-- Get Thor core count and topology (`lscpu`, `numactl --hardware`)
+- Get core count and topology (`lscpu`, `numactl --hardware`)
 - Identify which cores the motor controller thread(s) currently run on (check with `htop` or `taskset`)
 - Determine isolation budget: how many cores for motor controller, how many for k0s control plane, how many for AI inference pods
 - Output: a CPU allocation map that feeds directly into `isolcpus` kernel boot parameter and k0s kubelet config
 
-### P0.3 — Confirm k0s runs on AARCH64 / Jetson Thor
+> **Note:** This step focuses on the x86 Ubuntu dev environment. The same exercise will need to be repeated for Jetson Thor (AARCH64) when the deployment target moves to production hardware.
+
+### P0.3 — Confirm k0s runs on x86 Ubuntu LTS
 **Owner:** Siddhant  
 **Effort:** half day  
-**Goal:** Verify k0s binary exists for `arm64` and boots on the Thor BSP/JetPack version in use.
+**Goal:** Verify k0s binary boots cleanly on the Ubuntu LTS version in use.
 
-- Download k0s arm64 binary, run `k0s version` on the Thor dev unit
-- Confirm no BSP-level conflicts with containerd or kernel version
+- Download k0s binary, run `k0s version` on the Ubuntu dev machine
+- Confirm no conflicts with containerd or kernel version
 - Output: go/no-go signal before any integration work starts
 
 ---
 
 ## Phase 1 — Single-Node k0s Baseline
 
-**Target:** k0s running on Jetson Thor in single-node (controller+worker) mode with no workloads. Just the cluster, healthy.
+**Target:** k0s running on the Ubuntu x86 dev machine in single-node (controller+worker) mode with no workloads. Just the cluster, healthy.
+
+> **Note:** All Phase 1–5 work targets Ubuntu x86 first. Once validated, the same configuration will be ported to Jetson Thor (AARCH64) for production deployment. Thor-specific concerns (JetPack BSP, arm64 binary, GPU memory allocation) are deferred until the Ubuntu deployment is proven.
 
 **Effort:** ~3 days  
 **Target date:** April 10 (aligns with roadmap k3s architecture design gate)
@@ -63,7 +67,7 @@ These must be answered before a single line of k0s config is written. Skipping t
 ### Tasks
 
 **1.1 — Install k0s in single-node mode**
-- Install k0s binary on Thor
+- Install k0s binary on the Ubuntu dev machine
 - Configure as combined controller+worker (`k0s install controller --single`)
 - Confirm `k0s status` shows healthy
 - Confirm etcd is running (not SQLite — verify explicitly)
@@ -109,9 +113,8 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 ### Migration approach per container
 1. Write k0s pod manifest (or Helm chart if complex)
-2. Test on x86 dev machine first
-3. Deploy to Thor, validate behaviour matches pre-migration
-4. Remove old Docker/systemd equivalent only after validation
+2. Deploy on x86 Ubuntu dev machine, validate behaviour matches pre-migration
+3. Remove old Docker/systemd equivalent only after validation
 
 ### Key constraints
 - Motor controller: **never** migrated. Stays as `phantom-controller.service` on the host.
@@ -179,10 +182,10 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 | # | Question | Why it blocks us |
 |---|---|---|
-| OQ-1 | Which specific Thor cores does the motor controller currently use? | Blocks P0.2 and Phase 1 CPU isolation |
+| OQ-1 | Which specific cores does the motor controller currently use on the dev machine? | Blocks P0.2 and Phase 1 CPU isolation |
 | OQ-2 | How do DMA pods access shared memory — `hostIPC`, hugepages, or `/dev/shm` mount? | Blocks Phase 2 pod manifests for positronic control and DMA.video |
 | OQ-3 | Is there an existing container list on the robot? | Blocks Phase 2 migration scope |
-| OQ-4 | What is the robot's current network interface setup on Thor? | Affects host networking config for latency-sensitive pods |
+| OQ-4 | What is the robot's current network interface setup? | Affects host networking config for latency-sensitive pods |
 | OQ-5 | Who owns the config repo structure decision? | Blocks Phase 3 ArgoCD setup |
 
 ---
@@ -206,7 +209,8 @@ These must be answered before a single line of k0s config is written. Skipping t
 
 | Risk | Mitigation |
 |---|---|
-| k0s etcd overhead on Thor competes with AI inference | CPU map (P0.2) must be done before Phase 1. If overhead is too high, pin k0s control plane to dedicated cores. |
+| k0s etcd overhead competes with AI inference | CPU map (P0.2) must be done before Phase 1. If overhead is too high, pin k0s control plane to dedicated cores. |
 | DMA shared memory incompatible with k0s pod isolation | Confirm mechanism with Gaurav before Phase 2. `hostIPC` is the likely answer. |
 | Current containers have undocumented dependencies | Phase 0 audit is mandatory. Do not skip. |
 | Motor controller accidentally scheduled into k0s | Use `nodeSelector` + `taints` to make the host motor controller cores fully invisible to k0s scheduler |
+| Thor (AARCH64) deployment deferred | All work validated on Ubuntu x86 first. Thor port may surface BSP/JetPack-specific issues (kernel version, GPU driver conflicts, arm64 binary compatibility) that require additional effort. |
