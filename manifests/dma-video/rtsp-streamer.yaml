@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rtsp-streamer
+  namespace: dma-video
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rtsp-streamer
+  template:
+    metadata:
+      labels:
+        app: rtsp-streamer
+    spec:
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: rtsp-streamer
+          image: foundationbot/dma-video:main
+          imagePullPolicy: Always
+          command: ["python3", "src/rtsp_streamer.py"]
+          args: ["--camera-config", "/opt/configs/cameras.json"]
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cameras-config
+              mountPath: /opt/configs/cameras.json
+              subPath: cameras.json
+              readOnly: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+        - name: cameras-config
+          configMap:
+            name: cameras-config

@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator-ui
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: operator-ui
+  template:
+    metadata:
+      labels:
+        app: operator-ui
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: operator-ui
+          image: foundationbot/argus.operator-ui:qa
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8004
+          env:
+            - name: ENV
+              value: qa
+            - name: GATEWAY_URL
+              value: /api
+            - name: CONTROL_PC_URL
+              value: http://172.16.67.100:5000
+            - name: AI_PC_URL
+              value: http://100.71.81.1:5000
+            - name: RERUN_URL
+              value: rerun+http://nitrogen:9876/proxy
+          resources:
+            requests:
+              cpu: "1"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-ui
+  namespace: argus
+spec:
+  selector:
+    app: operator-ui
+  ports:
+    - port: 8004
+      targetPort: 8004

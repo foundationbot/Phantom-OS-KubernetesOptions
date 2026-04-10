@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argus-gateway
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: argus-gateway
+  template:
+    metadata:
+      labels:
+        app: argus-gateway
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: argus-gateway
+          image: foundationbot/argus.gateway:qa
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9100
+          env:
+            - name: NODE_ENV
+              value: qa
+            - name: PORT
+              value: "9100"
+            - name: HOST
+              value: 0.0.0.0
+            - name: AUTH_SERVICE_URL_QA
+              value: http://argus-auth:9000
+            - name: USER_SERVICE_URL_QA
+              value: http://argus-user:9001
+            - name: COMPANY_SERVICE_URL_QA
+              value: http://argus-company:9002
+            - name: AUTH_SERVICE_URL
+              value: http://argus-auth:9000
+            - name: USER_SERVICE_URL
+              value: http://argus-user:9001
+            - name: COMPANY_SERVICE_URL
+              value: http://argus-company:9002
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB
+              value: "3"
+            - name: CORS_ORIGIN
+              value: "*"
+            - name: SESSION_EXPIRY_WARNING_SECONDS
+              value: "300"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argus-gateway
+  namespace: argus
+spec:
+  selector:
+    app: argus-gateway
+  ports:
+    - port: 9100
+      targetPort: 9100

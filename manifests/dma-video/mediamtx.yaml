@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mediamtx
+  namespace: dma-video
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mediamtx
+  template:
+    metadata:
+      labels:
+        app: mediamtx
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: mediamtx
+          image: bluenviron/mediamtx:latest
+          env:
+            - name: MTX_API
+              value: "yes"
+            - name: MTX_APIADDRESS
+              value: ":9997"
+            - name: MTX_APICORS
+              value: "yes"
+          volumeMounts:
+            - name: mediamtx-config
+              mountPath: /mediamtx.yml
+              subPath: mediamtx.yml
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: mediamtx-config
+          configMap:
+            name: mediamtx-config

@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argus-auth
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: argus-auth
+  template:
+    metadata:
+      labels:
+        app: argus-auth
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: argus-auth
+          image: foundationbot/argus.auth:qa
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9000
+          env:
+            - name: SERVICE_NAME
+              value: argus-auth
+            - name: PORT
+              value: "9000"
+            - name: MONGODB_URI
+              value: mongodb://mongodb:27017/ArgusDB
+            - name: MONGODB_HOST
+              value: mongodb
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_DATABASE
+              value: ArgusDB
+            - name: LOGIN_CREDENTIALS_COLLECTION
+              value: login_credentials
+            - name: SESSION_DIRECTORY_COLLECTION
+              value: session_directory
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB
+              value: "0"
+            - name: REDIS_TTL_SECONDS
+              value: "60"
+            - name: SESSION_EXPIRY_HOURS
+              value: "8"
+            - name: OFFLINE_APP_IDS
+              value: 691bcf923433f53b6a11874d
+          resources:
+            requests:
+              cpu: "1"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argus-auth
+  namespace: argus
+spec:
+  selector:
+    app: argus-auth
+  ports:
+    - port: 9000
+      targetPort: 9000

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: viewer
+  namespace: dma-video
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: viewer
+  template:
+    metadata:
+      labels:
+        app: viewer
+    spec:
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: viewer
+          image: foundationbot/dma-video:main
+          imagePullPolicy: Always
+          command: ["python3", "src/video_viewer.py"]
+          args: ["--cameras", "0,1,2,3,4,5", "--port", "9299"]
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

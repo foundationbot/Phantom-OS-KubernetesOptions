@@ -1,0 +1,139 @@
+# Pre-bound hostPath PV for PostgreSQL data
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /var/lib/k0s-data/postgres
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: nimbus
+    name: data-postgres-0
+---
+# Init SQL ConfigMap (from nimbus.s3_dynamo_athena/scripts/init_postgres.sql)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: nimbus
+data:
+  init.sql: |
+    -- Encyclopedia Galactica: Episodes schema for local PostgreSQL backend
+    -- Run: psql -f init_postgres.sql -d episodes
+
+    CREATE TABLE IF NOT EXISTS episodes (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        display_id        TEXT UNIQUE NOT NULL,
+        robot_name        TEXT NOT NULL,
+        operator_id       TEXT NOT NULL,
+        task              TEXT,
+        quality           TEXT NOT NULL DEFAULT 'unlabeled'
+                          CHECK (quality IN ('good', 'bad', 'skip', 'unlabeled')),
+        collection_tool   TEXT,
+        started_at        TIMESTAMPTZ NOT NULL,
+        ended_at          TIMESTAMPTZ,
+        duration_seconds  DOUBLE PRECISION,
+        frame_count       INTEGER,
+        dropped_frames    INTEGER DEFAULT 0,
+        file_size_bytes   BIGINT,
+        interrupted       BOOLEAN DEFAULT FALSE,
+        reviewed_by       TEXT,
+        reviewed_at       TIMESTAMPTZ,
+        rejection_reason  TEXT,
+        notes             TEXT,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        assets            JSONB NOT NULL DEFAULT '{}'::jsonb,
+        upload_status     TEXT DEFAULT 'pending'
+                          CHECK (upload_status IN ('pending', 'queued', 'uploading', 'uploaded', 'failed', 'skip')),
+        upload_retry_count INTEGER DEFAULT 0,
+        uploaded_at       TIMESTAMPTZ,
+        local_path        TEXT,
+        local_files_deleted BOOLEAN DEFAULT FALSE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_episodes_robot    ON episodes (robot_name, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_task     ON episodes (task, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_quality  ON episodes (quality, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_operator ON episodes (operator_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_upload   ON episodes (upload_status);
+    CREATE INDEX IF NOT EXISTS idx_episodes_started  ON episodes (started_at DESC);
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: nimbus
+spec:
+  serviceName: db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: episodes
+            - name: POSTGRES_USER
+              value: episodes
+            - name: POSTGRES_PASSWORD
+              value: episodes
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+              readOnly: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: init-sql
+          configMap:
+            name: postgres-init-sql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: ""
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Service named "db" so DATABASE_URL=postgresql://episodes:episodes@db:5432/episodes works unchanged
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: nimbus
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

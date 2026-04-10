@@ -1,0 +1,64 @@
+# eg-jobs is a background worker — no Service needed.
+# Requires iot-certs Secret created BEFORE deploying:
+#   kubectl create secret generic iot-certs \
+#     --namespace nimbus \
+#     --from-file=/root/episode-agent/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eg-jobs
+  namespace: nimbus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eg-jobs
+  template:
+    metadata:
+      labels:
+        app: eg-jobs
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: eg-jobs
+          image: foundationbot/nimbus.s3_dynamo_athena-jobs:main
+          imagePullPolicy: Always
+          env:
+            - name: DATABASE_URL
+              value: postgresql://episodes:episodes@db:5432/episodes
+            - name: EPISODES_DIR
+              value: /root/recordings
+            - name: S3_BUCKET
+              value: aidatacollection
+            - name: AWS_REGION
+              value: us-west-2
+            - name: IOT_CERT_DIR
+              value: /certs
+            - name: IOT_ENDPOINT
+              value: c4r067w5awayr.credentials.iot.us-west-1.amazonaws.com
+            - name: IOT_ROLE_ALIAS
+              value: episode-upload-agent
+            - name: IOT_THING_NAME
+              value: argentum
+          volumeMounts:
+            - name: recordings
+              mountPath: /root/recordings
+            # TODO: create iot-certs secret from /root/episode-agent/ on the robot before deploying to production.
+            # - name: iot-certs
+            #   mountPath: /certs
+            #   readOnly: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: recordings
+          persistentVolumeClaim:
+            claimName: recordings-pvc
+        # - name: iot-certs
+        #   secret:
+        #     secretName: iot-certs

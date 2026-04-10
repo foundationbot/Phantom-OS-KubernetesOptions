@@ -1,0 +1,247 @@
+# ConfigMap: camera config (from DMA.video/config/cameras_phantom001.json)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cameras-config
+  namespace: dma-video
+data:
+  cameras.json: |
+    {
+      "boards": {
+        "0": {"mxid": "1944301041DE4F2E00"},
+        "1": {"mxid": "19443010A1EA4E2E00"}
+      },
+      "cameras": {
+        "bottom": {
+          "queue_id": 0,
+          "board": 0,
+          "socket": "A",
+          "type": "color",
+          "exposure": "auto",
+          "iso": 800,
+          "resolution": [1280, 800],
+          "intrinsics": {
+            "matrix": [
+              [561.45, 0.0, 614.67],
+              [0.0, 561.51, 389.64],
+              [0.0, 0.0, 1.0]
+            ],
+            "distortion": [
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0
+            ]
+          },
+          "extrinsics": {
+            "matrix": [
+              [1.0, 0.0, 0.0, 0.0],
+              [0.0, 1.0, 0.0, 0.0],
+              [0.0, 0.0, 1.0, 0.0],
+              [0.0, 0.0, 0.0, 1.0]
+            ],
+            "origin_camera": "left_ear"
+          }
+        },
+        "left": {
+          "queue_id": 1,
+          "board": 0,
+          "socket": "B",
+          "type": "mono",
+          "exposure": "auto",
+          "iso": 800,
+          "resolution": [1280, 800],
+          "intrinsics": {
+            "matrix": [
+              [571.29, 0.0, 647.36],
+              [0.0, 571.42, 399.91],
+              [0.0, 0.0, 1.0]
+            ],
+            "distortion": [
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0
+            ]
+          },
+          "extrinsics": {
+            "matrix": [
+              [1.0, 0.0, 0.0, 0.0],
+              [0.0, 1.0, 0.0, 0.0],
+              [0.0, 0.0, 1.0, 0.0],
+              [0.0, 0.0, 0.0, 1.0]
+            ],
+            "origin_camera": "left_ear"
+          }
+        },
+        "right": {
+          "queue_id": 2,
+          "board": 0,
+          "socket": "D",
+          "type": "mono",
+          "exposure": "auto",
+          "iso": 800,
+          "resolution": [1280, 800],
+          "intrinsics": {
+            "matrix": [
+              [570.57, 0.0, 625.23],
+              [0.0, 570.25, 403.31],
+              [0.0, 0.0, 1.0]
+            ],
+            "distortion": [
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0
+            ]
+          },
+          "extrinsics": {
+            "matrix": [
+              [1.0, 0.0, 0.0, 0.0],
+              [0.0, 1.0, 0.0, 0.0],
+              [0.0, 0.0, 1.0, 0.0],
+              [0.0, 0.0, 0.0, 1.0]
+            ],
+            "origin_camera": "left_ear"
+          }
+        },
+        "right_ear": {
+          "queue_id": 3,
+          "board": 1,
+          "socket": "A",
+          "type": "mono",
+          "exposure": "auto",
+          "iso": 800,
+          "resolution": [1280, 800],
+          "intrinsics": {
+            "matrix": [
+              [570.0, 0.0, 640.0],
+              [0.0, 570.0, 400.0],
+              [0.0, 0.0, 1.0]
+            ],
+            "distortion": [
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0
+            ]
+          },
+          "extrinsics": {
+            "matrix": [
+              [1.0, 0.0, 0.0, 0.0],
+              [0.0, 1.0, 0.0, 0.0],
+              [0.0, 0.0, 1.0, 0.0],
+              [0.0, 0.0, 0.0, 1.0]
+            ],
+            "origin_camera": "left_ear"
+          }
+        },
+        "top": {
+          "queue_id": 4,
+          "board": 1,
+          "socket": "C",
+          "type": "mono",
+          "exposure": "auto",
+          "iso": 800,
+          "resolution": [1280, 800],
+          "intrinsics": {
+            "matrix": [
+              [570.0, 0.0, 640.0],
+              [0.0, 570.0, 400.0],
+              [0.0, 0.0, 1.0]
+            ],
+            "distortion": [
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0
+            ]
+          },
+          "extrinsics": {
+            "matrix": [
+              [1.0, 0.0, 0.0, 0.0],
+              [0.0, 1.0, 0.0, 0.0],
+              [0.0, 0.0, 1.0, 0.0],
+              [0.0, 0.0, 0.0, 1.0]
+            ],
+            "origin_camera": "left_ear"
+          }
+        },
+        "left_ear": {
+          "queue_id": 5,
+          "board": 1,
+          "socket": "D",
+          "type": "color",
+          "exposure": "auto",
+          "iso": 800,
+          "resolution": [1280, 800],
+          "intrinsics": {
+            "matrix": [
+              [561.45, 0.0, 614.67],
+              [0.0, 561.51, 389.64],
+              [0.0, 0.0, 1.0]
+            ],
+            "distortion": [
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0
+            ]
+          },
+          "extrinsics": {
+            "matrix": [
+              [1.0, 0.0, 0.0, 0.0],
+              [0.0, 1.0, 0.0, 0.0],
+              [0.0, 0.0, 1.0, 0.0],
+              [0.0, 0.0, 0.0, 1.0]
+            ],
+            "origin_camera": "left_ear"
+          }
+        }
+      }
+    }
+---
+# ConfigMap: mediamtx config (from DMA.video/config/mediamtx.yml)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mediamtx-config
+  namespace: dma-video
+data:
+  mediamtx.yml: |
+    # MediaMTX configuration for DMA.video
+    logLevel: info
+
+    # RTSP settings
+    rtspAddress: :8554
+    rtspTransports: [tcp]
+
+    # API settings
+    api: yes
+    apiAddress: :9997
+    apiAllowOrigin: '*'
+
+    # WebRTC settings
+    webrtc: yes
+    webrtcAddress: :8889
+    webrtcAllowOrigin: '*'
+
+    # HLS settings
+    hls: yes
+    hlsAddress: :8888
+    hlsAllowOrigin: '*'
+
+    # Path settings — one per camera
+    paths:
+      left:
+        source: publisher
+        rtspTransport: tcp
+      right:
+        source: publisher
+        rtspTransport: tcp
+      left_ear:
+        source: publisher
+        rtspTransport: tcp
+      right_ear:
+        source: publisher
+        rtspTransport: tcp
+      top:
+        source: publisher
+        rtspTransport: tcp
+      bottom:
+        source: publisher
+        rtspTransport: tcp

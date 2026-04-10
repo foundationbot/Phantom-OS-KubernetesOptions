@@ -1,0 +1,32 @@
+# Shared hostPath volume for /root/recordings
+# dma-video writes recordings here; nimbus reads them for upload
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: recordings-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /root/recordings
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: nimbus
+    name: recordings-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: recordings-pvc
+  namespace: nimbus
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 500Gi

@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camera-params
+  namespace: dma-video
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camera-params
+  template:
+    metadata:
+      labels:
+        app: camera-params
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: camera-params
+          image: foundationbot/dma-video:main
+          imagePullPolicy: Always
+          # Compose: entrypoint → command, command → args
+          command: ["python3", "src/camera_params_server.py"]
+          args: ["--config", "/opt/configs/cameras.json", "--port", "8420"]
+          volumeMounts:
+            - name: cameras-config
+              mountPath: /opt/configs/cameras.json
+              subPath: cameras.json
+              readOnly: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+      volumes:
+        - name: cameras-config
+          configMap:
+            name: cameras-config

@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: producer
+  namespace: dma-video
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: producer
+  template:
+    metadata:
+      labels:
+        app: producer
+    spec:
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: producer
+          image: foundationbot/dma-video:main
+          imagePullPolicy: Always
+          # Compose: command: ["--fps", "25", "--camera-config", "/opt/configs/cameras.json"]
+          # No entrypoint override → image ENTRYPOINT runs, these are CMD args
+          args:
+            - "--fps"
+            - "25"
+            - "--camera-config"
+            - "/opt/configs/cameras.json"
+          securityContext:
+            privileged: true      # required for USB camera access
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: usb
+              mountPath: /dev/bus/usb
+            - name: cameras-config
+              mountPath: /opt/configs/cameras.json
+              subPath: cameras.json
+              readOnly: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+        - name: usb
+          hostPath:
+            path: /dev/bus/usb
+            type: Directory
+        - name: cameras-config
+          configMap:
+            name: cameras-config

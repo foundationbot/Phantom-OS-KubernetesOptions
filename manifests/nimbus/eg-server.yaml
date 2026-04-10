@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eg-server
+  namespace: nimbus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eg-server
+  template:
+    metadata:
+      labels:
+        app: eg-server
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: eg-server
+          image: foundationbot/nimbus.s3_dynamo_athena:main
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND
+              value: postgres
+            - name: DATABASE_URL
+              value: postgresql://episodes:episodes@db:5432/episodes
+            - name: PORT
+              value: "80"
+          volumeMounts:
+            - name: recordings
+              mountPath: /root/recordings
+              readOnly: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: recordings
+          persistentVolumeClaim:
+            claimName: recordings-pvc
+---
+# Exposes port 8080 externally (targetPort 80 inside container).
+# Argus calls: http://eg-server.nimbus.svc.cluster.local:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: eg-server
+  namespace: nimbus
+spec:
+  selector:
+    app: eg-server
+  ports:
+    - port: 8080
+      targetPort: 80
