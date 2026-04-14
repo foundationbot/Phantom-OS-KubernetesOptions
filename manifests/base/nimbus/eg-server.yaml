@@ -28,6 +28,10 @@ spec:
               value: postgresql://episodes:episodes@db:5432/episodes
             - name: PORT
               value: "80"
+            - name: ENABLE_AUTH_PROXY
+              value: "true"
+            - name: ENABLE_AUTH_MIDDLEWARE
+              value: "true"
           volumeMounts:
             - name: recordings
               mountPath: /root/recordings
