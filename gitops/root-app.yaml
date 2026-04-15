@@ -17,7 +17,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: git@github.com:foundationbot/Phantom-OS-KubernetesOptions.git
+    repoURL: https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
     targetRevision: main
     path: gitops/apps
     directory:
