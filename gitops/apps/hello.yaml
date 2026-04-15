@@ -1,0 +1,23 @@
+# ArgoCD Application CR: tells ArgoCD to sync apps/hello/ in this repo
+# into the "hello" namespace on the cluster. Apply this once, then ArgoCD
+# reconciles automatically on every git push.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hello
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:foundationbot/Phantom-OS-KubernetesOptions.git
+    targetRevision: main
+    path: apps/hello
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: hello
+  syncPolicy:
+    automated:
+      prune: true      # delete cluster resources when removed from git
+      selfHeal: true   # revert manual kubectl edits to match git
+    syncOptions:
+      - CreateNamespace=true
