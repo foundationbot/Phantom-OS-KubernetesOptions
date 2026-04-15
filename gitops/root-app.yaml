@@ -1,0 +1,33 @@
+# Root "app-of-apps" — one Application that manages every other Application CR
+# in gitops/apps/. Apply this file ONCE via kubectl. From then on, any file
+# added to gitops/apps/ becomes a live ArgoCD Application without further
+# manual work; deleting a file removes the child Application (and its workload).
+#
+# This is the one manual-apply that bootstraps the entire GitOps loop.
+# In session E, Terraform will apply this root-app.yaml so even that step
+# becomes declarative.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  # Prevent ArgoCD from pruning itself if the root is ever out of sync
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:foundationbot/Phantom-OS-KubernetesOptions.git
+    targetRevision: main
+    path: gitops/apps
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true      # remove a child Application when its yaml is deleted from gitops/apps/
+      selfHeal: true
+    syncOptions:
+      - ApplyOutOfSyncOnly=true

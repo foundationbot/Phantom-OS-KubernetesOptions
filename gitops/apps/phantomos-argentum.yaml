@@ -1,0 +1,26 @@
+# ArgoCD Application CR for the argentum robot's full stack.
+# Points at the argentum overlay, which unions manifests/base/{argus,dma-video,nimbus}
+# and adds robot-specific annotations. Auto-syncs on git push.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: phantomos-argentum
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:foundationbot/Phantom-OS-KubernetesOptions.git
+    targetRevision: main
+    path: manifests/robots/argentum
+  destination:
+    server: https://kubernetes.default.svc
+    # destination.namespace is a fallback for resources that don't declare one.
+    # Our base manifests all include their own namespace: fields, so this is rarely used.
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true      # remove from cluster when deleted from git
+      selfHeal: true   # revert manual kubectl changes
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # avoids "annotation too long" on large CRDs/configs
