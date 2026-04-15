@@ -1,0 +1,13 @@
+# Terraform state — do NOT commit
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Keep the lock file (deterministic installs)
+!.terraform.lock.hcl
