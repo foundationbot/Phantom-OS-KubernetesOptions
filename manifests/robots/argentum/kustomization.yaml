@@ -16,6 +16,14 @@ resources:
   - ../../base/nimbus
   - ../../base/dma-video
 
+# Per-robot image pins. CircleCI builds foundationbot/argus.operator-ui:<sha>
+# on every push to the default branch; this block overrides the base tag
+# (qa) with a specific SHA. Session D's CI automation will mutate newTag
+# here on every source-repo build.
+images:
+  - name: foundationbot/argus.operator-ui
+    newTag: e4ec8d64689c583b01588a36e1a32d334ff80c34
+
 # Example future overlay (left commented for guidance):
 #
 # patches:
