@@ -50,11 +50,11 @@ spec:
             #   readOnly: true
           resources:
             requests:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "1"
-              memory: "1Gi"
+              memory: "768Mi"
       volumes:
         - name: recordings
           persistentVolumeClaim:

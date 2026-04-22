@@ -77,11 +77,11 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: "1"
-              memory: "256Mi"
+              cpu: "50m"
+              memory: "32Mi"
             limits:
-              cpu: "1"
-              memory: "256Mi"
+              cpu: "500m"
+              memory: "128Mi"
       volumes:
         - name: nginx-config
           configMap:

@@ -29,8 +29,8 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: "1"
-              memory: "512Mi"
+              cpu: "100m"
+              memory: "128Mi"
             limits:
               cpu: "1"
               memory: "512Mi"

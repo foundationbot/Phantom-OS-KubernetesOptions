@@ -327,8 +327,8 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "200m"
+              memory: "256Mi"
             limits:
               cpu: "1"
               memory: "1Gi"

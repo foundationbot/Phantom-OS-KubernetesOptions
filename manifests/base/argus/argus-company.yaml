@@ -48,8 +48,8 @@ spec:
               value: "8"
           resources:
             requests:
-              cpu: "1"
-              memory: "512Mi"
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "1"
               memory: "512Mi"

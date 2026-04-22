@@ -45,11 +45,11 @@ spec:
               mountPath: /data
           resources:
             requests:
-              cpu: "1"
-              memory: "512Mi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              cpu: "1"
-              memory: "512Mi"
+              cpu: "500m"
+              memory: "256Mi"
   volumeClaimTemplates:
     - metadata:
         name: data

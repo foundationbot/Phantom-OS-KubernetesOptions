@@ -34,11 +34,11 @@ spec:
               value: rerun+http://nitrogen:9876/proxy
           resources:
             requests:
-              cpu: "1"
-              memory: "512Mi"
+              cpu: "50m"
+              memory: "64Mi"
             limits:
-              cpu: "1"
-              memory: "512Mi"
+              cpu: "500m"
+              memory: "256Mi"
 ---
 apiVersion: v1
 kind: Service
