@@ -267,6 +267,47 @@ sudo rm /usr/local/bin/k0s
 
 ---
 
+## Local image registry (priority-first mirror)
+
+Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) that serves two roles at once: it hosts locally-compiled images like `positronic-control`, and it acts as a pull-through cache for DockerHub. containerd is configured to try `http://localhost:5000` first and fall back to `registry-1.docker.io` — so cached images survive a DockerHub outage and locally-pushed tags transparently shadow upstream.
+
+Full design lives in [docs/plans/2026-04-24-local-registry-with-fallback.md](docs/plans/2026-04-24-local-registry-with-fallback.md). The repo ships three scripts:
+
+| Script | Purpose | Runs as |
+|---|---|---|
+| [scripts/configure-k0s-containerd-mirror.sh](scripts/configure-k0s-containerd-mirror.sh) | One-time per-robot: writes `/etc/docker/daemon.json` + `/etc/k0s/containerd.d/hosts/docker.io/hosts.toml` + containerd import TOML, restarts docker & k0s | root |
+| [scripts/prime-registry-cache.sh](scripts/prime-registry-cache.sh) | Pre-populates the registry with images (by direct push, not proxy) so they work offline. Supports explicit list, `--from-file`, `--from-cluster`, `--from-manifests <dir>` | requires `docker login` for private images |
+| [scripts/validate-local-registry.sh](scripts/validate-local-registry.sh) | 13 checks across docker / k8s / containerd layers. Exit code = failure count | any user (tests needing `sudo k0s ctr` skip if passwordless sudo is unavailable) |
+
+### Bootstrap on a new robot
+
+```bash
+git pull
+sudo bash scripts/configure-k0s-containerd-mirror.sh
+# optional: give the pull-through cache DockerHub credentials so it can
+# proxy private foundationbot/* images too
+kubectl create secret generic dockerhub-proxy-creds --namespace registry \
+  --from-literal=username=YOUR_DOCKERHUB_USERNAME \
+  --from-literal=password=YOUR_DOCKERHUB_TOKEN
+# wait for ArgoCD to sync manifests/base/registry (~30s)
+docker login                  # so the prime script can pull private images
+sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
+sudo bash scripts/validate-local-registry.sh
+```
+
+### Building and deploying `positronic-control`
+
+```bash
+cd ~/development/foundation/imu-policy/positronic_control
+TAG=$(git rev-parse --short HEAD)
+docker build -f docker/<chosen>.Dockerfile -t localhost:5000/positronic-control:$TAG .
+docker push localhost:5000/positronic-control:$TAG
+# then bump newTag in manifests/robots/<robot>/kustomization.yaml and push —
+# ArgoCD rolls the pod automatically
+```
+
+---
+
 ## Troubleshooting
 
 **Pods stuck in `ImagePullBackOff`**

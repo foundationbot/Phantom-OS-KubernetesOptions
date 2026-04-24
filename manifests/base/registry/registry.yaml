@@ -1,0 +1,122 @@
+# Local container registry + pull-through cache for DockerHub.
+#
+# See docs/plans/2026-04-24-local-registry-with-fallback.md for the full
+# design. Summary:
+#   - host-network pod on :5000, reachable as http://localhost:5000 from
+#     both docker (push) and k0s's containerd (pull)
+#   - REGISTRY_PROXY_REMOTEURL makes this a pull-through cache for
+#     registry-1.docker.io — first pull is a miss (hits upstream, caches),
+#     subsequent pulls are hits
+#   - DockerHub creds come from Secret dockerhub-proxy-creds, created
+#     manually per cluster (not in git). Without it, the proxy still works
+#     for public images; private foundationbot/* images will 401 and
+#     containerd falls through to registry-1.docker.io directly.
+#
+# Bootstrap:
+#   kubectl create secret generic dockerhub-proxy-creds \
+#     --namespace registry \
+#     --from-literal=username=YOUR_DOCKERHUB_USERNAME \
+#     --from-literal=password=YOUR_DOCKERHUB_TOKEN
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-registry-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /var/lib/registry
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: registry
+    name: local-registry-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: local-registry-pvc
+  namespace: registry
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-registry
+  namespace: registry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # hostPath PV is RWO + hostNetwork :5000 — no rolling overlap
+  selector:
+    matchLabels:
+      app: local-registry
+  template:
+    metadata:
+      labels:
+        app: local-registry
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: registry
+          image: registry:2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+              hostPort: 5000
+          env:
+            - name: REGISTRY_HTTP_ADDR
+              value: "0.0.0.0:5000"
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+            - name: REGISTRY_PROXY_REMOTEURL
+              value: https://registry-1.docker.io
+            - name: REGISTRY_PROXY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: dockerhub-proxy-creds
+                  key: username
+                  optional: true
+            - name: REGISTRY_PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dockerhub-proxy-creds
+                  key: password
+                  optional: true
+          volumeMounts:
+            - name: storage
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: local-registry-pvc

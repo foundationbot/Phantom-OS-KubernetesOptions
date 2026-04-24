@@ -5,12 +5,18 @@ commonAnnotations:
   robot: mk09
   fleet: phantomos
 resources:
+  - ../../base/registry
   - ../../base/argus
   - ../../base/nimbus
   - ../../base/dma-video
+  - ../../base/positronic
 images:
   - name: foundationbot/argus.operator-ui
     newTag: 585e58803318f5366d793986ad3e6129538b8a81
+  # Locally-built positronic-control image. Bump newTag after each
+  # `docker push localhost:5000/positronic-control:<sha>` on the robot.
+  - name: localhost:5000/positronic-control
+    newTag: PLACEHOLDER
 patches:
   - path: patches/operator-ui-env.yaml
     target:

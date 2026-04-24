@@ -1,0 +1,80 @@
+# positronic-control — locally-compiled image pulled from the in-cluster
+# registry at localhost:5000. Robot-build loop:
+#
+#   cd ~/development/foundation/imu-policy/positronic_control
+#   docker build -f docker/<chosen>.Dockerfile \
+#     -t localhost:5000/positronic-control:$(git rev-parse --short HEAD) .
+#   docker push localhost:5000/positronic-control:$(git rev-parse --short HEAD)
+#
+#   then bump newTag in manifests/robots/<robot>/kustomization.yaml and push.
+#
+# GPU access on Jetson Thor requires the NVIDIA device plugin and
+# `resources.limits: { nvidia.com/gpu: 1 }`. Out of scope for this manifest
+# — add when the device plugin is installed on the robot.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: positronic-control
+  namespace: positronic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: positronic-control
+  template:
+    metadata:
+      labels:
+        app: positronic-control
+    spec:
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: positronic-control
+          # Tag is rewritten per-robot in manifests/robots/<robot>/kustomization.yaml
+          # via Kustomize's images: transformer. PLACEHOLDER is never deployed as-is;
+          # the overlay pins it to a real git SHA.
+          image: localhost:5000/positronic-control:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          env:
+            # Fill in real values before deploying. Keeping a few representative
+            # entries to show the pattern.
+            - name: ROS_DOMAIN_ID
+              value: "0"
+            - name: RMW_IMPLEMENTATION
+              value: rmw_cyclonedds_cpp
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: dev
+              mountPath: /dev
+            - name: config
+              mountPath: /etc/positronic
+              readOnly: true
+          resources:
+            # Whole-number CPU => Guaranteed QoS => CPU Manager pins onto specific
+            # cores from the allocatable pool (cores excluded: {0, N-3, N-2, N-1}
+            # per current CPU reservation policy — N is machine-specific).
+            requests:
+              cpu: "2"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          securityContext:
+            # Required for raw device access (IMU, EtherCAT, cameras). Scope
+            # down to specific devices once the exact set is known.
+            privileged: true
+      volumes:
+        - name: shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: config
+          hostPath:
+            path: /etc/positronic
+            type: DirectoryOrCreate
