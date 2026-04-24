@@ -107,13 +107,18 @@ prime_one() {
 }
 
 collect_from_cluster() {
-  if ! command -v kubectl >/dev/null 2>&1; then
-    echo "error: --from-cluster requires kubectl" >&2
+  local kubectl_cmd=""
+  if command -v kubectl >/dev/null 2>&1; then
+    kubectl_cmd="kubectl"
+  elif command -v k0s >/dev/null 2>&1 && k0s kubectl version --client >/dev/null 2>&1; then
+    kubectl_cmd="k0s kubectl"
+  else
+    echo "error: --from-cluster requires kubectl or k0s" >&2
     exit 2
   fi
   # List every container image in every namespace, deduped. Filters out
   # localhost:5000/* entries (no point re-priming) and empty strings.
-  kubectl get pods --all-namespaces \
+  $kubectl_cmd get pods --all-namespaces \
     -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' \
     2>/dev/null \
     | grep -v "^${REGISTRY_HOST}/" \

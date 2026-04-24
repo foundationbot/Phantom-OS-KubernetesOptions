@@ -23,7 +23,9 @@ set -euo pipefail
 REGISTRY_HOST="${REGISTRY_HOST:-localhost:5000}"
 UPSTREAM_URL="${UPSTREAM_URL:-https://registry-1.docker.io}"
 HOSTS_DIR="${HOSTS_DIR:-/etc/k0s/containerd.d/hosts}"
-CONTAINERD_IMPORT="${CONTAINERD_IMPORT:-/etc/k0s/containerd.d/10-registry-mirror.toml}"
+CONTAINERD_IMPORT_DIR="${CONTAINERD_IMPORT_DIR:-/etc/k0s/containerd.d}"
+CONTAINERD_IMPORT="${CONTAINERD_IMPORT:-${CONTAINERD_IMPORT_DIR}/10-registry-mirror.toml}"
+CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-/etc/k0s/containerd.toml}"
 DAEMON_JSON="${DAEMON_JSON:-/etc/docker/daemon.json}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -68,23 +70,63 @@ server = "${UPSTREAM_URL}"
 EOF
 
 # --- 2. containerd config import ------------------------------------------
-# k0s reads /etc/k0s/containerd.d/*.toml as drop-in imports that extend
-# its generated containerd.toml. We need to point the CRI registry plugin
-# at the hosts directory above.
+# Two-step: (a) write a drop-in TOML under /etc/k0s/containerd.d/ that
+# carries the config_path pointing at HOSTS_DIR, then (b) ensure the main
+# containerd config has an `imports` line that pulls those drop-ins in.
+# k0s does NOT auto-import /etc/k0s/containerd.d/*.toml — the imports
+# directive has to be present in /etc/k0s/containerd.toml itself.
 
 echo "==> writing ${CONTAINERD_IMPORT}"
 mkdir -p "$(dirname "${CONTAINERD_IMPORT}")"
 backup "${CONTAINERD_IMPORT}"
 cat > "${CONTAINERD_IMPORT}" <<EOF
 # Managed by scripts/configure-k0s-containerd-mirror.sh
-# Tells containerd's CRI plugin to look for registry mirror config
-# (hosts.toml files) under ${HOSTS_DIR}.
+# Pulled into containerd's main config via the `imports` line in
+# ${CONTAINERD_CONFIG} (also added by this script).
 
 version = 2
 
 [plugins."io.containerd.grpc.v1.cri".registry]
   config_path = "${HOSTS_DIR}"
 EOF
+
+echo "==> ensuring imports line in ${CONTAINERD_CONFIG}"
+if [ ! -e "${CONTAINERD_CONFIG}" ]; then
+  echo "  ${CONTAINERD_CONFIG} not found — k0s may not have written it yet." >&2
+  echo "  Start k0s once (sudo systemctl start k0scontroller) so it generates" >&2
+  echo "  the file, then re-run this script." >&2
+  exit 1
+fi
+backup "${CONTAINERD_CONFIG}"
+python3 - "${CONTAINERD_CONFIG}" "${CONTAINERD_IMPORT_DIR}" <<'PY'
+import sys, glob, re
+path, import_dir = sys.argv[1], sys.argv[2]
+content = open(path).read()
+glob_path = f"{import_dir}/*.toml"
+import_line = f'imports = ["{glob_path}"]'
+
+# Top-level keys live above the first [section] header. Anything under a
+# [section] is scoped to that section and won't act as a top-level import.
+top_level, sep, rest = content.partition('\n[')
+
+# Already present?
+if re.search(r'^imports\s*=', top_level, flags=re.M):
+    # Make sure our glob is in the existing list.
+    m = re.search(r'^imports\s*=\s*(\[[^\]]*\])', top_level, flags=re.M)
+    if m and glob_path not in m.group(1):
+        new_list = m.group(1).rstrip(']').rstrip() + f', "{glob_path}"]'
+        top_level = top_level[:m.start(1)] + new_list + top_level[m.end(1):]
+        open(path, 'w').write(top_level + (sep + rest if sep else ''))
+        print(f"  appended {glob_path} to existing imports list")
+    else:
+        print("  imports line already includes our glob — no change")
+    sys.exit(0)
+
+# Insert imports as a new top-level key right before the first section.
+new_top = top_level.rstrip() + '\n' + import_line + '\n'
+open(path, 'w').write(new_top + (sep + rest if sep else ''))
+print(f"  inserted: {import_line}")
+PY
 
 # --- 3. docker daemon.json (for host-side docker push) --------------------
 # The host's docker daemon needs to know ${REGISTRY_HOST} is OK to push

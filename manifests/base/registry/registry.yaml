@@ -75,9 +75,15 @@ spec:
           ports:
             - containerPort: 5000
               hostPort: 5000
+              hostIP: 127.0.0.1
           env:
+            # Bind loopback only. With hostNetwork: true the pod shares the
+            # host's network stack, so 127.0.0.1:5000 is reachable from
+            # docker (push) and containerd (pull) on the same host but NOT
+            # from off-host. This blocks anyone who can route to the robot
+            # on :5000 from using the proxy creds for free DockerHub access.
             - name: REGISTRY_HTTP_ADDR
-              value: "0.0.0.0:5000"
+              value: "127.0.0.1:5000"
             - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
               value: /var/lib/registry
             - name: REGISTRY_PROXY_REMOTEURL

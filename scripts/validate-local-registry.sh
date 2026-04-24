@@ -29,6 +29,17 @@ skip() { printf '  \033[33mSKIP\033[0m  %s — %s\n' "$1" "$2"; skip_count=$((sk
 have() { command -v "$1" >/dev/null 2>&1; }
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
+# Resolve a kubectl command. Standalone kubectl wins; fall back to
+# `k0s kubectl` (k0s vendors kubectl) so the validator works on robots
+# that have only the k0s binary installed.
+KUBECTL=""
+if have kubectl; then
+  KUBECTL="kubectl"
+elif have k0s && k0s kubectl version --client >/dev/null 2>&1; then
+  KUBECTL="k0s kubectl"
+fi
+kc() { eval "$KUBECTL" "\"\$@\""; }
+
 # --- Docker (host push path) -----------------------------------------------
 
 section "Docker (host-side push path)"
@@ -67,21 +78,21 @@ fi
 
 section "Kubernetes registry pod"
 
-if ! have kubectl; then
-  skip "T05 kubectl present"             "kubectl not installed"
-  skip "T06 registry namespace exists"   "kubectl not installed"
-  skip "T07 registry pod Running"        "kubectl not installed"
-  skip "T08 registry storage dir exists" "kubectl not installed"
+if [ -z "$KUBECTL" ]; then
+  skip "T05 kubectl resolvable"           "neither kubectl nor 'k0s kubectl' available"
+  skip "T06 registry namespace exists"    "kubectl unavailable"
+  skip "T07 registry pod Running"         "kubectl unavailable"
+  skip "T08 registry storage dir exists"  "kubectl unavailable"
 else
-  pass "T05 kubectl present"
+  pass "T05 kubectl resolvable (using: ${KUBECTL})"
 
-  if kubectl get ns "$REGISTRY_NAMESPACE" >/dev/null 2>&1; then
+  if kc get ns "$REGISTRY_NAMESPACE" >/dev/null 2>&1; then
     pass "T06 namespace ${REGISTRY_NAMESPACE} exists"
   else
     fail "T06 namespace ${REGISTRY_NAMESPACE} missing"
   fi
 
-  if kubectl -n "$REGISTRY_NAMESPACE" get pod -l app=local-registry \
+  if kc -n "$REGISTRY_NAMESPACE" get pod -l app=local-registry \
        -o jsonpath='{.items[*].status.phase}' 2>/dev/null | grep -q Running; then
     pass "T07 registry pod Running in ${REGISTRY_NAMESPACE}"
   else
