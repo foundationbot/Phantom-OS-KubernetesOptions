@@ -16,10 +16,19 @@ images:
   # Locally-built positronic-control image. Bump newTag after each
   # `docker push localhost:5443/positronic-control:<sha>` on the robot.
   - name: localhost:5443/positronic-control
-    newTag: PLACEHOLDER
+    newTag: 0.2.44-cu130
+  # Note: phantom-models is consumed via an image: volume, NOT a
+  # container image. Kustomize's `images:` transformer doesn't rewrite
+  # those — the tag is pinned by patches/positronic-models-image.yaml
+  # below.
 patches:
   - path: patches/operator-ui-env.yaml
     target:
       kind: Deployment
       name: operator-ui
       namespace: argus
+  - path: patches/positronic-models-image.yaml
+    target:
+      kind: Deployment
+      name: positronic-control
+      namespace: positronic

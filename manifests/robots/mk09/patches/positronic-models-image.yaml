@@ -1,0 +1,24 @@
+# Pin the phantom-models image-volume reference for mk09.
+#
+# Why a patch instead of an `images:` transformer entry: Kustomize's
+# `images:` directive only rewrites `Container.image` references, not
+# the `volumes[].image.reference` field added in KEP-4639. Use a
+# strategic-merge patch with `$patch: replace` on the volume entry so
+# the override is unambiguous.
+#
+# Bump `reference:` after each `sudo python3 scripts/phantom-models/build.py`
+# on the robot — the script prints today's date as the resulting tag.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: positronic-control
+  namespace: positronic
+spec:
+  template:
+    spec:
+      volumes:
+        - name: models
+          $patch: replace
+          image:
+            reference: localhost:5443/phantom-models:2026-04-25
+            pullPolicy: IfNotPresent

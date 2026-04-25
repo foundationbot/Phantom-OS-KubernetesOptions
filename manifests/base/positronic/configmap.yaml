@@ -1,0 +1,20 @@
+# Tunable defaults for the positronic-control Deployment.
+# Consumed via `envFrom: configMapRef: positronic-config` in
+# manifests/base/positronic/positronic-control.yaml.
+#
+# Per-robot overrides go in manifests/robots/<robot>/patches/positronic-config.yaml
+# referenced from that robot's kustomization.yaml `patches:` block.
+#
+# Decisions (see docs/plans/2026-04-24-positronic-k0s-migration.md §4):
+#   D4 — ROS_DOMAIN_ID base default is "1". mk09 does not patch this.
+#   D5 — PHANTOM_CMD empty -> sleep infinity (interactive dev mode).
+#        Populate it to flip the pod into service mode and rollout
+#        restart the Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: positronic-config
+  namespace: positronic
+data:
+  ROS_DOMAIN_ID: "1"
+  PHANTOM_CMD: ""

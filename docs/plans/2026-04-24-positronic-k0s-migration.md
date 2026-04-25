@@ -475,19 +475,21 @@ Stage 1.
    - `envFrom: configMapRef: positronic-config` + hardcoded `env:` block
    - `args:` with the conditional `PHANTOM_CMD`-or-sleep-infinity shell
    - `workingDir: /src/workspace`
-   - 11 `hostPath` mounts (drop gradle, X11, and `/nix/store` from the
-     compose list; drop the host-side models mount in favor of the
-     image volume from §3.6a)
-   - `image:` volume for `phantom-models`, mounted at `/root/models`
+   - 10 `hostPath` mounts + 1 `image:` volume = 11 volumes total
+     (drop gradle, X11, and `/nix/store` from the compose list; replace
+     the host-side models mount with an `image:` volume per §3.6a)
    - `resources: 8 CPU / 16Gi`
 3. Update `manifests/base/positronic/kustomization.yaml` to include the
    ConfigMap.
 4. Update `manifests/robots/mk09/kustomization.yaml`:
-   - Add `images:` entries pinning `localhost:5443/positronic-control`
-     and `localhost:5443/phantom-models` to specific tags.
-   - mk09 does **not** patch the ConfigMap (per D4); the
-     `manifests/robots/mk09/patches/positronic-config.yaml` file is
-     left as a placeholder/template for future robots that need overrides.
+   - `images:` block: pin `localhost:5443/positronic-control` to a
+     real tag.
+   - `patches:` block: add a strategic-merge patch
+     (`patches/positronic-models-image.yaml`) that pins the
+     `phantom-models` `image:` volume reference. Kustomize's `images:`
+     transformer does **not** rewrite `volumes[].image.reference`, so a
+     patch is the cleanest way to bump the models tag per robot.
+   - mk09 does **not** patch the ConfigMap (per D4).
 5. Commit + push to the branch.
 
 ### Stage 1.1 — Prerequisite: `image:` volume support in k0s
