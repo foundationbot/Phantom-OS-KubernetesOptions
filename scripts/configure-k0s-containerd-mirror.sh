@@ -2,7 +2,7 @@
 # configure-k0s-containerd-mirror.sh
 #
 # One-time per-robot host-level bootstrap. Makes k0s's containerd + the
-# host's docker daemon use http://localhost:5000 as a priority-first
+# host's docker daemon use http://localhost:5443 as a priority-first
 # mirror for DockerHub, with registry-1.docker.io as fallback.
 #
 # Idempotent — safe to re-run. Backs up any file it overwrites to
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REGISTRY_HOST="${REGISTRY_HOST:-localhost:5000}"
+REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 UPSTREAM_URL="${UPSTREAM_URL:-https://registry-1.docker.io}"
 HOSTS_DIR="${HOSTS_DIR:-/etc/k0s/containerd.d/hosts}"
 CONTAINERD_IMPORT_DIR="${CONTAINERD_IMPORT_DIR:-/etc/k0s/containerd.d}"

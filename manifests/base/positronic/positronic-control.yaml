@@ -1,10 +1,10 @@
 # positronic-control — locally-compiled image pulled from the in-cluster
-# registry at localhost:5000. Robot-build loop:
+# registry at localhost:5443. Robot-build loop:
 #
 #   cd ~/development/foundation/imu-policy/positronic_control
 #   docker build -f docker/<chosen>.Dockerfile \
-#     -t localhost:5000/positronic-control:$(git rev-parse --short HEAD) .
-#   docker push localhost:5000/positronic-control:$(git rev-parse --short HEAD)
+#     -t localhost:5443/positronic-control:$(git rev-parse --short HEAD) .
+#   docker push localhost:5443/positronic-control:$(git rev-parse --short HEAD)
 #
 #   then bump newTag in manifests/robots/<robot>/kustomization.yaml and push.
 #
@@ -34,7 +34,7 @@ spec:
           # Tag is rewritten per-robot in manifests/robots/<robot>/kustomization.yaml
           # via Kustomize's images: transformer. PLACEHOLDER is never deployed as-is;
           # the overlay pins it to a real git SHA.
-          image: localhost:5000/positronic-control:PLACEHOLDER
+          image: localhost:5443/positronic-control:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           env:
             # Fill in real values before deploying. Keeping a few representative

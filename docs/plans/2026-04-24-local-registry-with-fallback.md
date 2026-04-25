@@ -62,7 +62,7 @@ to `registry-1.docker.io`. No mirror, no caching layer, no offline fallback.
 Add a local registry per robot such that:
 
 1. **Locally-compiled images** (the new `positronic_control` deployment, future
-   dev builds) can be pushed to `localhost:5000/...` and pulled by k0s without a
+   dev builds) can be pushed to `localhost:5443/...` and pulled by k0s without a
    round-trip through DockerHub.
 2. **Priority ordering for existing `foundationbot/*` images**: containerd tries
    the local registry first; on 404/unreachable, falls back to DockerHub. This
@@ -83,20 +83,20 @@ Add a local registry per robot such that:
 Run `registry:2` with `REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io`.
 The registry serves two roles simultaneously:
 
-- **Local origin** for `localhost:5000/positronic-control:<sha>` and similar
+- **Local origin** for `localhost:5443/positronic-control:<sha>` and similar
   locally-built images (direct push).
 - **Pull-through cache** for anything under `docker.io/*` — on a cache miss, the
   registry itself fetches from DockerHub, stores, and returns to the client.
 
-containerd hosts.toml then points `docker.io` lookups at `http://localhost:5000`
+containerd hosts.toml then points `docker.io` lookups at `http://localhost:5443`
 first, with `registry-1.docker.io` as a secondary host. So:
 
 1. Pod requests `foundationbot/argus.auth:qa`
 2. containerd resolves `docker.io/foundationbot/argus.auth:qa` → tries
-   `http://localhost:5000` first
+   `http://localhost:5443` first
 3. Cache hit → return. Cache miss → registry fetches from upstream, stores,
    returns.
-4. If `localhost:5000` itself is down, containerd falls through to
+4. If `localhost:5443` itself is down, containerd falls through to
    `registry-1.docker.io` directly (pod's own `imagePullSecrets` authenticates).
 
 **Pros:**
@@ -119,7 +119,7 @@ first, with `registry-1.docker.io` as a secondary host. So:
 
 ### Option B — containerd hosts.toml multi-host, no proxy
 
-Same `hosts.toml` fallback mechanism, but `localhost:5000` is a plain
+Same `hosts.toml` fallback mechanism, but `localhost:5443` is a plain
 (non-proxying) registry. We only push images there that we want to shadow.
 
 **Pros:**
@@ -136,7 +136,7 @@ Same `hosts.toml` fallback mechanism, but `localhost:5000` is a plain
 ### Option C — Local registry only for locally-built images (current trajectory)
 
 Keep all `foundationbot/*` on DockerHub. Only `positronic_control` and future
-dev builds live at `localhost:5000/positronic-control:<sha>`. No priority
+dev builds live at `localhost:5443/positronic-control:<sha>`. No priority
 ordering, no mirror configuration.
 
 **Pros:**
@@ -168,7 +168,7 @@ requirement.
 ```bash
 sudo mkdir -p /var/lib/registry
 docker run -d --restart=always --name registry \
-  -p 5000:5000 \
+  -p 5443:5443 \
   -v /var/lib/registry:/var/lib/registry \
   -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io \
   -e REGISTRY_PROXY_USERNAME="$DOCKERHUB_USER" \
@@ -185,10 +185,10 @@ Notes:
 
 `/etc/docker/daemon.json`:
 ```json
-{ "insecure-registries": ["localhost:5000"] }
+{ "insecure-registries": ["localhost:5443"] }
 ```
 Then `sudo systemctl restart docker`. Required for `docker push
-localhost:5000/...` to work without TLS.
+localhost:5443/...` to work without TLS.
 
 ### 5.3 Configure containerd registry mirrors
 
@@ -205,7 +205,7 @@ Contents of `docker.io/hosts.toml`:
 ```toml
 server = "https://registry-1.docker.io"
 
-[host."http://localhost:5000"]
+[host."http://localhost:5443"]
   capabilities = ["pull", "resolve"]
   skip_verify = true
   override_path = true
@@ -220,7 +220,7 @@ Key points:
 - The first `[host.*]` block is tried first. `override_path = true` is
   required when the mirror serves all repositories at its root path (standard
   pull-through cache behavior).
-- If `localhost:5000` returns 404 or is unreachable, containerd falls through
+- If `localhost:5443` returns 404 or is unreachable, containerd falls through
   to the next `[host.*]` block.
 
 Then ensure containerd's main config references this directory:
@@ -238,11 +238,11 @@ Restart k0s: `sudo k0s stop && sudo k0s start`.
 ```bash
 # Push a test image through the local registry
 docker pull hello-world
-docker tag hello-world localhost:5000/library/hello-world:test
-docker push localhost:5000/library/hello-world:test
+docker tag hello-world localhost:5443/library/hello-world:test
+docker push localhost:5443/library/hello-world:test
 
 # k0s containerd pulls it via the mirror
-sudo k0s ctr -n k8s.io images pull --plain-http localhost:5000/library/hello-world:test
+sudo k0s ctr -n k8s.io images pull --plain-http localhost:5443/library/hello-world:test
 
 # Check that an existing DockerHub image now goes through the mirror
 sudo k0s ctr -n k8s.io images pull docker.io/library/alpine:3.19
@@ -259,13 +259,13 @@ Per the prior discussion (now wired through the same flow):
 
 ```bash
 cd ~/development/foundation/imu-policy/positronic_control
-docker build -f docker/<chosen>.Dockerfile -t localhost:5000/positronic-control:$(git rev-parse --short HEAD) .
-docker push localhost:5000/positronic-control:$(git rev-parse --short HEAD)
+docker build -f docker/<chosen>.Dockerfile -t localhost:5443/positronic-control:$(git rev-parse --short HEAD) .
+docker push localhost:5443/positronic-control:$(git rev-parse --short HEAD)
 ```
 
 Manifest in `manifests/base/positronic/positronic-control.yaml`:
 ```yaml
-image: localhost:5000/positronic-control:PLACEHOLDER
+image: localhost:5443/positronic-control:PLACEHOLDER
 imagePullPolicy: IfNotPresent
 # no imagePullSecrets — local registry is unauthenticated
 ```
@@ -273,7 +273,7 @@ imagePullPolicy: IfNotPresent
 Robot overlay `manifests/robots/mk09/kustomization.yaml`:
 ```yaml
 images:
-  - name: localhost:5000/positronic-control
+  - name: localhost:5443/positronic-control
     newTag: <git-sha-of-pushed-image>
 ```
 
@@ -294,9 +294,9 @@ exercised in practice.
 
 1. **Shared DockerHub credential on the registry.**
    The mirror holds one credential that authenticates proxying of private images.
-   Anyone who can reach the robot on port 5000 effectively gets read access to
+   Anyone who can reach the robot on port 5443 effectively gets read access to
    every private `foundationbot/*` image. The registry should bind to
-   `127.0.0.1:5000`, not `0.0.0.0:5000`, unless there's a reason other hosts
+   `127.0.0.1:5443`, not `0.0.0.0:5443`, unless there's a reason other hosts
    need to pull from it.
 
 2. **`imagePullPolicy: Always` + cache staleness.**
@@ -324,7 +324,7 @@ exercised in practice.
 
 5. **Private IP for the registry.**
    If multiple robots ever share a registry (e.g. a site-level mirror), the
-   `localhost:5000` name has to become a real hostname. The containerd hosts
+   `localhost:5443` name has to become a real hostname. The containerd hosts
    config would need to match. Out of scope for this plan; flagging.
 
 6. **Argo CD reconciliation**
@@ -337,10 +337,10 @@ exercised in practice.
 
 ## 7. Validation checklist
 
-- [ ] Registry container up, listens on `127.0.0.1:5000`, storage path
+- [ ] Registry container up, listens on `127.0.0.1:5443`, storage path
       persisted.
-- [ ] `docker push localhost:5000/test:1` succeeds.
-- [ ] `sudo k0s ctr -n k8s.io images pull --plain-http localhost:5000/test:1`
+- [ ] `docker push localhost:5443/test:1` succeeds.
+- [ ] `sudo k0s ctr -n k8s.io images pull --plain-http localhost:5443/test:1`
       succeeds.
 - [ ] `sudo k0s ctr -n k8s.io images pull docker.io/library/alpine:3.19` —
       registry storage directory grows.
@@ -375,7 +375,7 @@ upstream connectivity.
 The path mapping is the key detail. A reference like `mongo:7` lives
 upstream at `docker.io/library/mongo:7`; containerd's hosts.toml rewrite
 requests `GET /v2/library/mongo/manifests/7` on our mirror. The prime
-script pushes to `localhost:5000/library/mongo:7` so the storage path
+script pushes to `localhost:5443/library/mongo:7` so the storage path
 matches exactly. Refs with an explicit namespace (`foundationbot/...`)
 and fully-qualified refs (`docker.io/...`, `registry-1.docker.io/...`)
 are normalized the same way.
@@ -402,7 +402,7 @@ sudo bash scripts/prime-registry-cache.sh --from-file scripts/priming-seed.txt
 Prerequisites:
 - `docker login` (for private `foundationbot/*` images — same credential
   used in `dockerhub-creds` works).
-- `REGISTRY_HOST=localhost:5000` reachable (the registry pod is up).
+- `REGISTRY_HOST=localhost:5443` reachable (the registry pod is up).
 
 The script is idempotent: re-priming an image that's already present is
 a near-no-op because docker push skips already-uploaded layers. Exit

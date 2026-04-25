@@ -269,7 +269,7 @@ sudo rm /usr/local/bin/k0s
 
 ## Local image registry (priority-first mirror)
 
-Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) that serves two roles at once: it hosts locally-compiled images like `positronic-control`, and it acts as a pull-through cache for DockerHub. containerd is configured to try `http://localhost:5000` first and fall back to `registry-1.docker.io` — so cached images survive a DockerHub outage and locally-pushed tags transparently shadow upstream.
+Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) that serves two roles at once: it hosts locally-compiled images like `positronic-control`, and it acts as a pull-through cache for DockerHub. containerd is configured to try `http://localhost:5443` first and fall back to `registry-1.docker.io` — so cached images survive a DockerHub outage and locally-pushed tags transparently shadow upstream.
 
 Full design lives in [docs/plans/2026-04-24-local-registry-with-fallback.md](docs/plans/2026-04-24-local-registry-with-fallback.md). The repo ships three scripts:
 
@@ -300,8 +300,8 @@ sudo bash scripts/validate-local-registry.sh
 ```bash
 cd ~/development/foundation/imu-policy/positronic_control
 TAG=$(git rev-parse --short HEAD)
-docker build -f docker/<chosen>.Dockerfile -t localhost:5000/positronic-control:$TAG .
-docker push localhost:5000/positronic-control:$TAG
+docker build -f docker/<chosen>.Dockerfile -t localhost:5443/positronic-control:$TAG .
+docker push localhost:5443/positronic-control:$TAG
 # then bump newTag in manifests/robots/<robot>/kustomization.yaml and push —
 # ArgoCD rolls the pod automatically
 ```

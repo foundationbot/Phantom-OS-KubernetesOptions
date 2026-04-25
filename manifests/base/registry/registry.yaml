@@ -2,8 +2,10 @@
 #
 # See docs/plans/2026-04-24-local-registry-with-fallback.md for the full
 # design. Summary:
-#   - host-network pod on :5000, reachable as http://localhost:5000 from
-#     both docker (push) and k0s's containerd (pull)
+#   - host-network pod on :5443, reachable as http://localhost:5443 from
+#     both docker (push) and k0s's containerd (pull). Port 5443 (not the
+#     registry default 5000) because phantom-control-api.service holds
+#     :5000 on this robot.
 #   - REGISTRY_PROXY_REMOTEURL makes this a pull-through cache for
 #     registry-1.docker.io — first pull is a miss (hits upstream, caches),
 #     subsequent pulls are hits
@@ -57,7 +59,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate          # hostPath PV is RWO + hostNetwork :5000 — no rolling overlap
+    type: Recreate          # hostPath PV is RWO + hostNetwork :5443 — no rolling overlap
   selector:
     matchLabels:
       app: local-registry
@@ -73,17 +75,17 @@ spec:
           image: registry:2
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 5000
-              hostPort: 5000
+            - containerPort: 5443
+              hostPort: 5443
               hostIP: 127.0.0.1
           env:
             # Bind loopback only. With hostNetwork: true the pod shares the
-            # host's network stack, so 127.0.0.1:5000 is reachable from
+            # host's network stack, so 127.0.0.1:5443 is reachable from
             # docker (push) and containerd (pull) on the same host but NOT
             # from off-host. This blocks anyone who can route to the robot
-            # on :5000 from using the proxy creds for free DockerHub access.
+            # on :5443 from using the proxy creds for free DockerHub access.
             - name: REGISTRY_HTTP_ADDR
-              value: "127.0.0.1:5000"
+              value: "127.0.0.1:5443"
             - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
               value: /var/lib/registry
             - name: REGISTRY_PROXY_REMOTEURL
@@ -106,13 +108,20 @@ spec:
           readinessProbe:
             httpGet:
               path: /v2/
-              port: 5000
+              port: 5443
+              # Registry binds 127.0.0.1 only (see REGISTRY_HTTP_ADDR
+              # above). With hostNetwork: true, kubelet's default probe
+              # host is the pod IP = node IP, which the registry isn't
+              # listening on. Override to loopback so the probe actually
+              # reaches the registry.
+              host: 127.0.0.1
             initialDelaySeconds: 2
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /v2/
-              port: 5000
+              port: 5443
+              host: 127.0.0.1
             initialDelaySeconds: 15
             periodSeconds: 20
           resources:

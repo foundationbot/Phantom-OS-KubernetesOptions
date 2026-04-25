@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # prime-registry-cache.sh
 #
-# Pre-populates the local registry at localhost:5000 by pulling images
+# Pre-populates the local registry at localhost:5443 by pulling images
 # from upstream (DockerHub) and pushing them into the local registry
 # under their docker.io-equivalent paths.
 #
@@ -32,13 +32,13 @@
 # Prerequisites:
 #   - docker running, logged in to DockerHub for private foundationbot/* images
 #     (docker login)
-#   - registry:2 reachable at ${REGISTRY_HOST} (default localhost:5000)
+#   - registry:2 reachable at ${REGISTRY_HOST} (default localhost:5443)
 #   - /etc/docker/daemon.json lists ${REGISTRY_HOST} as an insecure-registry
 #     (configure-k0s-containerd-mirror.sh handles this)
 
 set -u -o pipefail
 
-REGISTRY_HOST="${REGISTRY_HOST:-localhost:5000}"
+REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 
 ok_count=0
 fail_count=0
@@ -49,10 +49,10 @@ fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail_count=$((fail_count + 1
 # Normalize an image ref into the path the local registry should serve it
 # under, so containerd's mirror finds it when pulling docker.io/<x>.
 #
-#   mongo:7                         -> localhost:5000/library/mongo:7
-#   foundationbot/argus.auth:qa     -> localhost:5000/foundationbot/argus.auth:qa
-#   docker.io/library/alpine:3.19   -> localhost:5000/library/alpine:3.19
-#   localhost:5000/foo:bar          -> localhost:5000/foo:bar     (unchanged)
+#   mongo:7                         -> localhost:5443/library/mongo:7
+#   foundationbot/argus.auth:qa     -> localhost:5443/foundationbot/argus.auth:qa
+#   docker.io/library/alpine:3.19   -> localhost:5443/library/alpine:3.19
+#   localhost:5443/foo:bar          -> localhost:5443/foo:bar     (unchanged)
 normalize_target() {
   local img="$1"
 
@@ -82,7 +82,7 @@ prime_one() {
   local target
   target="$(normalize_target "$src")"
 
-  # Already a localhost:5000/* ref? Nothing to pull from upstream.
+  # Already a localhost:5443/* ref? Nothing to pull from upstream.
   if [[ "$src" == "${REGISTRY_HOST}/"* ]]; then
     fail "${src} — already points at local registry; nothing to prime"
     return
@@ -117,7 +117,7 @@ collect_from_cluster() {
     exit 2
   fi
   # List every container image in every namespace, deduped. Filters out
-  # localhost:5000/* entries (no point re-priming) and empty strings.
+  # localhost:5443/* entries (no point re-priming) and empty strings.
   $kubectl_cmd get pods --all-namespaces \
     -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' \
     2>/dev/null \

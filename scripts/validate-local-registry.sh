@@ -11,7 +11,7 @@
 
 set -u -o pipefail
 
-REGISTRY_HOST="${REGISTRY_HOST:-localhost:5000}"
+REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 REGISTRY_STORAGE="${REGISTRY_STORAGE:-/var/lib/k0s-data/registry}"
 REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-registry}"
 CONTAINERD_HOSTS_DIR="${CONTAINERD_HOSTS_DIR:-/etc/k0s/containerd.d/hosts}"
