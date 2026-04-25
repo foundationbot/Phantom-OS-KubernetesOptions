@@ -1,2 +1,4 @@
 argocd
 .obsidian/
+__pycache__/
+*.pyc

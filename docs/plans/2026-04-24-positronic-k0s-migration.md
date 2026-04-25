@@ -316,24 +316,36 @@ git rather than `rsync`-ing a directory onto each machine.
 - Tag-bump-in-git replaces ad-hoc edits to `/root/phantom-models-merged`.
 - Image content is content-addressed (digests) — drift is detectable.
 
-**Build/push loop** (mirrors the positronic-control loop):
+**Build/push loop** — the build is wrapped by
+[`scripts/phantom-models/build.py`](../../scripts/phantom-models/build.py)
+which calls `docker build` against the `FROM scratch` Dockerfile in the
+same directory and then pushes:
 
 ```bash
-cd ~/development/foundation/imu-policy/positronic_control
-docker build -f docker/phantom-models.Dockerfile \
-  -t localhost:5443/phantom-models:<tag> /root/phantom-models-merged
-docker push localhost:5443/phantom-models:<tag>
+# Default: bundle /root/phantom-models-merged with today's date as the tag
+sudo python3 scripts/phantom-models/build.py
+
+# Explicit per-model curation via a YAML manifest
+sudo python3 scripts/phantom-models/build.py \
+  --manifest scripts/phantom-models/models.example.yaml \
+  --tag 2026-04-25
 ```
 
-Skeleton `phantom-models.Dockerfile`:
+The Dockerfile is intentionally trivial:
 
 ```Dockerfile
 FROM scratch
-COPY <source-path> /models
+COPY . /models
 ```
 
 `FROM scratch` is fine — the image is mounted as a read-only volume,
-never executed. There's no userland to run.
+never executed. The build context is either the source directory passed
+to `--source` (zero-copy `docker build /path/to/dir`) or a temp dir
+assembled from the `--manifest` entries.
+
+**Tag scheme** — date-based (`YYYY-MM-DD`), set as the script's default
+via `today_tag()`. Override with `--tag` if multiple builds happen in a
+single day or if you'd rather identify by content hash / version.
 
 **Pod consumption** (illustrative; final shape in the manifest):
 
@@ -388,10 +400,7 @@ primary path. Cost: ~37 GB copy at every pod start.
 `manifests/robots/<robot>/kustomization.yaml`. Same mechanism the
 positronic-control image already uses.
 
-**Tag scheme** (separate decision, not prescribed here): could be a
-date (`2026-04-25`), a content hash of the source tree, or a model-set
-version identifier (`models-v0.4.1`). Pick when building the first
-image.
+(Tag scheme is set via `build.py`'s default; documented above.)
 
 ### 3.7 Resources
 
@@ -444,21 +453,19 @@ branch as the base.
 The pod cannot start without an image to mount. Before any manifest
 changes, build the first `phantom-models` image from whatever currently
 lives at `/root/phantom-models-merged` on mk09 and push it to the local
-registry:
+registry — wrapper script does both:
 
 ```bash
-cd ~/development/foundation/imu-policy/positronic_control
-# Add this Dockerfile to the source repo first (see §3.6a)
-docker build -f docker/phantom-models.Dockerfile \
-  -t localhost:5443/phantom-models:<tag> /root/phantom-models-merged
-docker push localhost:5443/phantom-models:<tag>
+cd ~/development/foundation/platformOsDepl/Phantom-OS-KubernetesOptions
+sudo python3 scripts/phantom-models/build.py
 
 # Verify
 curl -fs http://localhost:5443/v2/phantom-models/tags/list
 ```
 
-Pick the tag scheme (date / hash / version) at this point. Whatever you
-pick lands in the mk09 overlay's `images:` block in Stage 1.
+Tag defaults to today's date (`YYYY-MM-DD`); override with `--tag` if
+needed. The same tag lands in the mk09 overlay's `images:` block in
+Stage 1.
 
 ### Stage 1 — Land the manifests on the branch (no cluster change)
 
