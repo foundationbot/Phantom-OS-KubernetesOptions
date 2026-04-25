@@ -319,13 +319,19 @@ git rather than `rsync`-ing a directory onto each machine.
 **Build/push loop** — the build is wrapped by
 [`scripts/phantom-models/build.py`](../../scripts/phantom-models/build.py)
 which calls `docker build` against the `FROM scratch` Dockerfile in the
-same directory and then pushes:
+same directory and then pushes. Three modes:
 
 ```bash
-# Default: bundle /root/phantom-models-merged with today's date as the tag
+# Default: interactive. Prompts for a directory to scan
+# (default /root/phantom-models-merged), lists its top-level entries
+# with sizes, and asks which to include. Each chosen entry lands at
+# /models/<entry-name> in the resulting image.
 sudo python3 scripts/phantom-models/build.py
 
-# Explicit per-model curation via a YAML manifest
+# Whole-tree bundle (skips both prompts):
+sudo python3 scripts/phantom-models/build.py --all
+
+# Explicit per-model curation via a YAML manifest:
 sudo python3 scripts/phantom-models/build.py \
   --manifest scripts/phantom-models/models.example.yaml \
   --tag 2026-04-25
@@ -339,9 +345,10 @@ COPY . /models
 ```
 
 `FROM scratch` is fine — the image is mounted as a read-only volume,
-never executed. The build context is either the source directory passed
-to `--source` (zero-copy `docker build /path/to/dir`) or a temp dir
-assembled from the `--manifest` entries.
+never executed. The build context is either the root directory (zero-copy
+`docker build /path/to/dir`) or a temp dir assembled from the chosen
+entries / manifest entries (cheap copy of just the selected items, not
+the whole tree).
 
 **Tag scheme** — date-based (`YYYY-MM-DD`), set as the script's default
 via `today_tag()`. Override with `--tag` if multiple builds happen in a
