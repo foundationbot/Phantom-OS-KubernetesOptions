@@ -23,7 +23,11 @@ metadata:
   name: k0s-registry-pv
 spec:
   capacity:
-    storage: 50Gi
+    # 150Gi is enough headroom for a few foundationbot/phantom-cuda variants
+    # (~37GB each at the time of writing) plus the rest of the cluster's
+    # primed images. hostPath PVs aren't enforced by k8s — the real cap is
+    # whatever the host has at /var/lib/registry. Bump if the host disk grows.
+    storage: 150Gi
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
@@ -46,7 +50,7 @@ spec:
   storageClassName: ""
   resources:
     requests:
-      storage: 50Gi
+      storage: 150Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
