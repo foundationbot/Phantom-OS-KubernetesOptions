@@ -292,12 +292,16 @@ exercised in practice.
 
 ## 6. Risks and open questions
 
-1. **Shared DockerHub credential on the registry.**
-   The mirror holds one credential that authenticates proxying of private images.
-   Anyone who can reach the robot on port 5443 effectively gets read access to
-   every private `foundationbot/*` image. The registry should bind to
-   `127.0.0.1:5443`, not `0.0.0.0:5443`, unless there's a reason other hosts
-   need to pull from it.
+1. ~~**Shared DockerHub credential on the registry.**~~ Resolved by the
+   pivot to plain registry mode (Section 9.1) — the registry no longer
+   holds DockerHub credentials. Public images are served from primed
+   layers; private images fall through to upstream DockerHub using each
+   pod's existing per-namespace `dockerhub-creds`.
+
+   Loopback bind (`127.0.0.1:5443`) is kept anyway so off-host pulls
+   from the local registry are blocked even for the public images we've
+   primed. With `hostNetwork: true`, docker (push) and containerd (pull)
+   both reach the registry via loopback and are unaffected.
 
 2. **`imagePullPolicy: Always` + cache staleness.**
    Current manifests set `Always`, which sends a manifest HEAD on every pod
@@ -453,7 +457,7 @@ else in this repo:
 
 | Layer | Landed as |
 |---|---|
-| Registry pod + storage | `manifests/base/registry/{namespace,registry,kustomization}.yaml` — Deployment with `hostNetwork: true`, hostPath PV at `/var/lib/registry`, `REGISTRY_PROXY_REMOTEURL` env, optional `dockerhub-proxy-creds` Secret |
+| Registry pod + storage | `manifests/base/registry/{namespace,registry,kustomization}.yaml` — Deployment named `k0s-registry` with `hostNetwork: true`, port 5443, hostPath PV at `/var/lib/registry`. **Plain registry mode** (no `REGISTRY_PROXY_*`) — see Section 9.1 below. |
 | containerd mirror config + docker daemon.json | `scripts/configure-k0s-containerd-mirror.sh` — one-time per-robot, idempotent, writes `hosts.toml` + containerd import TOML + daemon.json, restarts services |
 | Validation | `scripts/validate-local-registry.sh` — 13 checks across docker / k8s / containerd layers; exit code = failure count |
 | First consumer | `manifests/base/positronic/{namespace,positronic-control,kustomization}.yaml`, wired into `manifests/robots/mk09/kustomization.yaml` |
@@ -463,16 +467,50 @@ scope (per `terraform/README.md:42-48`) is "kubeconfig-only bootstrap";
 host-level containerd/docker config sits outside that boundary and
 matches the same "install manually per node" model as k0s itself.
 
+### 9.1 Why plain registry instead of pull-through cache (Option A revised)
+
+Section 3 / Section 5.1 of this plan proposed `registry:2` in proxy mode
+(`REGISTRY_PROXY_REMOTEURL`) so the same endpoint would both serve pushes
+of locally-built images and act as a pull-through cache for DockerHub.
+That doesn't work: **Distribution `registry:2` is read-only when in
+proxy mode** (documented limitation of the upstream registry). On first
+robot bringup `docker push localhost:5443/positronic-control:<sha>`
+hung in the retry loop and `kubectl logs --previous` confirmed pushes
+were rejected.
+
+Three options were considered to recover:
+
+1. **Plain `registry:2` + manual priming** — drop proxy mode; populate
+   the cache via `scripts/prime-registry-cache.sh`. Loses auto-caching,
+   keeps push capability.
+2. **Two registry pods** — one in proxy mode, one in plain mode. Keeps
+   both features but doubles the moving parts.
+3. **Switch image to Zot** (CNCF Sandbox) — supports proxy + push on
+   one endpoint via its `sync` extension. Adds a less-known component.
+
+We landed on **option 1** because:
+- Push is non-negotiable for the `positronic-control` pipeline.
+- Auto-caching is a nice-to-have replaceable by a cron-scheduled prime.
+- The robot is on a private network and is generally online when first
+  pulling new images, so cold-cache + DockerHub-down is rare.
+- Fewer moving parts; no DockerHub credentials needed for the registry
+  pod itself (the per-namespace `dockerhub-creds` already handles the
+  fallthrough auth path).
+
+The mirror chain in `hosts.toml` is unchanged: `localhost:5443` first,
+fall through to `registry-1.docker.io` on 404. With plain mode, 404 is
+the standard response for any unprimed image — fallthrough handles it.
+
 ### What still needs to happen on the robot
 
 1. `git pull` this repo onto the robot.
 2. `sudo bash scripts/configure-k0s-containerd-mirror.sh` — writes host
    config, restarts docker + k0s. Takes ~30s.
-3. `kubectl create secret generic dockerhub-proxy-creds -n registry
-   --from-literal=username=... --from-literal=password=...` — optional;
-   without it, proxying private `foundationbot/*` images will 401 and
-   containerd falls through to DockerHub directly.
-4. ArgoCD reconciles `manifests/base/registry/` automatically (it's
+3. ArgoCD reconciles `manifests/base/registry/` automatically (it's
    included via `manifests/robots/mk09/kustomization.yaml`).
-5. `sudo bash scripts/validate-local-registry.sh` — must print `0 failed`.
-6. Build + push `positronic-control`, bump `newTag` in the mk09 overlay.
+4. `docker login` so the prime script can pull private `foundationbot/*`
+   images.
+5. `sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/`
+   to populate the cache with everything the cluster references.
+6. `sudo bash scripts/validate-local-registry.sh` — must print `0 failed`.
+7. Build + push `positronic-control`, bump `newTag` in the mk09 overlay.

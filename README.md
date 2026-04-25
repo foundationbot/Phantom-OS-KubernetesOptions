@@ -269,7 +269,7 @@ sudo rm /usr/local/bin/k0s
 
 ## Local image registry (priority-first mirror)
 
-Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) that serves two roles at once: it hosts locally-compiled images like `positronic-control`, and it acts as a pull-through cache for DockerHub. containerd is configured to try `http://localhost:5443` first and fall back to `registry-1.docker.io` — so cached images survive a DockerHub outage and locally-pushed tags transparently shadow upstream.
+Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) named `k0s-registry` that hosts locally-compiled images like `positronic-control` and serves as a manually-primed cache for DockerHub-sourced images. containerd is configured to try `http://localhost:5443` first and fall back to `registry-1.docker.io` — so primed images survive a DockerHub outage and locally-pushed tags transparently shadow upstream. (Auto-pull-through caching is intentionally *not* enabled because Distribution `registry:2` is read-only in proxy mode, which would block locally-built image pushes; the prime script fills the gap.)
 
 Full design lives in [docs/plans/2026-04-24-local-registry-with-fallback.md](docs/plans/2026-04-24-local-registry-with-fallback.md). The repo ships three scripts:
 
@@ -284,13 +284,8 @@ Full design lives in [docs/plans/2026-04-24-local-registry-with-fallback.md](doc
 ```bash
 git pull
 sudo bash scripts/configure-k0s-containerd-mirror.sh
-# optional: give the pull-through cache DockerHub credentials so it can
-# proxy private foundationbot/* images too
-kubectl create secret generic dockerhub-proxy-creds --namespace registry \
-  --from-literal=username=YOUR_DOCKERHUB_USERNAME \
-  --from-literal=password=YOUR_DOCKERHUB_TOKEN
 # wait for ArgoCD to sync manifests/base/registry (~30s)
-docker login                  # so the prime script can pull private images
+docker login                  # so the prime script can pull private foundationbot/* images
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 sudo bash scripts/validate-local-registry.sh
 ```

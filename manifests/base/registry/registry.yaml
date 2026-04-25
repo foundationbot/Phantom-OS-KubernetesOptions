@@ -1,29 +1,26 @@
-# Local container registry + pull-through cache for DockerHub.
+# k0s-registry — plain OCI registry serving locally-built images on the
+# robot. Pull-through caching of DockerHub is intentionally NOT enabled,
+# because Distribution registry:2 is read-only when REGISTRY_PROXY_REMOTEURL
+# is set, which would block `docker push` of locally-built images
+# (positronic-control etc.). Instead, the cache is populated by
+# scripts/prime-registry-cache.sh on a manual or scheduled basis.
 #
 # See docs/plans/2026-04-24-local-registry-with-fallback.md for the full
-# design. Summary:
-#   - host-network pod on :5443, reachable as http://localhost:5443 from
-#     both docker (push) and k0s's containerd (pull). Port 5443 (not the
-#     registry default 5000) because phantom-control-api.service holds
-#     :5000 on this robot.
-#   - REGISTRY_PROXY_REMOTEURL makes this a pull-through cache for
-#     registry-1.docker.io — first pull is a miss (hits upstream, caches),
-#     subsequent pulls are hits
-#   - DockerHub creds come from Secret dockerhub-proxy-creds, created
-#     manually per cluster (not in git). Without it, the proxy still works
-#     for public images; private foundationbot/* images will 401 and
-#     containerd falls through to registry-1.docker.io directly.
+# design and the proxy-vs-push tradeoff.
 #
-# Bootstrap:
-#   kubectl create secret generic dockerhub-proxy-creds \
-#     --namespace registry \
-#     --from-literal=username=YOUR_DOCKERHUB_USERNAME \
-#     --from-literal=password=YOUR_DOCKERHUB_TOKEN
+# Summary:
+#   - host-network pod on :5443, bound to 127.0.0.1 only — reachable from
+#     docker (push) and containerd (pull) on the same host but not from
+#     off-host. Port 5443 (not registry default 5000) because
+#     phantom-control-api.service holds :5000 on this robot.
+#   - containerd's hosts.toml routes docker.io/* through this registry
+#     first; on 404 it falls through to registry-1.docker.io directly,
+#     so anything not primed continues to pull from upstream.
 
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: local-registry-pv
+  name: k0s-registry-pv
 spec:
   capacity:
     storage: 50Gi
@@ -36,12 +33,12 @@ spec:
     type: DirectoryOrCreate
   claimRef:
     namespace: registry
-    name: local-registry-pvc
+    name: k0s-registry-pvc
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: local-registry-pvc
+  name: k0s-registry-pvc
   namespace: registry
 spec:
   accessModes:
@@ -54,7 +51,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: local-registry
+  name: k0s-registry
   namespace: registry
 spec:
   replicas: 1
@@ -62,11 +59,11 @@ spec:
     type: Recreate          # hostPath PV is RWO + hostNetwork :5443 — no rolling overlap
   selector:
     matchLabels:
-      app: local-registry
+      app: k0s-registry
   template:
     metadata:
       labels:
-        app: local-registry
+        app: k0s-registry
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -88,20 +85,6 @@ spec:
               value: "127.0.0.1:5443"
             - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
               value: /var/lib/registry
-            - name: REGISTRY_PROXY_REMOTEURL
-              value: https://registry-1.docker.io
-            - name: REGISTRY_PROXY_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: dockerhub-proxy-creds
-                  key: username
-                  optional: true
-            - name: REGISTRY_PROXY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: dockerhub-proxy-creds
-                  key: password
-                  optional: true
           volumeMounts:
             - name: storage
               mountPath: /var/lib/registry
@@ -134,4 +117,4 @@ spec:
       volumes:
         - name: storage
           persistentVolumeClaim:
-            claimName: local-registry-pvc
+            claimName: k0s-registry-pvc
