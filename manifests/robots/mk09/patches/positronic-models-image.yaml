@@ -2,9 +2,12 @@
 #
 # Why a patch instead of an `images:` transformer entry: Kustomize's
 # `images:` directive only rewrites `Container.image` references, not
-# the `volumes[].image.reference` field added in KEP-4639. Use a
-# strategic-merge patch with `$patch: replace` on the volume entry so
-# the override is unambiguous.
+# the `volumes[].image.reference` field added in KEP-4639. A
+# strategic-merge patch matched by volume `name` is the canonical way
+# to override these.
+#
+# Onboarding a new robot: copy this file to manifests/robots/<robot>/patches/
+# and bump the reference tag. No base manifest edits required.
 #
 # Bump `reference:` after each `sudo python3 scripts/phantom-models/build.py`
 # on the robot — the script prints today's date as the resulting tag.
@@ -17,8 +20,12 @@ spec:
   template:
     spec:
       volumes:
+        # Strategic-merge identifies the volume by `name`; the inner
+        # fields (image.reference, image.pullPolicy) merge in. Avoid
+        # `$patch: replace` here — it's redundant for a same-shape
+        # merge and can no-op on schemas the kustomize build doesn't
+        # know about.
         - name: models
-          $patch: replace
           image:
             reference: localhost:5443/phantom-models:2026-04-25
             pullPolicy: IfNotPresent
