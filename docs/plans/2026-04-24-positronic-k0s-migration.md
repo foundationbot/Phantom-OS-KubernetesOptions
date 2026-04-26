@@ -356,22 +356,39 @@ single day or if you'd rather identify by content hash / version.
 
 **Pod consumption** (illustrative; final shape in the manifest):
 
+The pod uses an initContainer to copy `/models` from the phantom-models
+image into a shared `emptyDir`, which the main container mounts at
+`/root/models`. The phantom-models image is built `FROM busybox:1.36.1`
+so the initContainer has `sh` + `cp`.
+
 ```yaml
-volumes:
-  - name: models
-    image:
-      reference: localhost:5443/phantom-models:<tag>
-      pullPolicy: IfNotPresent
-containers:
-  - name: positronic-control
-    volumeMounts:
-      - name: models
-        mountPath: /root/models
-        readOnly: true
+spec:
+  initContainers:
+    - name: load-models
+      image: localhost:5443/phantom-models:<tag>
+      command: ["sh", "-c", "cp -a /models/. /shared/"]
+      volumeMounts:
+        - name: models
+          mountPath: /shared
+  containers:
+    - name: positronic-control
+      volumeMounts:
+        - name: models
+          mountPath: /root/models
+          readOnly: true
+  volumes:
+    - name: models
+      emptyDir: {}
 ```
 
-Zero copy at pod start: the bytes live in containerd's content store
-and the pod gets a read-only view.
+This is the §3.6a fallback path. The native `image:` volume source
+(KEP-4639) was attempted first but containerd in k0s 1.35.3 doesn't
+fully support it (kubelet pulls the image, containerd then fails OCI
+spec generation with `mkdir ""`). The fallback adds a per-pod-start
+copy cost (~5–20 s for ~1–37 GB depending on the bundle size) but
+flows the image tag through Kustomize's standard `images:` transformer
+— the initContainer is a container, so the per-robot `images:` block
+in the overlay rewrites it the same way as the main container.
 
 **Prerequisite check (must verify before §3.6a applies):**
 
@@ -439,7 +456,7 @@ All open questions from the original draft are resolved (review session
 |----|----------|-------|
 | **D1** | Drop `/nix/store` mount | Binaries on this robot no longer reference `/nix/store` paths. |
 | **D2** | Models served from a dedicated container image | Decouples models from per-robot host paths; tag bumps in git replace `rsync`/manual edits. |
-| **D3** | Mechanism: native Kubernetes `image:` volume (KEP-4639) | Zero-copy, declarative. Requires k0s with k8s ≥ 1.31 + `ImageVolume` feature gate. Fallback: initContainer + emptyDir copy. |
+| **D3** | ~~Mechanism: native Kubernetes `image:` volume (KEP-4639)~~ → **revised 2026-04-26**: initContainer + emptyDir copy (the §3.6a fallback). k0s 1.35.3's containerd failed at OCI spec generation when mounting an `image:` volume (`failed to mkdir ""`); kubelet pulled the image but containerd couldn't translate it into a mountable rootfs. Switch back to native image volume when k0s/containerd catches up. |
 | **D4** | mk09 `ROS_DOMAIN_ID` = base default (1) | Base ConfigMap ships `ROS_DOMAIN_ID: "1"`. mk09 overlay does **not** patch it. |
 | **D5** | `PHANTOM_CMD` → single Deployment toggled via ConfigMap | One `positronic-control` Deployment. Empty `PHANTOM_CMD` = `sleep infinity`; populated = service launch. Mode change = ConfigMap edit + `kubectl rollout restart`. |
 | **D6** | CPU pinning → trust k0s CPU Manager | Guaranteed QoS + cluster reserved-core policy in `k0s.yaml`. No explicit `cpuset` on the pod. |

@@ -2,15 +2,19 @@
 # in imu-policy/positronic_control/docker/development.docker-compose.yaml.
 # Source of truth: docs/plans/2026-04-24-positronic-k0s-migration.md.
 #
-# Two images flow into this pod:
+# Two images flow into this pod, both rewritten per-robot via Kustomize's
+# `images:` transformer in the overlay:
 #   1. localhost:5443/positronic-control:<tag>  — the executing image
 #      (currently foundationbot/phantom-cuda retagged for the local registry).
-#      Tag rewritten per-robot via Kustomize's `images:` transformer.
-#   2. localhost:5443/phantom-models:<tag>      — pure-data image, mounted
-#      at /root/models via Kubernetes' image: volume source (KEP-4639,
-#      GA in k8s 1.33+). Tag rewritten via a per-robot patch in the
-#      overlay's `patches:` block — `images:` does NOT rewrite the
-#      `volumes[].image.reference` field.
+#   2. localhost:5443/phantom-models:<tag>      — busybox-based image whose
+#      /models tree gets copied into a shared emptyDir by the load-models
+#      initContainer; the main container mounts that emptyDir at /root/models.
+#
+# This uses the §3.6a fallback (initContainer + emptyDir) rather than the
+# native image: volume because k0s 1.35.3's containerd has only partial
+# image-volume support (fails with `mkdir ""` at OCI spec generation).
+# When/if k0s catches up, switch back to the image: volume — the manifest
+# diff is small.
 #
 # Default mode: PHANTOM_CMD empty → `sleep infinity`. Operator execs in
 # for interactive ROS work. Set PHANTOM_CMD in the ConfigMap to flip
@@ -35,6 +39,31 @@ spec:
       hostNetwork: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+        # Copy /models from the phantom-models image into the shared
+        # emptyDir, which the main container then mounts at /root/models.
+        # busybox provides sh + cp; phantom-models is built FROM busybox
+        # for exactly this purpose. The init image's tag is rewritten
+        # per-robot by the same Kustomize `images:` transformer that
+        # handles the main container.
+        - name: load-models
+          image: localhost:5443/phantom-models:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "==> copying /models -> /shared"
+              cp -a /models/. /shared/
+              echo "==> done; /shared contents:"
+              ls -la /shared | head
+          volumeMounts:
+            - name: models
+              mountPath: /shared
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
       containers:
         - name: positronic-control
           image: localhost:5443/positronic-control:PLACEHOLDER
@@ -87,7 +116,7 @@ spec:
             - { name: trainground,    mountPath: /trainground }
             - { name: recordings,     mountPath: /recordings }
             - { name: torch-hub,      mountPath: /root/.cache/torch/hub }
-            # Models — image volume (KEP-4639), not a hostPath
+            # Models — populated by the load-models initContainer.
             - { name: models,         mountPath: /root/models, readOnly: true }
           resources:
             # 8 CPU / 16Gi as a starting point (plan §3.7). Guaranteed
@@ -127,11 +156,10 @@ spec:
           hostPath: { path: /root/recordings,                               type: DirectoryOrCreate }
         - name: torch-hub
           hostPath: { path: /data/torch,                                    type: DirectoryOrCreate }
-        # Models bundled as their own image — see scripts/phantom-models/.
-        # The `reference:` PLACEHOLDER is rewritten per-robot via a
-        # strategic-merge patch in the overlay; Kustomize's images:
-        # transformer does not touch image-volume references.
+        # Models — emptyDir populated by the load-models initContainer
+        # which copies /models from the phantom-models image. emptyDir
+        # lives on the kubelet's pod-volumes disk so it disappears with
+        # the pod; that's fine here because the source-of-truth is the
+        # registry-pinned image and re-population is fast.
         - name: models
-          image:
-            reference: localhost:5443/phantom-models:PLACEHOLDER
-            pullPolicy: IfNotPresent
+          emptyDir: {}
