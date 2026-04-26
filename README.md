@@ -303,6 +303,31 @@ docker push localhost:5443/positronic-control:$TAG
 
 ---
 
+## positronic-control deployment
+
+The positronic-control stack runs as a single Kubernetes Deployment in
+the `positronic` namespace. It pulls two images from the local registry
+(`positronic-control` for the executing container, `phantom-models` for
+the bundled weights), uses an initContainer + emptyDir to deliver the
+models, and gets GPU access via `runtimeClassName: nvidia`. Default
+mode is `sleep infinity` so operators can `kubectl exec` in for
+interactive ROS work; flip the `PHANTOM_CMD` key in the
+`positronic-config` ConfigMap to run as a service.
+
+- **How do I do X?** — [docs/positronic-cheatsheet.md](docs/positronic-cheatsheet.md):
+  build/push images, bump tags, deploy, sanity-check, toggle
+  `PHANTOM_CMD`, diagnose failures, registry ops.
+- **Why does it look this way?** — [docs/positronic-design.md](docs/positronic-design.md):
+  the two repos, three images, storage layers, pod composition,
+  per-robot overlays, ArgoCD wiring, known limitations.
+
+ArgoCD picks this up automatically once `feat/local-registry-mirror`
+merges to `main` (the per-robot Application at
+[`gitops/apps/phantomos-mk09.yaml`](gitops/apps/phantomos-mk09.yaml) is
+pinned to `targetRevision: main`).
+
+---
+
 ## Troubleshooting
 
 **Pods stuck in `ImagePullBackOff`**
