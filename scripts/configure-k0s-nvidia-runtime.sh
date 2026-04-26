@@ -90,9 +90,13 @@ version = 2
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
   runtime_type = "io.containerd.runc.v2"
   privileged_without_host_devices = false
+  # Don't set SystemdCgroup here. k0s's default runc runtime uses
+  # cgroupfs; setting this runtime to systemd cgroups creates a
+  # mismatch with the kubelet (which provides cgroupfs paths) and
+  # the pod fails sandbox creation with "expected cgroupsPath to be
+  # of format slice:prefix:name". Inherit the cluster default.
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
     BinaryName = "${NVIDIA_RUNTIME}"
-    SystemdCgroup = true
 EOF
 
 # --- 2. Confirm imports line is present in the main containerd config -----

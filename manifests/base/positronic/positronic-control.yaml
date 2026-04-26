@@ -69,8 +69,13 @@ spec:
             - name: models
               mountPath: /shared
           resources:
-            requests: { cpu: "100m", memory: "256Mi" }
-            limits:   { cpu: "1",    memory: "1Gi" }
+            # requests == limits so this container is Guaranteed; without
+            # that, the whole pod's QoS drops to Burstable and we lose CPU
+            # Manager pinning on the main container. The init runs once
+            # for ~10–30 s during pod start, so over-allocating briefly
+            # is fine.
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "1", memory: "1Gi" }
       containers:
         - name: positronic-control
           image: localhost:5443/positronic-control:PLACEHOLDER
