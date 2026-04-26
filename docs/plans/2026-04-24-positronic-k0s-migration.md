@@ -132,7 +132,7 @@ Illustrative set of interpolations compose reads:
 | `command`                             | `containers[0].args` (keeps image ENTRYPOINT) |
 | `volumes` (bind mounts)               | `spec.volumes[*].hostPath` + `containers[0].volumeMounts` |
 | `shm_size: 2g`                        | no direct equivalent; rely on host `/dev/shm` being sized right (it is — this is a host tuning, not a pod concern) |
-| `deploy...capabilities: [gpu]`        | privileged + `/dev` today; `resources.limits.nvidia.com/gpu: 1` when the device plugin lands |
+| `deploy...capabilities: [gpu]`        | `runtimeClassName: nvidia` (RuntimeClass at `manifests/base/runtime-classes/nvidia.yaml`; host runtime registered by `scripts/configure-k0s-nvidia-runtime.sh`) + `privileged: true` + `/dev` mount. The device-plugin-with-resource-limits flow is the future; out of scope here. |
 | `restart: unless-stopped`             | implicit — Deployment controller restarts pods |
 
 ### 3.2 File layout
@@ -440,9 +440,16 @@ positronic-control image already uses.
 - **Memory:** `requests: 16Gi` / `limits: 16Gi`. Compose sets no memory
   limit; 16Gi is a reasonable first guess for a CUDA ROS2 stack. Bump
   if we see OOMs.
-- **GPU:** today, `privileged: true` + `/dev` mount. When the NVIDIA k0s
-  device plugin is installed, switch to `resources.limits.nvidia.com/gpu: 1`
-  and drop privileged (plus /dev mount scope). Out of scope for this plan.
+- **GPU:** `privileged: true` + `/dev` mount gets the device nodes into
+  the container, but **userspace driver libraries** (`libcuda.so`,
+  `libnvidia-*.so`, `nvidia-smi`) are bind-mounted in by
+  `nvidia-container-runtime`. Pods that need GPU set
+  `spec.runtimeClassName: nvidia` (the RuntimeClass in
+  `manifests/base/runtime-classes/nvidia.yaml`) and the host's
+  `scripts/configure-k0s-nvidia-runtime.sh` registers the runtime with
+  k0s containerd one-time. When the NVIDIA k8s device plugin lands,
+  this can be replaced by `resources.limits.nvidia.com/gpu: 1` —
+  out of scope for this plan.
 
 ---
 

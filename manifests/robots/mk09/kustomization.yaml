@@ -5,6 +5,7 @@ commonAnnotations:
   robot: mk09
   fleet: phantomos
 resources:
+  - ../../base/runtime-classes
   - ../../base/registry
   - ../../base/argus
   - ../../base/nimbus

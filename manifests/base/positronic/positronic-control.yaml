@@ -39,6 +39,13 @@ spec:
       hostNetwork: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
+      # GPU access flows through the nvidia container runtime registered
+      # in containerd by scripts/configure-k0s-nvidia-runtime.sh. The
+      # named RuntimeClass lives in manifests/base/runtime-classes/nvidia.yaml.
+      # Without this, /dev/nvidia* device nodes are present (privileged +
+      # /dev mount) but the userspace driver libs are missing — anything
+      # touching libcuda fails with "NVIDIA Driver was not detected".
+      runtimeClassName: nvidia
       initContainers:
         # Copy /models from the phantom-models image into the shared
         # emptyDir, which the main container then mounts at /root/models.
