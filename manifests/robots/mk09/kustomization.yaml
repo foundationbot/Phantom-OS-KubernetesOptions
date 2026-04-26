@@ -22,7 +22,7 @@ images:
   # this entry covers it cleanly. Bump after each
   # `sudo python3 scripts/phantom-models/build.py`.
   - name: localhost:5443/phantom-models
-    newTag: 2026-04-25
+    newTag: 2026-04-26
 patches:
   - path: patches/operator-ui-env.yaml
     target:
