@@ -4,6 +4,10 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: recordings-pv
+  annotations:
+    # Don't let ArgoCD prune this PV if it's removed from git — recordings
+    # data on the hostPath is irrecoverable. Manual `kubectl delete pv` only.
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   capacity:
     storage: 500Gi

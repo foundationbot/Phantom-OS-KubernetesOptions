@@ -3,6 +3,10 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: postgres-pv
+  annotations:
+    # Don't let ArgoCD prune this PV if it's removed from git — data on
+    # the hostPath is irrecoverable. Manual `kubectl delete pv` only.
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   capacity:
     storage: 10Gi

@@ -5,6 +5,12 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: mongodb-pv
+  annotations:
+    # PVs hold data on hostPaths with reclaimPolicy: Retain. Even if a
+    # PV is removed from git, ArgoCD must not delete the live PV — the
+    # data is irrecoverable on its own. Removal is an explicit
+    # `kubectl delete pv` decision.
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   capacity:
     storage: 10Gi
