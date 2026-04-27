@@ -221,6 +221,35 @@ wait_for_pvc_bound() {
   return 1
 }
 
+# After the broken PVC is deleted, the PV transitions to Released (not
+# Available), because its claimRef.uid still references the deleted PVC's
+# UID. Released PVs do not bind to new claims. Clearing claimRef puts
+# the PV back to Available, after which the new PVC binds via
+# characteristic matching (size + accessModes + storageClassName).
+#
+# Caller passes the PV name captured BEFORE the PVC was deleted (via
+# pvc_volume_name), so we know which PV to operate on.
+pvc_volume_name() {
+  local ns="$1" name="$2"
+  $KUBECTL -n "$ns" get pvc "$name" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true
+}
+
+clear_stale_pv_claimref() {
+  local PV="$1"
+  if [ -z "$PV" ]; then
+    warn "no PV name captured — skipping claimRef clear (binding may fail if PV is Released)"
+    return 0
+  fi
+  if ! $KUBECTL get pv "$PV" >/dev/null 2>&1; then
+    warn "PV $PV not found (skipping claimRef clear)"
+    return 0
+  fi
+  local PHASE
+  PHASE=$($KUBECTL get pv "$PV" -o jsonpath='{.status.phase}' 2>/dev/null)
+  bold "[pv/$PV] clearing stale claimRef (PV was: ${PHASE:-unknown})"
+  run "$KUBECTL patch pv $PV --type=merge -p='{\"spec\":{\"claimRef\":null}}'"
+}
+
 # ---- pattern A: StatefulSet-owned PVC ------------------------------------
 
 rebind_statefulset() {
@@ -241,7 +270,9 @@ rebind_statefulset() {
   echo "  Plan:"
   echo "    - scale $NS/statefulset/$SS to 0 replicas"
   echo "    - wait for the pod to terminate (~30-60s)"
+  echo "    - capture which PV the broken PVC is bound to (so we can clear its claimRef)"
   echo "    - delete pvc $NS/$PVC"
+  echo "    - clear the stale claimRef on the captured PV (Released -> Available)"
   echo "    - scale $NS/statefulset/$SS to 1 replica (StatefulSet recreates the PVC)"
   echo "    - wait for the new PVC to reach Bound"
   echo "  Data on the underlying hostPath is preserved (Retain reclaim policy)."
@@ -255,8 +286,16 @@ rebind_statefulset() {
   bold "[$NS/$SS] waiting for pod termination"
   run "$KUBECTL -n $NS wait --for=delete pod/${SS}-0 --timeout=120s || true"
 
+  # Capture the PV name BEFORE the PVC is deleted; otherwise we lose the
+  # only authoritative source of which PV this PVC was bound to.
+  local PV
+  PV=$(pvc_volume_name "$NS" "$PVC")
+  echo "  (captured pvc.spec.volumeName = ${PV:-<none>})"
+
   bold "[$NS/$SS] deleting pvc $PVC"
   run "$KUBECTL -n $NS delete pvc $PVC"
+
+  clear_stale_pv_claimref "$PV"
 
   bold "[$NS/$SS] scaling back to 1"
   run "$KUBECTL -n $NS scale statefulset $SS --replicas=1"
@@ -312,8 +351,10 @@ rebind_deployments() {
   echo "  Plan:"
   echo "    - scale ${#DEPS[@]} deployment(s) (${DEPS[*]}) to 0 replicas each"
   echo "    - wait for each deployment's pods to terminate"
+  echo "    - capture which PV the broken PVC is bound to (so we can clear its claimRef)"
   echo "    - delete pvc $NS/$PVC"
-  echo "    - kubectl apply -f $MANIFEST_RELPATH (recreates the PVC; PV claimRef matches by name+namespace)"
+  echo "    - clear the stale claimRef on the captured PV (Released -> Available)"
+  echo "    - kubectl apply -f $MANIFEST_RELPATH (recreates the PVC)"
   echo "    - wait for the new PVC to reach Bound"
   echo "    - scale deployments back to 1"
   echo "  Data on the underlying hostPath is preserved (Retain reclaim policy)."
@@ -346,8 +387,15 @@ rebind_deployments() {
     done
   fi
 
+  # Capture the PV name BEFORE the PVC is deleted.
+  local PV
+  PV=$(pvc_volume_name "$NS" "$PVC")
+  echo "  (captured pvc.spec.volumeName = ${PV:-<none>})"
+
   bold "[$NS/$PVC] deleting"
   run "$KUBECTL -n $NS delete pvc $PVC"
+
+  clear_stale_pv_claimref "$PV"
 
   bold "[$NS/$PVC] recreating from $MANIFEST_RELPATH"
   run "$KUBECTL apply -f $MANIFEST_ABS"
