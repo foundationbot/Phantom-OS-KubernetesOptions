@@ -47,8 +47,12 @@ backup() {
 # --- 1. containerd hosts.toml ---------------------------------------------
 # Priority-ordered mirror config. containerd iterates [host."..."] blocks
 # in declaration order on every pull, falling through on 404 / connection
-# refused. `override_path = true` is required when the first mirror is a
-# pull-through cache that serves all repos at its root path.
+# refused. The local registry is a plain Distribution registry serving at
+# /v2/<repo>/... — i.e. the standard layout — so we do NOT set
+# `override_path = true`. That flag is for pull-through caches that
+# expose images at root paths; setting it against /v2/-style registry
+# makes containerd send manifest requests without the /v2/ prefix and
+# every pull silently 404s back to the upstream fallthrough.
 
 echo "==> writing ${HOSTS_DIR}/docker.io/hosts.toml"
 mkdir -p "${HOSTS_DIR}/docker.io"
@@ -63,7 +67,6 @@ server = "${UPSTREAM_URL}"
 [host."http://${REGISTRY_HOST}"]
   capabilities = ["pull", "resolve"]
   skip_verify = true
-  override_path = true
 
 [host."${UPSTREAM_URL}"]
   capabilities = ["pull", "resolve"]
