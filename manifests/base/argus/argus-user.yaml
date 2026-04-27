@@ -43,7 +43,12 @@ spec:
             - name: REDIS_PORT
               value: "6379"
             - name: REDIS_DB
-              value: "1"
+              # Must match argus-auth's REDIS_DB. argus-auth writes
+              # `session:<token>` keys here; argus-user only reads them
+              # (see app/common/session_validator.py). A mismatch makes
+              # every session lookup miss and surfaces as the gateway's
+              # 500 "Failed to fetch user info" on login.
+              value: "0"
             - name: REDIS_TTL_SECONDS
               value: "60"
             - name: SESSION_EXPIRY_HOURS
