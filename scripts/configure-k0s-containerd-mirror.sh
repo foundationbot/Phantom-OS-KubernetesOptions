@@ -53,6 +53,8 @@ backup() {
 # expose images at root paths; setting it against /v2/-style registry
 # makes containerd send manifest requests without the /v2/ prefix and
 # every pull silently 404s back to the upstream fallthrough.
+#
+# Host order is (upstream, local) — see the heredoc comment below.
 
 echo "==> writing ${HOSTS_DIR}/docker.io/hosts.toml"
 mkdir -p "${HOSTS_DIR}/docker.io"
@@ -61,15 +63,28 @@ cat > "${HOSTS_DIR}/docker.io/hosts.toml" <<EOF
 # Managed by scripts/configure-k0s-containerd-mirror.sh
 # containerd resolves docker.io/* by trying these hosts in declaration order.
 # On 404 or connection failure, it falls through to the next host.
+#
+# Order is (upstream, local):
+#   - Online: tag->digest resolution and blob pulls go to DockerHub first.
+#     The local registry never serves a stale tag and is consulted only
+#     as a fallback (DockerHub unreachable / 404).
+#   - Offline: containerd's request to DockerHub fails on connect, falls
+#     through to ${REGISTRY_HOST}. As long as the image was primed (or
+#     pushed) into the local registry beforehand, deploys keep working.
+#
+# Tradeoff: when DockerHub IS reachable, blob bytes also come from
+# upstream — the local registry's role shrinks to "offline blob store."
+# That's accepted: the alternative (local first) re-introduces the
+# stale-tag footgun.
 
 server = "${UPSTREAM_URL}"
+
+[host."${UPSTREAM_URL}"]
+  capabilities = ["pull", "resolve"]
 
 [host."http://${REGISTRY_HOST}"]
   capabilities = ["pull", "resolve"]
   skip_verify = true
-
-[host."${UPSTREAM_URL}"]
-  capabilities = ["pull", "resolve"]
 EOF
 
 # --- 2. containerd config import ------------------------------------------
