@@ -21,6 +21,11 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: k0s-registry-pv
+  annotations:
+    # Don't let ArgoCD prune this PV if it's removed from git — pushed
+    # images on the hostPath are recoverable only by re-pushing. Manual
+    # `kubectl delete pv` only.
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   capacity:
     # 150Gi is enough headroom for a few foundationbot/phantom-cuda variants
