@@ -18,9 +18,6 @@
 #   preserved because the PV's reclaimPolicy is Retain and the hostPath
 #   doesn't change — the new PV simply re-binds to the same directory.
 #
-#   See docs/plans/2026-04-24-local-registry-with-fallback.md for
-#   background on the registry deployment.
-#
 # Usage:
 #   sudo bash scripts/resize-registry-pvc.sh                 # interactive
 #   sudo bash scripts/resize-registry-pvc.sh --yes           # no prompt

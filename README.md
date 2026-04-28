@@ -271,7 +271,7 @@ sudo rm /usr/local/bin/k0s
 
 Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) named `k0s-registry` that hosts locally-compiled images like `positronic-control` and serves as a manually-primed cache for DockerHub-sourced images. containerd is configured to try `http://localhost:5443` first and fall back to `registry-1.docker.io` — so primed images survive a DockerHub outage and locally-pushed tags transparently shadow upstream. (Auto-pull-through caching is intentionally *not* enabled because Distribution `registry:2` is read-only in proxy mode, which would block locally-built image pushes; the prime script fills the gap.)
 
-Full design lives in [docs/plans/2026-04-24-local-registry-with-fallback.md](docs/plans/2026-04-24-local-registry-with-fallback.md). The repo ships three scripts:
+The repo ships three scripts:
 
 | Script | Purpose | Runs as |
 |---|---|---|

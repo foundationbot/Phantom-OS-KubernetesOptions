@@ -7,9 +7,6 @@ read-only volume via the Kubernetes `image:` volume source (KEP-4639),
 so the container never executes the image — it just reads files from
 /models.
 
-See docs/plans/2026-04-24-positronic-k0s-migration.md §3.6a for the
-full design and rollout context.
-
 Three modes
 -----------
 

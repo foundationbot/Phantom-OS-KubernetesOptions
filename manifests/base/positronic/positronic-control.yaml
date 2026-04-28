@@ -1,6 +1,5 @@
 # positronic-control — k0s Deployment that replaces the `phantom` service
 # in imu-policy/positronic_control/docker/development.docker-compose.yaml.
-# Source of truth: docs/plans/2026-04-24-positronic-k0s-migration.md.
 #
 # Two images flow into this pod, both rewritten per-robot via Kustomize's
 # `images:` transformer in the overlay:
@@ -10,7 +9,7 @@
 #      /models tree gets copied into a shared emptyDir by the load-models
 #      initContainer; the main container mounts that emptyDir at /root/models.
 #
-# This uses the §3.6a fallback (initContainer + emptyDir) rather than the
+# Models are loaded via initContainer + emptyDir copy rather than the
 # native image: volume because k0s 1.35.3's containerd has only partial
 # image-volume support (fails with `mkdir ""` at OCI spec generation).
 # When/if k0s catches up, switch back to the image: volume — the manifest
@@ -18,7 +17,7 @@
 #
 # Default mode: PHANTOM_CMD empty → `sleep infinity`. Operator execs in
 # for interactive ROS work. Set PHANTOM_CMD in the ConfigMap to flip
-# the pod into service mode (decision D5 in the plan).
+# the pod into service mode.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

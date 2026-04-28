@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # validate-local-registry.sh
 #
-# Verifies that the local pull-through registry + containerd hosts-config
-# described in docs/plans/2026-04-24-local-registry-with-fallback.md is
-# correctly installed on this host.
+# Verifies that the local registry + containerd hosts-config is correctly
+# installed on this host (matching what configure-k0s-containerd-mirror.sh
+# sets up).
 #
 # Each check prints PASS / FAIL / SKIP. Exit code = number of FAILs.
 # SKIPs are not failures — they happen when a prerequisite (e.g. k0s)

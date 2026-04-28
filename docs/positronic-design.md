@@ -3,11 +3,7 @@
 How the positronic-control deployment fits together: the two repos, the
 three images, the storage layers, the pod composition, the per-robot
 overlay model, and the ArgoCD wiring. For day-to-day commands see
-[positronic-cheatsheet.md](positronic-cheatsheet.md). For the original
-design intent + decision history see
-[../docs/plans/2026-04-24-positronic-k0s-migration.md](plans/2026-04-24-positronic-k0s-migration.md)
-and
-[../docs/plans/2026-04-24-local-registry-with-fallback.md](plans/2026-04-24-local-registry-with-fallback.md).
+[positronic-cheatsheet.md](positronic-cheatsheet.md).
 
 ---
 

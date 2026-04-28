@@ -8,10 +8,9 @@
 #   with a FROM-scratch image. k0s 1.35.3's containerd has only partial
 #   support for that — kubelet pulls the image but containerd can't turn
 #   the pulled layers into a mountable rootfs (fails with `mkdir ""` when
-#   generating the OCI spec). The fallback path documented in
-#   docs/plans/2026-04-24-positronic-k0s-migration.md §3.6a is an
-#   initContainer + emptyDir copy, which requires this image to have a
-#   shell + cp. busybox adds ~5 MB on top of the ~1+ GB of model weights.
+#   generating the OCI spec). The fallback uses an initContainer +
+#   emptyDir copy, which requires this image to have a shell + cp;
+#   busybox adds ~5 MB on top of the ~1+ GB of model weights.
 #
 # The build context is whatever directory contains the models to bundle
 # (typically /root/phantom-models-merged on mk09, or a temp dir assembled

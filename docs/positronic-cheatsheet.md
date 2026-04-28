@@ -2,8 +2,7 @@
 
 Terse runbook for the positronic-control + k0s + local-registry stack on
 mk09. For the *why* behind any of this, see
-[positronic-design.md](positronic-design.md) and the plan docs under
-[docs/plans/](plans/).
+[positronic-design.md](positronic-design.md).
 
 Conventions:
 - All `kubectl` commands work as `k0s kubectl` on the robot (no separate

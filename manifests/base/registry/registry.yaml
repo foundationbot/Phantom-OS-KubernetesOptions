@@ -5,9 +5,6 @@
 # (positronic-control etc.). Instead, the cache is populated by
 # scripts/prime-registry-cache.sh on a manual or scheduled basis.
 #
-# See docs/plans/2026-04-24-local-registry-with-fallback.md for the full
-# design and the proxy-vs-push tradeoff.
-#
 # Summary:
 #   - host-network pod on :5443, bound to 127.0.0.1 only — reachable from
 #     docker (push) and containerd (pull) on the same host but not from
