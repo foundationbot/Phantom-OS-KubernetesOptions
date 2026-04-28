@@ -1,0 +1,23 @@
+# RuntimeClass that names the nvidia container runtime registered by
+# scripts/configure-k0s-nvidia-runtime.sh on the host.
+#
+# Pods that need GPU access (currently positronic-control) set
+# `spec.runtimeClassName: nvidia` and will be started via
+# nvidia-container-runtime, which bind-mounts the host's NVIDIA
+# driver libraries + Tegra device bits into the container at start
+# time. Without this, the pod still gets /dev/nvidia* device nodes
+# (via the privileged + /dev hostPath mount) but no userspace
+# driver — so libcuda.so / libnvidia-* fail to load.
+#
+# RuntimeClass is cluster-scoped (no namespace).
+#
+# Prerequisite: scripts/configure-k0s-nvidia-runtime.sh has been run
+# on every node where this RuntimeClass is referenced. If a pod
+# requests it and the node has no `nvidia` runtime registered with
+# containerd, the pod will fail to start with a runtime not found
+# error.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia

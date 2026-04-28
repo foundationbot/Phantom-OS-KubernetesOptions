@@ -1,0 +1,126 @@
+# k0s-registry — plain OCI registry serving locally-built images on the
+# robot. Pull-through caching of DockerHub is intentionally NOT enabled,
+# because Distribution registry:2 is read-only when REGISTRY_PROXY_REMOTEURL
+# is set, which would block `docker push` of locally-built images
+# (positronic-control etc.). Instead, the cache is populated by
+# scripts/prime-registry-cache.sh on a manual or scheduled basis.
+#
+# Summary:
+#   - host-network pod on :5443, bound to 127.0.0.1 only — reachable from
+#     docker (push) and containerd (pull) on the same host but not from
+#     off-host. Port 5443 (not registry default 5000) because
+#     phantom-control-api.service holds :5000 on this robot.
+#   - containerd's hosts.toml routes docker.io/* through this registry
+#     first; on 404 it falls through to registry-1.docker.io directly,
+#     so anything not primed continues to pull from upstream.
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: k0s-registry-pv
+  annotations:
+    # Don't let ArgoCD prune this PV if it's removed from git — pushed
+    # images on the hostPath are recoverable only by re-pushing. Manual
+    # `kubectl delete pv` only.
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  capacity:
+    # 150Gi is enough headroom for a few foundationbot/phantom-cuda variants
+    # (~37GB each at the time of writing) plus the rest of the cluster's
+    # primed images. hostPath PVs aren't enforced by k8s — the real cap is
+    # whatever the host has at /var/lib/registry. Bump if the host disk grows.
+    storage: 150Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /var/lib/registry
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: registry
+    name: k0s-registry-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k0s-registry-pvc
+  namespace: registry
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 150Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k0s-registry
+  namespace: registry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # hostPath PV is RWO + hostNetwork :5443 — no rolling overlap
+  selector:
+    matchLabels:
+      app: k0s-registry
+  template:
+    metadata:
+      labels:
+        app: k0s-registry
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: registry
+          image: registry:2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5443
+              hostPort: 5443
+              hostIP: 127.0.0.1
+          env:
+            # Bind loopback only. With hostNetwork: true the pod shares the
+            # host's network stack, so 127.0.0.1:5443 is reachable from
+            # docker (push) and containerd (pull) on the same host but NOT
+            # from off-host. This blocks anyone who can route to the robot
+            # on :5443 from using the proxy creds for free DockerHub access.
+            - name: REGISTRY_HTTP_ADDR
+              value: "127.0.0.1:5443"
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+          volumeMounts:
+            - name: storage
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5443
+              # Registry binds 127.0.0.1 only (see REGISTRY_HTTP_ADDR
+              # above). With hostNetwork: true, kubelet's default probe
+              # host is the pod IP = node IP, which the registry isn't
+              # listening on. Override to loopback so the probe actually
+              # reaches the registry.
+              host: 127.0.0.1
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: 5443
+              host: 127.0.0.1
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: k0s-registry-pvc

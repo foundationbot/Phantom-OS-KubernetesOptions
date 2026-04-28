@@ -1,0 +1,24 @@
+# Example manifest for `build.py --manifest`.
+#
+# Each entry's `source` (file or directory on the host) is copied into
+# a temp build context at the path given by `dest` (relative to /models
+# in the resulting image). Use this when you want a smaller curated
+# bundle instead of the whole /root/phantom-models-merged tree.
+#
+# Usage:
+#   sudo python3 scripts/phantom-models/build.py \
+#     --manifest scripts/phantom-models/models.example.yaml \
+#     --tag 2026-04-25
+#
+# After build/push, the resulting image's /models layout will be:
+#   /models/sam2_hiera_large.pt
+#   /models/grounding-dino/...
+#   /models/depth-pro/checkpoints/...
+
+models:
+  - source: /root/phantom-models-merged/sam2_hiera_large.pt
+    dest: sam2_hiera_large.pt
+  - source: /root/phantom-models-merged/grounding-dino
+    dest: grounding-dino
+  - source: /root/phantom-models-merged/depth-pro/checkpoints
+    dest: depth-pro/checkpoints

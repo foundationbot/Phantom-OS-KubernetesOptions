@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+# positronic.sh — convenience wrapper for the positronic-control deployment.
+#
+# Single entry point for the day-to-day lifecycle operations against the
+# positronic-control Deployment in the `positronic` namespace. Designed to
+# be friendly on the robot (where only `k0s kubectl` is available) and on
+# laptops (where `kubectl` is the usual tool). Read-only commands degrade
+# gracefully when neither is available.
+#
+# Usage:
+#   bash scripts/positronic.sh <subcommand> [args...]
+#   bash scripts/positronic.sh help
+#
+# See `help` subcommand for the full list. Companion to:
+#   scripts/diagnose-positronic.sh    — deep diagnostic + apply overlay
+#   scripts/configure-k0s-*.sh        — host-level bootstrap
+
+set -u -o pipefail
+
+# ---------- defaults (env overridable) -------------------------------------
+
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+NAMESPACE="${NAMESPACE:-positronic}"
+APP_LABEL="${APP_LABEL:-app=positronic-control}"
+OVERLAY="${OVERLAY:-${REPO}/manifests/robots/mk09}"
+CONFIGMAP_NAME="${CONFIGMAP_NAME:-positronic-config}"
+CONTAINER_NAME="${CONTAINER_NAME:-positronic-control}"
+INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
+
+DRY_RUN=0
+
+# ---------- color helpers (only when stdout is a TTY) ---------------------
+
+if [ -t 1 ]; then
+  C_BOLD=$'\033[1m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'; C_RESET=$'\033[0m'
+else
+  C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_RESET=""
+fi
+
+bold() { printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"; }
+ok()   { printf '  %s✓%s %s\n' "$C_GREEN"  "$C_RESET" "$1"; }
+warn() { printf '  %s!%s %s\n' "$C_YELLOW" "$C_RESET" "$1"; }
+fail() { printf '  %s✗%s %s\n' "$C_RED"    "$C_RESET" "$1"; }
+info() { printf '  %s%s\n' "$C_BLUE" "$1$C_RESET"; }
+
+die()  { printf '%serror:%s %s\n' "$C_RED" "$C_RESET" "$1" >&2; exit "${2:-1}"; }
+
+# ---------- kubectl resolution --------------------------------------------
+# Returns 0 if a kubectl backend was found, 1 if not. Sets KUBECTL.
+
+KUBECTL=""
+
+resolve_kubectl() {
+  if [ -n "$KUBECTL" ]; then return 0; fi
+  if command -v kubectl >/dev/null 2>&1; then
+    KUBECTL="kubectl"
+    return 0
+  fi
+  if command -v k0s >/dev/null 2>&1 && k0s kubectl version --client >/dev/null 2>&1; then
+    KUBECTL="k0s kubectl"
+    return 0
+  fi
+  return 1
+}
+
+require_kubectl() {
+  if resolve_kubectl; then return 0; fi
+  # In dry-run we want to print the would-be command even on machines
+  # without a kubectl backend (e.g. reviewing the script on a laptop).
+  if [ "$DRY_RUN" = 1 ]; then
+    KUBECTL="kubectl"
+    warn "no kubectl backend found — dry-run will use 'kubectl' as a placeholder"
+    return 0
+  fi
+  die "neither kubectl nor 'k0s kubectl' is available on this host" 2
+}
+
+# Run a kubectl command honoring DRY_RUN. When DRY_RUN=1 we just print the
+# command with one-line shell quoting and return 0. Otherwise we exec it.
+# Note: this is for fire-and-forget commands; use `kctl_capture` when you
+# need stdout, and call `$KUBECTL ...` directly for streaming subcommands
+# (logs -f, exec -it, get -w) where DRY_RUN is handled at the caller.
+kctl() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"
+    for a in "$@"; do printf ' %q' "$a"; done
+    printf '\n'
+    return 0
+  fi
+  $KUBECTL "$@"
+}
+
+# Capture-only variant — used for the existence/state checks that drive
+# the rest of a subcommand. Honors DRY_RUN by returning empty string.
+kctl_capture() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"
+    for a in "$@"; do printf ' %q' "$a"; done
+    printf '\n' >&2
+    return 0
+  fi
+  $KUBECTL "$@"
+}
+
+# ---------- pod lookup -----------------------------------------------------
+
+# Echos the running pod name, or empty if no pod matches.
+# In dry-run mode (or when kubectl isn't usable) it returns a placeholder
+# token so downstream subcommands can print a coherent kubectl line.
+get_pod() {
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '<pod>'
+    return 0
+  fi
+  $KUBECTL -n "$NAMESPACE" get pod -l "$APP_LABEL" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+# ---------- subcommand: help ----------------------------------------------
+
+cmd_help() {
+  cat <<EOF
+${C_BOLD}positronic.sh${C_RESET} — wrapper for the positronic-control deployment
+
+${C_BOLD}Usage:${C_RESET}
+  bash scripts/positronic.sh [--dry-run] <subcommand> [args...]
+
+${C_BOLD}Subcommands:${C_RESET}
+  status                       Pod state, QoS, restarts, runtimeClassName,
+                               PHANTOM_CMD (CM + as-seen-by-pod), PID 1 cmd.
+  logs [-f|--follow] [--previous] [--init]
+                               Stream logs from the main container (or the
+                               load-models init container with --init).
+                               --previous reads the prior crashed instance.
+  exec [-- command...]         Drop into bash (--norc --noprofile) by
+                               default, or run an arbitrary command if
+                               args follow '--'.
+  gpu-test                     Run a PyTorch CUDA matmul inside the pod;
+                               PASS iff cuda is available and result != 0.
+  set-cmd <command...>         Set PHANTOM_CMD in $CONFIGMAP_NAME to the
+                               joined args, then rollout restart the
+                               Deployment so the new command takes effect.
+  clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
+                               mode → sleep infinity), rollout restart.
+  redeploy                     kubectl apply -k <overlay>, then bounce the
+                               pod. Same as APPLY=1 diagnose-positronic.sh
+                               minus the diagnose phase.
+  teardown [-y|--yes]          Delete the Deployment + ConfigMap + ns.
+                               Cluster-side only — does not touch manifests.
+  help                         This message.
+
+${C_BOLD}Global flags:${C_RESET}
+  --dry-run                    Print kubectl commands instead of running
+                               them. Useful for review.
+
+${C_BOLD}Env overrides:${C_RESET}
+  NAMESPACE        (default: $NAMESPACE)
+  APP_LABEL        (default: $APP_LABEL)
+  OVERLAY          (default: \$REPO/manifests/robots/mk09)
+  CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
+
+${C_BOLD}Examples:${C_RESET}
+  bash scripts/positronic.sh status
+  bash scripts/positronic.sh logs -f
+  bash scripts/positronic.sh logs --previous --init
+  bash scripts/positronic.sh exec
+  bash scripts/positronic.sh exec -- ros2 topic list
+  bash scripts/positronic.sh gpu-test
+  bash scripts/positronic.sh set-cmd ros2 launch srg_localization global_positioning_launch.py
+  bash scripts/positronic.sh clear-cmd
+  bash scripts/positronic.sh redeploy
+  bash scripts/positronic.sh teardown -y
+  bash scripts/positronic.sh --dry-run set-cmd 'sleep 10'
+EOF
+}
+
+# ---------- subcommand: status --------------------------------------------
+
+cmd_status() {
+  require_kubectl
+
+  bold "Deployment ($NAMESPACE/positronic-control)"
+  if ! $KUBECTL -n "$NAMESPACE" get deploy positronic-control >/dev/null 2>&1; then
+    fail "Deployment positronic-control not found in $NAMESPACE — not deployed"
+    return 0
+  fi
+  $KUBECTL -n "$NAMESPACE" get deploy positronic-control \
+    -o wide 2>/dev/null | sed 's/^/    /'
+
+  bold "Pod"
+  local pod
+  pod="$(get_pod)"
+  if [ -z "$pod" ]; then
+    warn "no pod found for label $APP_LABEL"
+    return 0
+  fi
+
+  $KUBECTL -n "$NAMESPACE" get pod "$pod" -o wide 2>/dev/null | sed 's/^/    /'
+
+  bold "Pod details"
+  local jp='{range .status.containerStatuses[?(@.name=="'"$CONTAINER_NAME"'")]}restartCount={.restartCount}{"\n"}ready={.ready}{"\n"}{end}qosClass={.status.qosClass}{"\n"}runtimeClassName={.spec.runtimeClassName}{"\n"}phase={.status.phase}{"\n"}'
+  $KUBECTL -n "$NAMESPACE" get pod "$pod" -o jsonpath="$jp" 2>/dev/null \
+    | awk 'NF' | sed 's/^/    /'
+  printf '\n'
+
+  bold "ConfigMap PHANTOM_CMD ($CONFIGMAP_NAME)"
+  local cm_cmd
+  cm_cmd="$($KUBECTL -n "$NAMESPACE" get cm "$CONFIGMAP_NAME" \
+            -o jsonpath='{.data.PHANTOM_CMD}' 2>/dev/null || true)"
+  if [ -z "$cm_cmd" ]; then
+    info "(empty — pod runs sleep infinity)"
+  else
+    printf '    %s\n' "$cm_cmd"
+  fi
+
+  bold "PHANTOM_CMD as seen by the pod"
+  local pod_cmd
+  pod_cmd="$($KUBECTL -n "$NAMESPACE" exec "$pod" -c "$CONTAINER_NAME" -- \
+             sh -c 'printf %s "${PHANTOM_CMD-}"' 2>/dev/null || true)"
+  if [ -z "$pod_cmd" ]; then
+    info "(empty)"
+  else
+    printf '    %s\n' "$pod_cmd"
+  fi
+
+  bold "PID 1 command (what's actually running)"
+  # /proc/1/cmdline is NUL-separated. tr to spaces for readability.
+  local pid1
+  pid1="$($KUBECTL -n "$NAMESPACE" exec "$pod" -c "$CONTAINER_NAME" -- \
+          sh -c 'tr "\0" " " < /proc/1/cmdline; echo' 2>/dev/null || true)"
+  if [ -z "$pid1" ]; then
+    warn "could not read /proc/1/cmdline (pod may not be Ready)"
+  else
+    printf '    %s\n' "$pid1"
+  fi
+}
+
+# ---------- subcommand: logs ----------------------------------------------
+
+cmd_logs() {
+  require_kubectl
+
+  local follow=0 previous=0 init=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow)   follow=1; shift ;;
+      --previous|-p) previous=1; shift ;;
+      --init)        init=1; shift ;;
+      -h|--help)     echo "logs [-f|--follow] [--previous] [--init]"; return 0 ;;
+      *) die "unknown logs flag: $1" ;;
+    esac
+  done
+
+  local pod
+  pod="$(get_pod)"
+  if [ -z "$pod" ]; then
+    die "no pod found for label $APP_LABEL"
+  fi
+
+  local container="$CONTAINER_NAME"
+  if [ "$init" = 1 ]; then container="$INIT_CONTAINER_NAME"; fi
+
+  local args=(-n "$NAMESPACE" logs "$pod" -c "$container")
+  [ "$follow" = 1 ]   && args+=(-f)
+  [ "$previous" = 1 ] && args+=(--previous)
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"
+    for a in "${args[@]}"; do printf ' %q' "$a"; done
+    printf '\n'
+    return 0
+  fi
+  exec $KUBECTL "${args[@]}"
+}
+
+# ---------- subcommand: exec ----------------------------------------------
+
+cmd_exec() {
+  require_kubectl
+
+  # Args after `--` are the command to run. No `--` (or nothing after) -> bash.
+  local found_dd=0
+  local rest=()
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--" ] && [ "$found_dd" = 0 ]; then
+      found_dd=1; shift; continue
+    fi
+    if [ "$found_dd" = 1 ]; then
+      rest+=("$1")
+    else
+      case "$1" in
+        -h|--help) echo "exec [-- command...]"; return 0 ;;
+        *) die "unknown exec flag: $1 (did you forget '--' before the command?)" ;;
+      esac
+    fi
+    shift
+  done
+
+  local pod
+  pod="$(get_pod)"
+  if [ -z "$pod" ]; then
+    die "no pod found for label $APP_LABEL"
+  fi
+
+  if [ "${#rest[@]}" -eq 0 ]; then
+    rest=(bash --norc --noprofile)
+  fi
+
+  local args=(-n "$NAMESPACE" exec -it "$pod" -c "$CONTAINER_NAME" -- "${rest[@]}")
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"
+    for a in "${args[@]}"; do printf ' %q' "$a"; done
+    printf '\n'
+    return 0
+  fi
+  exec $KUBECTL "${args[@]}"
+}
+
+# ---------- subcommand: gpu-test ------------------------------------------
+
+cmd_gpu_test() {
+  require_kubectl
+
+  local pod
+  pod="$(get_pod)"
+  if [ -z "$pod" ]; then
+    die "no pod found for label $APP_LABEL"
+  fi
+
+  bold "GPU test (PyTorch CUDA matmul) on pod $pod"
+
+  # The canonical one-liner. Print "cuda available: True/False" then a
+  # matmul sum so we can grep both signals out of the output.
+  local py='
+import torch, sys
+avail = torch.cuda.is_available()
+print(f"cuda available: {avail}")
+if not avail:
+    sys.exit(0)
+print(f"device: {torch.cuda.get_device_name(0)}")
+a = torch.randn(1024, 1024, device="cuda")
+b = torch.randn(1024, 1024, device="cuda")
+c = a @ b
+s = float(c.sum().item())
+print(f"matmul sum: {s}")
+'
+
+  local out
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s -n %q exec %q -c %q -- python3 -c <pytorch matmul script>\n' \
+      "$KUBECTL" "$NAMESPACE" "$pod" "$CONTAINER_NAME"
+    return 0
+  fi
+
+  if ! out="$($KUBECTL -n "$NAMESPACE" exec "$pod" -c "$CONTAINER_NAME" -- \
+              python3 -c "$py" 2>&1)"; then
+    fail "python3 invocation failed inside the pod:"
+    printf '%s\n' "$out" | sed 's/^/    /'
+    return 1
+  fi
+
+  printf '%s\n' "$out" | sed 's/^/    /'
+
+  if ! printf '%s' "$out" | grep -q '^cuda available: True'; then
+    fail "GPU test FAILED — torch.cuda.is_available() is False"
+    return 1
+  fi
+  local sum
+  sum="$(printf '%s' "$out" | awk -F': ' '/^matmul sum:/ {print $2}')"
+  if [ -z "$sum" ] || [ "$sum" = "0.0" ] || [ "$sum" = "0" ]; then
+    fail "GPU test FAILED — matmul sum is empty or zero ($sum)"
+    return 1
+  fi
+  ok "GPU test PASSED (matmul sum = $sum)"
+}
+
+# ---------- subcommand: set-cmd / clear-cmd -------------------------------
+
+# Patch the ConfigMap's PHANTOM_CMD field. Pass the desired value as $1.
+# Uses `kubectl patch --type=merge -p <json>` and JSON-escapes the value
+# in pure Python to avoid any shell-quoting hazards: the user might pass
+# colons, ampersands, dollars, single+double quotes, etc.
+patch_phantom_cmd() {
+  local value="$1"
+  local json
+  if ! json="$(VALUE="$value" python3 -c '
+import json, os
+print(json.dumps({"data": {"PHANTOM_CMD": os.environ["VALUE"]}}))
+' 2>/dev/null)"; then
+    die "python3 is required to safely build the patch JSON"
+  fi
+
+  bold "Patching $CONFIGMAP_NAME with PHANTOM_CMD"
+  if [ -z "$value" ]; then
+    info "(setting PHANTOM_CMD to empty)"
+  else
+    info "PHANTOM_CMD = $value"
+  fi
+
+  kctl -n "$NAMESPACE" patch cm "$CONFIGMAP_NAME" --type=merge -p "$json"
+
+  bold "Rolling out positronic-control"
+  kctl -n "$NAMESPACE" rollout restart deploy/positronic-control
+
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+
+  bold "ConfigMap now"
+  local cur
+  cur="$($KUBECTL -n "$NAMESPACE" get cm "$CONFIGMAP_NAME" \
+         -o jsonpath='{.data.PHANTOM_CMD}' 2>/dev/null || true)"
+  if [ -z "$cur" ]; then
+    info "PHANTOM_CMD: (empty — pod will run sleep infinity)"
+  else
+    info "PHANTOM_CMD: $cur"
+  fi
+
+  printf '\n  next: bash scripts/positronic.sh logs -f\n'
+}
+
+cmd_set_cmd() {
+  require_kubectl
+  if [ $# -eq 0 ]; then
+    die "set-cmd needs at least one argument (the command to run inside the pod)"
+  fi
+  # Join args with single spaces. The user would have typed
+  #   set-cmd ros2 launch foo bar.launch.py arg:=value
+  # and "$*" reflects that joined verbatim.
+  local joined="$*"
+  patch_phantom_cmd "$joined"
+}
+
+cmd_clear_cmd() {
+  require_kubectl
+  patch_phantom_cmd ""
+}
+
+# ---------- subcommand: redeploy ------------------------------------------
+
+cmd_redeploy() {
+  require_kubectl
+
+  if [ ! -d "$OVERLAY" ]; then
+    die "overlay directory not found: $OVERLAY"
+  fi
+
+  bold "Applying overlay $OVERLAY"
+  kctl apply -k "$OVERLAY"
+
+  bold "Bouncing pod"
+  kctl -n "$NAMESPACE" delete pod -l "$APP_LABEL" --ignore-not-found
+
+  bold "Watching rollout (Ctrl-C to exit)"
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s -n %q rollout status deploy/positronic-control --timeout=120s\n' \
+      "$KUBECTL" "$NAMESPACE"
+    return 0
+  fi
+  $KUBECTL -n "$NAMESPACE" rollout status deploy/positronic-control --timeout=120s || true
+  $KUBECTL -n "$NAMESPACE" get pod -l "$APP_LABEL" -o wide || true
+}
+
+# ---------- subcommand: teardown ------------------------------------------
+
+cmd_teardown() {
+  require_kubectl
+  local yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) yes=1; shift ;;
+      -h|--help) echo "teardown [-y|--yes]"; return 0 ;;
+      *) die "unknown teardown flag: $1" ;;
+    esac
+  done
+
+  bold "Teardown plan"
+  cat <<EOF
+    delete deploy/positronic-control   in ns/$NAMESPACE
+    delete cm/$CONFIGMAP_NAME           in ns/$NAMESPACE
+    delete namespace/$NAMESPACE
+    (manifest files in $REPO are NOT touched)
+EOF
+
+  if [ "$yes" != 1 ] && [ "$DRY_RUN" != 1 ]; then
+    printf '\nProceed? [y/N] '
+    local ans
+    read -r ans || ans=""
+    case "$ans" in
+      y|Y|yes|YES) ;;
+      *) info "aborted."; return 0 ;;
+    esac
+  fi
+
+  kctl -n "$NAMESPACE" delete deploy positronic-control --ignore-not-found
+  kctl -n "$NAMESPACE" delete cm "$CONFIGMAP_NAME" --ignore-not-found
+  kctl delete namespace "$NAMESPACE" --ignore-not-found
+  ok "teardown complete"
+}
+
+# ---------- arg parsing / dispatch ----------------------------------------
+
+# Pull off global flags up to (but not including) the first non-flag token,
+# which we treat as the subcommand. After that we hand the rest to the
+# subcommand verbatim so that semantics like `exec -- bash -c '...'` work.
+sub=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) cmd_help; exit 0 ;;
+    -*) die "unknown global flag: $1 (try: $0 help)" ;;
+    *) sub="$1"; shift; break ;;
+  esac
+done
+
+if [ -z "$sub" ]; then
+  cmd_help
+  exit 0
+fi
+
+# Allow --dry-run between the subcommand and its args, but only as the
+# very first arg — once the user starts typing payload args (especially
+# anything after `--`) we leave the rest alone.
+if [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=1
+  shift
+fi
+
+case "$sub" in
+  help|-h|--help) cmd_help ;;
+  status)         cmd_status         "$@" ;;
+  logs)           cmd_logs           "$@" ;;
+  exec)           cmd_exec           "$@" ;;
+  gpu-test)       cmd_gpu_test       "$@" ;;
+  set-cmd)        cmd_set_cmd        "$@" ;;
+  clear-cmd)      cmd_clear_cmd      "$@" ;;
+  redeploy)       cmd_redeploy       "$@" ;;
+  teardown)       cmd_teardown       "$@" ;;
+  *) die "unknown subcommand: $sub (try: $0 help)" ;;
+esac

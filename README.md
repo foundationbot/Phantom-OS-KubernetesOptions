@@ -267,6 +267,67 @@ sudo rm /usr/local/bin/k0s
 
 ---
 
+## Local image registry (priority-first mirror)
+
+Each robot runs a `registry:2` pod (see [manifests/base/registry/](manifests/base/registry/)) named `k0s-registry` that hosts locally-compiled images like `positronic-control` and serves as a manually-primed cache for DockerHub-sourced images. containerd is configured to try `http://localhost:5443` first and fall back to `registry-1.docker.io` — so primed images survive a DockerHub outage and locally-pushed tags transparently shadow upstream. (Auto-pull-through caching is intentionally *not* enabled because Distribution `registry:2` is read-only in proxy mode, which would block locally-built image pushes; the prime script fills the gap.)
+
+The repo ships three scripts:
+
+| Script | Purpose | Runs as |
+|---|---|---|
+| [scripts/configure-k0s-containerd-mirror.sh](scripts/configure-k0s-containerd-mirror.sh) | One-time per-robot: writes `/etc/docker/daemon.json` + `/etc/k0s/containerd.d/hosts/docker.io/hosts.toml` + containerd import TOML, restarts docker & k0s | root |
+| [scripts/prime-registry-cache.sh](scripts/prime-registry-cache.sh) | Pre-populates the registry with images (by direct push, not proxy) so they work offline. Supports explicit list, `--from-file`, `--from-cluster`, `--from-manifests <dir>` | requires `docker login` for private images |
+| [scripts/validate-local-registry.sh](scripts/validate-local-registry.sh) | 13 checks across docker / k8s / containerd layers. Exit code = failure count | any user (tests needing `sudo k0s ctr` skip if passwordless sudo is unavailable) |
+
+### Bootstrap on a new robot
+
+```bash
+git pull
+sudo bash scripts/configure-k0s-containerd-mirror.sh
+# wait for ArgoCD to sync manifests/base/registry (~30s)
+docker login                  # so the prime script can pull private foundationbot/* images
+sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
+sudo bash scripts/validate-local-registry.sh
+```
+
+### Building and deploying `positronic-control`
+
+```bash
+cd ~/development/foundation/imu-policy/positronic_control
+TAG=$(git rev-parse --short HEAD)
+docker build -f docker/<chosen>.Dockerfile -t localhost:5443/positronic-control:$TAG .
+docker push localhost:5443/positronic-control:$TAG
+# then bump newTag in manifests/robots/<robot>/kustomization.yaml and push —
+# ArgoCD rolls the pod automatically
+```
+
+---
+
+## positronic-control deployment
+
+The positronic-control stack runs as a single Kubernetes Deployment in
+the `positronic` namespace. It pulls two images from the local registry
+(`positronic-control` for the executing container, `phantom-models` for
+the bundled weights), uses an initContainer + emptyDir to deliver the
+models, and gets GPU access via `runtimeClassName: nvidia`. Default
+mode is `sleep infinity` so operators can `kubectl exec` in for
+interactive ROS work; flip the `PHANTOM_CMD` key in the
+`positronic-config` ConfigMap to run as a service.
+
+- **How do I do X?** — [docs/positronic-cheatsheet.md](docs/positronic-cheatsheet.md):
+  build/push images, bump tags, deploy, sanity-check, toggle
+  `PHANTOM_CMD`, diagnose failures, registry ops.
+- **Why does it look this way?** — [docs/positronic-design.md](docs/positronic-design.md):
+  the two repos, three images, storage layers, pod composition,
+  per-robot overlays, ArgoCD wiring, known limitations.
+
+ArgoCD picks this up automatically once `feat/local-registry-mirror`
+merges to `main` (the per-robot Application at
+[`gitops/apps/phantomos-mk09.yaml`](gitops/apps/phantomos-mk09.yaml) is
+pinned to `targetRevision: main`).
+
+---
+
 ## Troubleshooting
 
 **Pods stuck in `ImagePullBackOff`**

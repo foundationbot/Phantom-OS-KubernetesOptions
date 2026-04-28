@@ -45,7 +45,11 @@ spec:
             - name: REDIS_PORT
               value: "6379"
             - name: REDIS_DB
-              value: "3"
+              # Must match argus-auth's REDIS_DB — gateway is a read-only
+              # consumer of the shared session cache (dist/services/session.js
+              # comment: "Sessions are created/deleted by argus.auth.
+              # Gateway only reads from the shared Redis for validation.").
+              value: "0"
             - name: CORS_ORIGIN
               value: "*"
             - name: SESSION_EXPIRY_WARNING_SECONDS

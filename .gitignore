@@ -1,2 +1,10 @@
 argocd
 .obsidian/
+__pycache__/
+*.pyc
+
+# Working drafts (plan + research notes). Kept locally per-author; not
+# part of the canonical repo. Anything authored under these paths stays
+# off the remote.
+docs/plans/
+docs/research/
