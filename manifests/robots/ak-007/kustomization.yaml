@@ -11,6 +11,7 @@ resources:
   - ../../base/nimbus
   - ../../base/dma-video
   - ../../base/positronic
+  - ../../base/yovariable-server
 images:
   - name: foundationbot/argus.operator-ui
     newTag: 585e58803318f5366d793986ad3e6129538b8a81
