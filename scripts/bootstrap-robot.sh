@@ -16,10 +16,19 @@
 #   -y, --yes          skip confirmation prompts
 #   --dry-run          print what each phase would do, change nothing
 #   --keep-going       continue after failures (default: bail at first)
-#   --skip-deps        skip phase 2 (apt installs + k0s download)
+#   --reset            BEFORE phase 1, tear down any pre-existing k0s
+#                      cluster (`k0s stop && k0s reset`) and back up
+#                      /root/.kube/config and terraform/terraform.tfstate*
+#                      to .bak.<timestamp>. Then run the rest of the
+#                      bootstrap normally. Cluster workload state is
+#                      destroyed; on-disk hostPath data under
+#                      /var/lib/k0s-data/, /var/lib/registry/, and
+#                      /var/lib/recordings/ is preserved (k0s reset does
+#                      not touch those paths).
+#   --skip-deps        skip phase 2 (apt installs + k0s/terraform binaries)
 #   --skip-host        skip phase 3 (host containerd/nvidia config)
 #   --skip-cluster     skip phase 4 (k0s install + systemd start)
-#   --skip-gitops      skip phase 5 (argocd + root-app)
+#   --skip-gitops      skip phase 5 (terraform apply)
 #   --skip-nvidia      force-skip nvidia runtime config (overrides
 #                      hardware autodetect)
 #   --skip-validate    skip the final validate-local-registry.sh run
@@ -54,6 +63,7 @@ ROBOT=""
 YES=0
 DRY_RUN=0
 KEEP_GOING=0
+RESET=0
 SKIP_DEPS=0
 SKIP_HOST=0
 SKIP_CLUSTER=0
@@ -66,6 +76,7 @@ while [ $# -gt 0 ]; do
     -y|--yes)        YES=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     --keep-going)    KEEP_GOING=1; shift ;;
+    --reset)         RESET=1; shift ;;
     --skip-deps)     SKIP_DEPS=1; shift ;;
     --skip-host)     SKIP_HOST=1; shift ;;
     --skip-cluster)  SKIP_CLUSTER=1; shift ;;
@@ -119,6 +130,83 @@ elif command -v k0s >/dev/null 2>&1; then
 else
   KUBECTL=()
 fi
+
+# ---- pre-phase: reset (only if --reset) --------------------------------
+
+reset_cluster() {
+  [ "$RESET" = 0 ] && return
+  phase "reset: tear down pre-existing k0s + back up local state"
+
+  if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ]; then
+    cat <<'EOF' >&2
+
+WARNING: --reset will destroy the running k0s cluster and all workload state:
+  - All Pods/Deployments/StatefulSets/ConfigMaps/Secrets are deleted.
+  - ArgoCD is uninstalled.
+  - Backups (NOT deletes) are made for:
+      /root/.kube/config           -> .bak.<timestamp>
+      terraform/terraform.tfstate* -> .bak.<timestamp>
+
+Preserved (k0s reset does NOT touch these):
+  - /var/lib/k0s-data/{mongodb,redis,postgres}/  StatefulSet hostPath PVs
+  - /var/lib/registry/                            registry hostPath PV
+  - /var/lib/recordings/                          dma-video hostPath PV (if used)
+
+EOF
+    printf 'Continue? [y/N] '
+    read -r reply || true
+    [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
+  fi
+
+  local ts
+  ts=$(date +%Y%m%d-%H%M%S)
+
+  # 1. Stop + reset k0s (if installed)
+  if command -v k0s >/dev/null 2>&1; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  k0s stop && k0s reset"
+    else
+      k0s stop 2>/dev/null || true
+      sleep 2
+      if k0s reset; then
+        pass "k0s reset"
+      else
+        fail "k0s reset failed"
+      fi
+    fi
+  else
+    skip "k0s not installed — nothing to tear down on the k0s side"
+  fi
+
+  # 2. Back up the kubeconfig (don't delete; user may want it)
+  if [ -e /root/.kube/config ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  mv /root/.kube/config /root/.kube/config.bak.$ts"
+    else
+      mv /root/.kube/config "/root/.kube/config.bak.$ts"
+      pass "/root/.kube/config -> /root/.kube/config.bak.$ts"
+    fi
+  else
+    skip "/root/.kube/config absent — nothing to back up"
+  fi
+
+  # 3. Back up terraform state (don't delete; it's the only record of
+  #    what helm release / namespace terraform was managing)
+  for f in terraform/terraform.tfstate terraform/terraform.tfstate.backup; do
+    if [ -e "$REPO_ROOT/$f" ]; then
+      if [ "$DRY_RUN" = 1 ]; then
+        info "DRY-RUN  mv $REPO_ROOT/$f -> $REPO_ROOT/$f.bak.$ts"
+      else
+        mv "$REPO_ROOT/$f" "$REPO_ROOT/$f.bak.$ts"
+        pass "$f -> $f.bak.$ts"
+      fi
+    fi
+  done
+
+  # 4. Reset cached KUBECTL — k0s is gone, anything we cached at startup
+  #    is no longer valid until phase 4 reinstalls it.
+  KUBECTL=()
+}
 
 # ---- phase 1: preflight -------------------------------------------------
 
@@ -441,21 +529,24 @@ validate() {
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: 1-preflight, 2-deps, 3-host-config, 4-cluster, 5-gitops, 6-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-gitops, 6-validate
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
-if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ]; then
+# When --reset is set, it has its own confirmation prompt with a
+# detailed warning. Skip the generic confirmation.
+if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
   printf '\nProceed? [y/N] '
   read -r reply || true
   [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
 fi
 
-preflight  ; guard
-deps       ; guard
-host_config; guard
-cluster    ; guard
-gitops     ; guard
+reset_cluster ; guard
+preflight     ; guard
+deps          ; guard
+host_config   ; guard
+cluster       ; guard
+gitops        ; guard
 validate
 
 summary
