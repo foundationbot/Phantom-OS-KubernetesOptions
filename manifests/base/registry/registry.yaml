@@ -91,6 +91,15 @@ spec:
               value: "127.0.0.1:5443"
             - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
               value: /var/lib/registry
+            # Enable the manifest-delete API. Used by
+            # scripts/prune-registry-tags.sh to remove orphaned tags
+            # (e.g. one-off `mirror-test-*` smoke pushes, old
+            # positronic-control builds) without filesystem hacks.
+            # The registry binds 127.0.0.1 only, so this doesn't widen
+            # exposure — anyone who can hit /v2/ at all is already on
+            # the host.
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
           volumeMounts:
             - name: storage
               mountPath: /var/lib/registry

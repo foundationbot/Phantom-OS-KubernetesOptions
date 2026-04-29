@@ -357,6 +357,51 @@ curl -fs http://localhost:5443/v2/_catalog
 curl -fs http://localhost:5443/v2/<repo>/tags/list
 ```
 
+### Prune stale tags + reclaim disk
+
+The local Distribution registry has its delete API enabled
+(`REGISTRY_STORAGE_DELETE_ENABLED=true` in
+[`manifests/base/registry/registry.yaml`](../manifests/base/registry/registry.yaml)).
+Use [`scripts/prune-registry-tags.sh`](../scripts/prune-registry-tags.sh):
+
+```bash
+# Just see what's there
+bash scripts/prune-registry-tags.sh --list
+
+# Tags in the registry that no Pod/Deployment/StatefulSet/DaemonSet
+# references (image-ref normalization handles both
+# localhost:5443/foo:bar and bare foundationbot/foo:bar forms).
+bash scripts/prune-registry-tags.sh --orphans
+
+# Remove specific tags (chains a garbage-collect after).
+sudo bash scripts/prune-registry-tags.sh \
+  --rm positronic-control:0.2.43-cu130 phantom-models:2026-04-15 \
+  --gc
+
+# Or in one shot — delete every orphan + reclaim disk, no prompts
+sudo bash scripts/prune-registry-tags.sh --rm-orphans --gc -y
+
+# Just GC (e.g. after manual deletes)
+sudo bash scripts/prune-registry-tags.sh --gc
+
+# Dry run (works for any subcommand)
+sudo bash scripts/prune-registry-tags.sh --rm-orphans --dry-run
+```
+
+How it works under the hood:
+- `--rm` does the standard two-step Distribution v2 delete:
+  `HEAD /v2/<repo>/manifests/<tag>` to resolve the digest, then
+  `DELETE /v2/<repo>/manifests/<digest>`. That removes the tag pointer
+  but leaves blob bytes on disk.
+- `--gc` runs `registry garbage-collect --delete-untagged` inside the
+  registry pod, which walks every reachable manifest and deletes the
+  blobs nothing references. This is what actually frees space at
+  `/var/lib/registry`.
+- `--orphans` excludes ReplicaSet history on purpose — Kubernetes keeps
+  rolled-back ReplicaSets at `replicas=0` and they'd otherwise pin
+  every recent tag as "in use." Use explicit `--rm <tag>` if you do
+  want to preserve a rollback waypoint.
+
 ### Validate the whole stack (13 layered checks)
 
 ```bash
