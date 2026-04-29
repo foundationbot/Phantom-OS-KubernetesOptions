@@ -144,6 +144,7 @@ WARNING: --reset will destroy the running k0s cluster and all workload state:
   - All Pods/Deployments/StatefulSets/ConfigMaps/Secrets are deleted.
   - ArgoCD is uninstalled.
   - Backups (NOT deletes) are made for:
+      /etc/k0s/k0s.yaml            -> .bak.<timestamp>
       /root/.kube/config           -> .bak.<timestamp>
       terraform/terraform.tfstate* -> .bak.<timestamp>
 
@@ -178,7 +179,24 @@ EOF
     skip "k0s not installed — nothing to tear down on the k0s side"
   fi
 
-  # 2. Back up the kubeconfig (don't delete; user may want it)
+  # 2. Back up /etc/k0s/k0s.yaml. `k0s reset` removes /var/lib/k0s and the
+  #    k0scontroller systemd unit but deliberately leaves this config file
+  #    behind. Phase 4's "already installed" check is keyed on this file,
+  #    so leaving it in place causes phase 4 to skip `k0s install controller`
+  #    (the step that creates the systemd unit) and then fail the
+  #    `systemctl enable --now k0scontroller` that follows.
+  if [ -e /etc/k0s/k0s.yaml ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  mv /etc/k0s/k0s.yaml /etc/k0s/k0s.yaml.bak.$ts"
+    else
+      mv /etc/k0s/k0s.yaml "/etc/k0s/k0s.yaml.bak.$ts"
+      pass "/etc/k0s/k0s.yaml -> /etc/k0s/k0s.yaml.bak.$ts"
+    fi
+  else
+    skip "/etc/k0s/k0s.yaml absent — nothing to back up"
+  fi
+
+  # 3. Back up the kubeconfig (don't delete; user may want it)
   if [ -e /root/.kube/config ]; then
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  mv /root/.kube/config /root/.kube/config.bak.$ts"
@@ -190,7 +208,7 @@ EOF
     skip "/root/.kube/config absent — nothing to back up"
   fi
 
-  # 3. Back up terraform state (don't delete; it's the only record of
+  # 4. Back up terraform state (don't delete; it's the only record of
   #    what helm release / namespace terraform was managing)
   for f in terraform/terraform.tfstate terraform/terraform.tfstate.backup; do
     if [ -e "$REPO_ROOT/$f" ]; then
@@ -203,7 +221,7 @@ EOF
     fi
   done
 
-  # 4. Reset cached KUBECTL — k0s is gone, anything we cached at startup
+  # 5. Reset cached KUBECTL — k0s is gone, anything we cached at startup
   #    is no longer valid until phase 4 reinstalls it.
   KUBECTL=()
 }
