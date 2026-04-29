@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
-    targetRevision: main
+    targetRevision: test/positronic-image-20260428
     path: manifests/robots/mk09
   destination:
     server: https://kubernetes.default.svc
