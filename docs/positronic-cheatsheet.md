@@ -44,6 +44,31 @@ Verify the tag landed:
 curl -fs http://localhost:5443/v2/positronic-control/tags/list
 ```
 
+### One-shot: push + bump overlay + redeploy
+
+[`scripts/positronic.sh push-image`](../scripts/positronic.sh) folds the
+three steps (tag for local registry, `docker push`, bump `newTag` in the
+overlay, redeploy) into one. Use it after `docker build` to put a fresh
+image on the cluster without hand-editing YAML:
+
+```bash
+# Build with the local-registry tag straight away, then push + redeploy.
+docker build -f docker/phantom-cuda.Dockerfile \
+  -t positronic-control:$TAG .
+bash scripts/positronic.sh push-image positronic-control:$TAG
+
+# Skip the rollout (e.g. you want to commit the kustomization change first).
+bash scripts/positronic.sh push-image positronic-control:$TAG --no-redeploy
+
+# Override the tag pushed to the registry / written into the overlay.
+bash scripts/positronic.sh push-image foundationbot/phantom-cuda:0.2.45-cu130 \
+  --tag 0.2.45-cu130
+```
+
+The overlay's `localhost:5443/positronic-control` `images:` entry must
+already exist — the wrapper updates it in place but won't add a new
+entry. `--dry-run` prints every docker + YAML edit it would do.
+
 ---
 
 ## Build + push phantom-models
@@ -98,6 +123,10 @@ Kustomize's `images:` transformer rewrites both the main container and
 the `load-models` initContainer in one shot (both reference
 `localhost:5443/phantom-models` / `localhost:5443/positronic-control`).
 Then commit + push the YAML.
+
+For positronic-control specifically, `scripts/positronic.sh push-image`
+(see ["One-shot: push + bump overlay + redeploy"](#one-shot-push--bump-overlay--redeploy))
+does the bump for you as part of pushing the image.
 
 ---
 
@@ -441,14 +470,44 @@ the new size declaration.
 
 ## One-time bootstrap (new robot)
 
-For reference; the README's "Local image registry" section also covers
-this.
+Single-command path:
+
+```bash
+git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
+cd Phantom-OS-KubernetesOptions
+sudo bash scripts/bootstrap-robot.sh --robot <name>      # mk09, argentum, ...
+docker login                                              # for private foundationbot/* images
+sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
+```
+
+`bootstrap-robot.sh` orchestrates six phases (preflight, deps, host
+config, cluster + kubeconfig, gitops via terraform, validate) and is
+idempotent — re-running on a bootstrapped host detects existing config
+and prints `SKIP` for what's already done. Useful flags: `--dry-run`
+(print plan, change nothing), `--skip-deps` / `--skip-host` /
+`--skip-cluster` / `--skip-gitops` / `--skip-validate` to slice phases,
+`--skip-nvidia` to override GPU autodetect.
+
+Image priming is the separate step because it needs DockerHub creds.
+
+**Want to disable a base workload (argus, dma-video, …) on this robot
+before bringing it up?** Edit
+[`manifests/robots/<robot>/kustomization.yaml`](../manifests/robots/)
+and remove the relevant `../../base/<name>` line from the `resources:`
+block, then commit + push **before** the bootstrap script reaches phase
+5. ArgoCD reads the overlay from git; if it isn't listed, it never gets
+deployed.
+
+Manual equivalent (what bootstrap-robot.sh runs internally):
 
 ```bash
 git pull
 sudo bash scripts/configure-k0s-containerd-mirror.sh
 sudo bash scripts/configure-k0s-nvidia-runtime.sh
-# wait for ArgoCD to sync manifests/base/registry (~30s)
+sudo k0s install controller --single --enable-worker
+sudo systemctl enable --now k0scontroller
+sudo k0s kubeconfig admin > /root/.kube/config && sudo chmod 600 /root/.kube/config
+cd terraform && terraform init && terraform apply
 docker login                                                    # for private foundationbot/* pulls
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 sudo bash scripts/validate-local-registry.sh

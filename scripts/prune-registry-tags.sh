@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# prune-registry-tags.sh — list/remove tags via the local registry's HTTP
-# API and optionally reclaim disk via `registry garbage-collect`.
+# prune-registry-tags.sh — list/remove tags in the local Distribution
+# registry via skopeo, and optionally reclaim disk via
+# `registry garbage-collect`.
 #
-# Uses the standard Distribution v2 manifest-delete endpoint
-# (DELETE /v2/<repo>/manifests/<digest>), which requires
-# REGISTRY_STORAGE_DELETE_ENABLED=true on the registry Deployment
-# (set in manifests/base/registry/registry.yaml).
+# Delete uses `skopeo delete` against the local registry, which wraps
+# the standard Distribution v2 manifest-delete dance (HEAD for digest,
+# DELETE by digest). Requires REGISTRY_STORAGE_DELETE_ENABLED=true on
+# the registry Deployment (set in manifests/base/registry/registry.yaml).
+# Note: deleting by digest removes ALL tags pointing at the same digest
+# (rare in this dev cluster, but possible if you `docker tag` the same
+# image to two names).
 #
-# Two-step delete per tag:
-#   1. HEAD /v2/<repo>/manifests/<tag>  → Docker-Content-Digest: sha256:...
-#   2. DELETE /v2/<repo>/manifests/<digest> → 202 Accepted
-# Note: deleting a manifest by digest removes ALL tags pointing at the
-# same digest (rare in this dev cluster, but possible if you `docker tag`
-# the same image to two names).
+# skopeo is a hard dependency. Install via scripts/bootstrap-robot.sh
+# or `apt install -y skopeo`.
 #
 # Usage (one subcommand required):
 #   --list                 List every <repo>:<tag> in the registry.
@@ -51,9 +51,17 @@ set -u -o pipefail
 REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-registry}"
 REGISTRY_DEPLOYMENT="${REGISTRY_DEPLOYMENT:-k0s-registry}"
-REG_URL="http://$REGISTRY_HOST"
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; }
+
+# skopeo is a hard dependency, but only for the delete path. --list,
+# --orphans, and --gc work without it; --rm / --rm-orphans require it.
+# Install via scripts/bootstrap-robot.sh (which apt-installs it) or
+# directly with `apt install -y skopeo`.
+require_skopeo() {
+  command -v skopeo >/dev/null 2>&1 \
+    || die "skopeo not in PATH; install via 'apt install -y skopeo' or run scripts/bootstrap-robot.sh"
+}
 
 # kubectl resolution: prefer standalone kubectl, fall back to k0s kubectl
 if command -v kubectl >/dev/null 2>&1; then
@@ -68,17 +76,6 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 2; }
 ok()   { printf '  \033[32mOK\033[0m    %s\n' "$1"; }
 info() { printf '  %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
-
-# Manifest media types we'll accept on HEAD. Cover Docker v2 + OCI
-# variants (single + index/list). Without these the registry may pick
-# a default that doesn't match the bytes the tag actually resolves to,
-# and the resulting digest wouldn't be deletable.
-ACCEPT_HEADERS=(
-  -H 'Accept: application/vnd.docker.distribution.manifest.v2+json'
-  -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json'
-  -H 'Accept: application/vnd.oci.image.manifest.v1+json'
-  -H 'Accept: application/vnd.oci.image.index.v1+json'
-)
 
 list_registry_tags() {
   python3 - "$REGISTRY_HOST" <<'PY'
@@ -157,38 +154,30 @@ list_orphan_tags() {
   comm -23 <(list_registry_tags | sort -u) <(list_inuse_tags)
 }
 
-resolve_digest() {
-  # Echo the manifest digest for <repo>:<tag>. Empty on failure.
-  local repo="$1" tag="$2"
-  curl -sI "${ACCEPT_HEADERS[@]}" "$REG_URL/v2/$repo/manifests/$tag" \
-    | awk 'BEGIN{IGNORECASE=1}
-           /^Docker-Content-Digest:/ {
-             sub(/^[^:]+:[ \t]*/, ""); gsub(/[\r\n]/, ""); print; exit
-           }'
-}
-
 remove_tag() {
+  # skopeo's delete subcommand does HEAD-then-DELETE in a single call,
+  # using its own Accept-header negotiation that handles both Docker v2
+  # and OCI manifest formats. Falls back to a clear error if the
+  # registry has REGISTRY_STORAGE_DELETE_ENABLED unset (skopeo prints
+  # "manifest unknown" or similar from the upstream HTTP response).
   local entry="$1"
-  local repo="${entry%:*}"
-  local tag="${entry##*:}"
-  local digest
-  digest=$(resolve_digest "$repo" "$tag")
-  if [ -z "$digest" ]; then
-    fail "$entry  no digest returned (tag missing or registry refused our Accept headers)"
-    return 1
-  fi
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  DELETE /v2/$repo/manifests/$digest  ($tag → $digest)"
+    info "DRY-RUN  skopeo delete --tls-verify=false docker://$REGISTRY_HOST/$entry"
     return 0
   fi
-  local code
-  code=$(curl -sX DELETE -o /dev/null -w '%{http_code}' "$REG_URL/v2/$repo/manifests/$digest")
-  case "$code" in
-    202) ok "$entry  ($digest)" ;;
-    405) fail "$entry  HTTP 405 — REGISTRY_STORAGE_DELETE_ENABLED=true not set on the registry?"; return 1 ;;
-    404) fail "$entry  HTTP 404 — manifest not found"; return 1 ;;
-    *)   fail "$entry  unexpected HTTP $code"; return 1 ;;
-  esac
+  local out
+  if out=$(skopeo delete --tls-verify=false "docker://$REGISTRY_HOST/$entry" 2>&1); then
+    ok "$entry"
+    return 0
+  fi
+  if printf '%s' "$out" | grep -qi 'method.*not.*allowed\|405\|delete.*disabled\|unsupported'; then
+    fail "$entry  delete API not enabled — REGISTRY_STORAGE_DELETE_ENABLED=true on the registry Deployment?"
+  elif printf '%s' "$out" | grep -qi 'manifest unknown\|name unknown\|404\|not.*found'; then
+    fail "$entry  not found in registry"
+  else
+    fail "$entry  $(printf '%s' "$out" | tr -d '\r' | tr '\n' ' ' | head -c 200)"
+  fi
+  return 1
 }
 
 run_gc() {
@@ -249,6 +238,7 @@ case "$ACTION" in
 
   rm)
     [ "${#TARGETS[@]}" -eq 0 ] && die "--rm needs at least one <repo>:<tag>"
+    require_skopeo
     echo "About to remove ${#TARGETS[@]} tag(s):"
     printf '  %s\n' "${TARGETS[@]}"
     confirm "Proceed?" || { echo "aborted"; exit 1; }
@@ -266,6 +256,7 @@ case "$ACTION" in
       echo "no orphan tags found."
       exit 0
     fi
+    require_skopeo
     echo "Orphan tags (not referenced by any cluster workload):"
     printf '  %s\n' "${orphans[@]}"
     confirm "Remove all ${#orphans[@]}?" || { echo "aborted"; exit 1; }
