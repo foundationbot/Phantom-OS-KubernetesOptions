@@ -13,6 +13,8 @@ spec:
       labels:
         app: camera-params
     spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:

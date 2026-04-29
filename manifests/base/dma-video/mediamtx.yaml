@@ -13,6 +13,8 @@ spec:
       labels:
         app: mediamtx
     spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:

@@ -13,6 +13,8 @@ spec:
       labels:
         app: rtsp-streamer
     spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
       hostNetwork: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
