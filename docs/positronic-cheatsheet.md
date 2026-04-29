@@ -447,30 +447,38 @@ Single-command path:
 git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
 cd Phantom-OS-KubernetesOptions
 sudo bash scripts/bootstrap-robot.sh --robot <name>      # mk09, argentum, ...
-```
-
-`bootstrap-robot.sh` orchestrates the six phases below. It's idempotent
-— re-running on a partially or fully bootstrapped host detects existing
-config and prints `SKIP` for what's already done. Useful flags:
-`--dry-run` (print the plan, change nothing), `--skip-deps` /
-`--skip-host` / `--skip-cluster` / `--skip-gitops` / `--skip-validate`
-to slice phases, `--skip-nvidia` to override the GPU autodetect.
-
-Followed by image priming (this is a separate step because it needs
-DockerHub credentials):
-
-```bash
-docker login                  # for private foundationbot/* images
+docker login                                              # for private foundationbot/* images
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 ```
 
-Manual equivalent (what the bootstrap script runs under the hood):
+`bootstrap-robot.sh` orchestrates six phases (preflight, deps, host
+config, cluster + kubeconfig, gitops via terraform, validate) and is
+idempotent — re-running on a bootstrapped host detects existing config
+and prints `SKIP` for what's already done. Useful flags: `--dry-run`
+(print plan, change nothing), `--skip-deps` / `--skip-host` /
+`--skip-cluster` / `--skip-gitops` / `--skip-validate` to slice phases,
+`--skip-nvidia` to override GPU autodetect.
+
+Image priming is the separate step because it needs DockerHub creds.
+
+**Want to disable a base workload (argus, dma-video, …) on this robot
+before bringing it up?** Edit
+[`manifests/robots/<robot>/kustomization.yaml`](../manifests/robots/)
+and remove the relevant `../../base/<name>` line from the `resources:`
+block, then commit + push **before** the bootstrap script reaches phase
+5. ArgoCD reads the overlay from git; if it isn't listed, it never gets
+deployed.
+
+Manual equivalent (what bootstrap-robot.sh runs internally):
 
 ```bash
 git pull
 sudo bash scripts/configure-k0s-containerd-mirror.sh
 sudo bash scripts/configure-k0s-nvidia-runtime.sh
-# wait for ArgoCD to sync manifests/base/registry (~30s)
+sudo k0s install controller --single --enable-worker
+sudo systemctl enable --now k0scontroller
+sudo k0s kubeconfig admin > /root/.kube/config && sudo chmod 600 /root/.kube/config
+cd terraform && terraform init && terraform apply
 docker login                                                    # for private foundationbot/* pulls
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 sudo bash scripts/validate-local-registry.sh

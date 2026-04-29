@@ -14,8 +14,15 @@ Every change flows through git → ArgoCD.
 
 - Terraform >= 1.10
 - kubectl in `PATH`
-- A kubeconfig pointing at a cluster with cluster-admin access
+- A kubeconfig pointing at a cluster with cluster-admin access (k0s
+  generates one via `sudo k0s kubeconfig admin > ~/.kube/config`)
 - The cluster must exist already (this module does **not** provision k0s)
+
+The repo's `scripts/bootstrap-robot.sh` handles all four prerequisites
+automatically (installs Terraform binary in phase 2, brings up k0s in
+phase 4, writes `/root/.kube/config` from `k0s kubeconfig admin`, then
+runs this module in phase 5). Use it on a fresh machine; come back here
+manually only when iterating on the Terraform definitions themselves.
 
 ## Usage
 

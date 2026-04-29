@@ -27,16 +27,19 @@
 #
 # Phases:
 #   1. preflight    OS / arch / kernel / disk / sudo / port collisions
-#   2. deps         apt: docker.io, skopeo, python3, curl, jq, git;
-#                   k0s binary if absent
+#   2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
+#                   pciutils, unzip; k0s binary; terraform binary
 #   3. host config  configure-k0s-containerd-mirror.sh +
 #                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
 #                   via lspci or /dev/nvidia0)
 #   4. cluster      k0s install controller --single --enable-worker;
-#                   systemctl enable --now k0scontroller; wait Ready
-#   5. gitops       install argocd if absent, apply gitops/root-app.yaml,
-#                   wait for phantomos-<robot> Application to reach
-#                   Synced + Healthy
+#                   systemctl enable --now k0scontroller; wait Ready;
+#                   write /root/.kube/config from `k0s kubeconfig admin`
+#                   (so kubectl + terraform have a config to read)
+#   5. gitops       cd terraform && terraform init && terraform apply
+#                   (installs ArgoCD via the official Helm chart and
+#                   applies gitops/root-app.yaml — the canonical path).
+#                   Wait for phantomos-<robot> to reach Synced + Healthy.
 #   6. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
@@ -166,7 +169,7 @@ deps() {
   if [ "$SKIP_DEPS" = 1 ]; then phase "phase 2: deps  (skipped)"; return; fi
   phase "phase 2: deps"
 
-  apt_pkgs=(docker.io skopeo python3 curl jq git pciutils)
+  apt_pkgs=(docker.io skopeo python3 curl jq git pciutils unzip)
   to_install=()
   for pkg in "${apt_pkgs[@]}"; do
     if dpkg -l "$pkg" 2>/dev/null | awk 'BEGIN{ok=1} /^ii/ {ok=0} END {exit ok}'; then
@@ -194,6 +197,32 @@ deps() {
     pass "k0s installed"
   else
     fail "k0s install failed (curl https://get.k0s.sh | sh)"
+  fi
+
+  # terraform — fixed minor version, matched binary by host arch. The
+  # terraform/ module's README requires >= 1.10.
+  TF_VERSION="${TF_VERSION:-1.10.5}"
+  if command -v terraform >/dev/null 2>&1; then
+    skip "terraform already in PATH ($(terraform version 2>/dev/null | head -1))"
+  else
+    case "$(uname -m)" in
+      x86_64)  tf_arch=amd64 ;;
+      aarch64) tf_arch=arm64 ;;
+      *)       fail "no terraform binary for arch $(uname -m)"; tf_arch="" ;;
+    esac
+    if [ -n "$tf_arch" ]; then
+      url="https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_${tf_arch}.zip"
+      if [ "$DRY_RUN" = 1 ]; then
+        info "DRY-RUN  download $url -> /usr/local/bin/terraform"
+      elif curl -fsSL "$url" -o /tmp/tf.zip \
+           && unzip -oq /tmp/tf.zip -d /usr/local/bin \
+           && chmod +x /usr/local/bin/terraform \
+           && rm -f /tmp/tf.zip; then
+        pass "terraform installed (v$TF_VERSION)"
+      else
+        fail "terraform install failed ($url)"
+      fi
+    fi
   fi
 }
 
@@ -293,63 +322,82 @@ cluster() {
     return
   fi
 
-  [ "$DRY_RUN" = 1 ] && { info "DRY-RUN  wait for node Ready"; return; }
-
-  for _ in $(seq 1 60); do
-    if "${KUBECTL[@]}" get nodes 2>/dev/null | awk '/Ready/{ok=1} END{exit !ok}'; then
-      pass "node Ready"
-      return
-    fi
-    sleep 5
-  done
-  fail "node not Ready after 5min"
-}
-
-# ---- phase 5: gitops ----------------------------------------------------
-
-gitops() {
-  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 5: gitops  (skipped)"; return; fi
-  phase "phase 5: gitops"
-
-  if [ "${#KUBECTL[@]}" -eq 0 ]; then
-    [ "$DRY_RUN" = 1 ] && { info "DRY-RUN  argocd install + apply gitops/root-app.yaml + wait for phantomos-$ROBOT"; return; }
-    fail "no kubectl available — earlier phase failed?"
-    return
-  fi
-
-  [ "$DRY_RUN" = 1 ] && { info "DRY-RUN  argocd install + apply gitops/root-app.yaml + wait for phantomos-$ROBOT"; return; }
-
-  if "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1; then
-    skip "argocd ns exists"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  wait for node Ready"
   else
-    "${KUBECTL[@]}" create ns argocd
-    if "${KUBECTL[@]}" apply -n argocd \
-        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml; then
-      pass "argocd installed"
-    else
-      fail "argocd install"; return
-    fi
-    info "waiting for argocd-server Deployment Ready..."
     for _ in $(seq 1 60); do
-      if "${KUBECTL[@]}" -n argocd get deploy argocd-server \
-           -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^1$'; then
-        pass "argocd-server ready"
+      if "${KUBECTL[@]}" get nodes 2>/dev/null | awk '/Ready/{ok=1} END{exit !ok}'; then
+        pass "node Ready"
         break
       fi
       sleep 5
     done
   fi
 
+  # Write a kubeconfig for root so kubectl + terraform have one to read.
+  # `k0s kubeconfig admin` regenerates from the cluster CA every time —
+  # safe to run repeatedly.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  k0s kubeconfig admin > /root/.kube/config (chmod 600)"
+  else
+    mkdir -p /root/.kube
+    if k0s kubeconfig admin > /root/.kube/config 2>/dev/null && [ -s /root/.kube/config ]; then
+      chmod 600 /root/.kube/config
+      pass "/root/.kube/config written ($(wc -c </root/.kube/config) bytes)"
+    else
+      fail "k0s kubeconfig admin failed"
+    fi
+  fi
+}
+
+# ---- phase 5: gitops ----------------------------------------------------
+
+gitops() {
+  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 5: gitops  (skipped)"; return; fi
+  phase "phase 5: gitops (terraform)"
+
   if [ ! -f "$REPO_ROOT/gitops/apps/phantomos-$ROBOT.yaml" ]; then
     fail "gitops/apps/phantomos-$ROBOT.yaml not in repo — create it before re-running"
     return
   fi
 
-  if "${KUBECTL[@]}" apply -f "$REPO_ROOT/gitops/root-app.yaml"; then
-    pass "root-app applied"
-  else
-    fail "root-app apply"; return
+  if [ ! -d "$REPO_ROOT/terraform" ]; then
+    fail "terraform/ not found at $REPO_ROOT/terraform"; return
   fi
+
+  if ! command -v terraform >/dev/null 2>&1 && [ "$DRY_RUN" = 0 ]; then
+    fail "terraform not in PATH — phase 2 should have installed it"; return
+  fi
+
+  local kc=/root/.kube/config
+  if [ "$DRY_RUN" = 0 ] && [ ! -r "$kc" ]; then
+    fail "$kc not readable — phase 4 should have written it"; return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
+    info "DRY-RUN  wait for phantomos-$ROBOT  Synced + Healthy"
+    return
+  fi
+
+  # If ArgoCD is already installed (not via this terraform state), warn
+  # but proceed — terraform will adopt the existing namespace.
+  if "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1 && \
+     ! [ -f "$REPO_ROOT/terraform/terraform.tfstate" ]; then
+    info "argocd ns exists but no terraform state file — terraform will adopt it"
+  fi
+
+  (
+    cd "$REPO_ROOT/terraform" || exit 2
+    terraform init -input=false -upgrade=false
+  ) || { fail "terraform init"; return; }
+  pass "terraform init"
+
+  (
+    cd "$REPO_ROOT/terraform" || exit 2
+    terraform apply -input=false -auto-approve -var="kubeconfig=$kc"
+  ) || { fail "terraform apply"; return; }
+  pass "terraform apply"
 
   info "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
   local sync health

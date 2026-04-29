@@ -281,7 +281,7 @@ The repo ships three scripts:
 
 ### Bootstrap on a new robot
 
-End-to-end (deps → host config → k0s → ArgoCD → validate):
+End-to-end (deps → host config → k0s → ArgoCD via terraform → validate):
 
 ```bash
 git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
@@ -291,9 +291,37 @@ docker login                  # so the prime step can pull private foundationbot
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 ```
 
-`scripts/bootstrap-robot.sh` is idempotent and reports per-phase
-PASS/FAIL/SKIP. See `--help` for the phase list and skip flags. Image
-priming is the separate manual step because it needs DockerHub creds.
+`scripts/bootstrap-robot.sh` is idempotent (re-runs detect existing
+config and skip destructive steps) and reports per-phase PASS/FAIL/SKIP.
+See `--help` for the phase list and skip flags. Image priming is a
+separate step because it needs DockerHub credentials.
+
+**What it sets up that you may want to know about:**
+
+- **Kubeconfig at `/root/.kube/config`.** A kubeconfig is a YAML file
+  that tells `kubectl` (and Terraform's k8s/helm providers) how to
+  reach a cluster — API server URL, client cert + key, and which
+  context to use by default. k0s generates one on demand via
+  `k0s kubeconfig admin`; the bootstrap writes it to the standard
+  location so kubectl works automatically as root. To get the same
+  thing in a non-root user's shell:
+  ```bash
+  mkdir -p ~/.kube && sudo k0s kubeconfig admin > ~/.kube/config && chmod 600 ~/.kube/config
+  ```
+- **ArgoCD installed via the official Helm chart**, driven by
+  `terraform/`. The bootstrap installs the `terraform` binary in phase 2
+  and runs `terraform apply` in phase 5; everything ArgoCD needs lives
+  in `terraform/main.tf` and the `gitops/` tree. After this point,
+  `kubectl apply` should not be used by hand for anything — every
+  change flows through git → ArgoCD.
+
+**Disabling a workload before deployment** (e.g. you want to bring a
+robot up without `argus`): edit
+`manifests/robots/<robot>/kustomization.yaml` and remove the relevant
+line from the `resources:` block (e.g. `../../base/argus`), then commit
++ push **before** `terraform apply` runs in phase 5. ArgoCD reads the
+overlay from git, sees no argus, and never deploys it. Re-add later by
+restoring the line and pushing.
 
 ### Building and deploying `positronic-control`
 
