@@ -462,8 +462,8 @@ gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 5: gitops  (skipped)"; return; fi
   phase "phase 5: gitops (terraform)"
 
-  if [ ! -f "$REPO_ROOT/gitops/apps/phantomos-$ROBOT.yaml" ]; then
-    fail "gitops/apps/phantomos-$ROBOT.yaml not in repo — create it before re-running"
+  if [ ! -f "$REPO_ROOT/gitops/apps/$ROBOT/phantomos-$ROBOT.yaml" ]; then
+    fail "gitops/apps/$ROBOT/phantomos-$ROBOT.yaml not in repo — create it before re-running"
     return
   fi
 

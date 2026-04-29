@@ -20,27 +20,58 @@ set -u -o pipefail
 # ---------- defaults (env overridable) -------------------------------------
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+# Robot identity — set via --robot <name>, or auto-detected from hostname.
+# Validated after arg parsing (see _resolve_robot below).
+ROBOT="${ROBOT:-}"
+
 NAMESPACE="${NAMESPACE:-positronic}"
 APP_LABEL="${APP_LABEL:-app=positronic-control}"
-OVERLAY="${OVERLAY:-${REPO}/manifests/robots/mk09}"
 CONFIGMAP_NAME="${CONFIGMAP_NAME:-positronic-config}"
 CONTAINER_NAME="${CONTAINER_NAME:-positronic-control}"
 INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
-# Image name as listed under `images:` in the overlay's kustomization.yaml,
-# AND the registry-qualified docker repo we push to. Defaults match mk09.
 IMAGE_NAME="${IMAGE_NAME:-localhost:5443/positronic-control}"
 
-# GitOps wiring for track-branch / argo-pause / argo-resume. The cluster runs
-# app-of-apps: a `root` Application (gitops/apps) creates the per-robot child
-# (`phantomos-mk09`). Pointing root at a branch is what lets pre-merge
-# kustomization edits flow through ArgoCD instead of being reverted by selfHeal.
-TRACK_APP_FILE="${TRACK_APP_FILE:-${REPO}/gitops/apps/phantomos-mk09.yaml}"
 TRACK_ROOT_APP="${TRACK_ROOT_APP:-root}"
 TRACK_ROOT_NS="${TRACK_ROOT_NS:-argocd}"
-ARGO_APP="${ARGO_APP:-phantomos-mk09}"
 ARGO_NS="${ARGO_NS:-argocd}"
 
 DRY_RUN=0
+
+# _resolve_robot — called after arg parsing to finalise ROBOT and derived vars.
+_resolve_robot() {
+  # 1. Explicit --robot or ROBOT env already set.
+  # 2. Fall back to hostname if it matches a manifests/robots/<name> dir.
+  # 3. Prompt interactively.
+  if [ -z "$ROBOT" ]; then
+    local hn
+    hn="$(hostname 2>/dev/null || true)"
+    if [ -n "$hn" ] && [ -d "$REPO/manifests/robots/$hn" ]; then
+      ROBOT="$hn"
+    fi
+  fi
+
+  if [ -z "$ROBOT" ]; then
+    local available
+    available="$(ls -1 "$REPO/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
+    printf 'Could not determine robot name.\n' >&2
+    printf 'Available robots: %s\n' "${available:-<none>}" >&2
+    printf 'Enter robot name: ' >&2
+    read -r ROBOT
+    [ -n "$ROBOT" ] || die "robot name is required"
+  fi
+
+  if [ ! -d "$REPO/manifests/robots/$ROBOT" ]; then
+    local available
+    available="$(ls -1 "$REPO/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
+    die "manifests/robots/$ROBOT/ not found — available: ${available:-<none>}"
+  fi
+
+  # Derived paths (still env-overridable).
+  OVERLAY="${OVERLAY:-${REPO}/manifests/robots/${ROBOT}}"
+  TRACK_APP_FILE="${TRACK_APP_FILE:-${REPO}/gitops/apps/${ROBOT}/phantomos-${ROBOT}.yaml}"
+  ARGO_APP="${ARGO_APP:-phantomos-${ROBOT}}"
+}
 
 # ---------- color helpers (only when stdout is a TTY) ---------------------
 
@@ -137,7 +168,7 @@ cmd_help() {
 ${C_BOLD}positronic.sh${C_RESET} — wrapper for the positronic-control deployment
 
 ${C_BOLD}Usage:${C_RESET}
-  bash scripts/positronic.sh [--dry-run] <subcommand> [args...]
+  bash scripts/positronic.sh [--robot <name>] [--dry-run] <subcommand> [args...]
 
 ${C_BOLD}Subcommands:${C_RESET}
   status                       Pod state, QoS, restarts, runtimeClassName,
@@ -168,34 +199,38 @@ ${C_BOLD}Subcommands:${C_RESET}
                                minus the diagnose phase.
   track-branch [<branch>]      Point ArgoCD's root app at <branch> (default:
                                current git branch). Edits + commits + pushes
-                               targetRevision in
-                               gitops/apps/phantomos-mk09.yaml, then patches
-                               the live root Application. ArgoCD reconciles
-                               within ~3 min. Flip back: track-branch main.
-  argo-pause                   Disable selfHeal on phantomos-mk09 so a manual
-                               'kubectl apply -k' against the overlay sticks.
-                               Auto-sync stays on (git changes still apply);
-                               cluster drift just isn't reverted. Resume with
-                               argo-resume.
-  argo-resume                  Re-enable selfHeal on phantomos-mk09.
+                               targetRevision in the robot's app manifest,
+                               then patches the live root Application. ArgoCD
+                               reconciles within ~3 min. Flip back:
+                               track-branch main.
+  argo-pause                   Disable selfHeal on the robot's ArgoCD app so
+                               a manual 'kubectl apply -k' against the overlay
+                               sticks. Auto-sync stays on (git changes still
+                               apply); cluster drift just isn't reverted.
+                               Resume with argo-resume.
+  argo-resume                  Re-enable selfHeal on the robot's ArgoCD app.
   teardown [-y|--yes]          Delete the Deployment + ConfigMap + ns.
                                Cluster-side only — does not touch manifests.
   help                         This message.
 
 ${C_BOLD}Global flags:${C_RESET}
+  --robot <name>               Robot identifier (matches a directory under
+                               manifests/robots/). Auto-detected from
+                               hostname when omitted; prompts if ambiguous.
   --dry-run                    Print kubectl commands instead of running
                                them. Useful for review.
 
 ${C_BOLD}Env overrides:${C_RESET}
+  ROBOT            (default: auto-detected from hostname)
   NAMESPACE        (default: $NAMESPACE)
   APP_LABEL        (default: $APP_LABEL)
-  OVERLAY          (default: \$REPO/manifests/robots/mk09)
+  OVERLAY          (default: \$REPO/manifests/robots/\$ROBOT)
   CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
   IMAGE_NAME       (default: $IMAGE_NAME)
-  TRACK_APP_FILE   (default: \$REPO/gitops/apps/phantomos-mk09.yaml)
+  TRACK_APP_FILE   (default: \$REPO/gitops/apps/\$ROBOT/phantomos-\$ROBOT.yaml)
   TRACK_ROOT_APP   (default: $TRACK_ROOT_APP)
   TRACK_ROOT_NS    (default: $TRACK_ROOT_NS)
-  ARGO_APP         (default: $ARGO_APP)
+  ARGO_APP         (default: phantomos-\$ROBOT)
   ARGO_NS          (default: $ARGO_NS)
 
 ${C_BOLD}Examples:${C_RESET}
@@ -784,11 +819,14 @@ sub=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
+    --robot)   ROBOT="${2:-}"; [ -n "$ROBOT" ] || die "--robot requires a name"; shift 2 ;;
     -h|--help) cmd_help; exit 0 ;;
     -*) die "unknown global flag: $1 (try: $0 help)" ;;
     *) sub="$1"; shift; break ;;
   esac
 done
+
+_resolve_robot
 
 if [ -z "$sub" ]; then
   cmd_help
