@@ -26,6 +26,9 @@ OVERLAY="${OVERLAY:-${REPO}/manifests/robots/mk09}"
 CONFIGMAP_NAME="${CONFIGMAP_NAME:-positronic-config}"
 CONTAINER_NAME="${CONTAINER_NAME:-positronic-control}"
 INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
+# Image name as listed under `images:` in the overlay's kustomization.yaml,
+# AND the registry-qualified docker repo we push to. Defaults match mk09.
+IMAGE_NAME="${IMAGE_NAME:-localhost:5443/positronic-control}"
 
 DRY_RUN=0
 
@@ -143,6 +146,13 @@ ${C_BOLD}Subcommands:${C_RESET}
                                Deployment so the new command takes effect.
   clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
                                mode → sleep infinity), rollout restart.
+  push-image <src> [--tag <dest-tag>] [--no-redeploy]
+                               Tag local docker image <src> as
+                               $IMAGE_NAME:<dest-tag>, push it, and bump
+                               newTag in the overlay's kustomization.yaml
+                               so the cluster picks it up. Then redeploys
+                               (skip with --no-redeploy). <dest-tag>
+                               defaults to <src>'s own tag.
   redeploy                     kubectl apply -k <overlay>, then bounce the
                                pod. Same as APPLY=1 diagnose-positronic.sh
                                minus the diagnose phase.
@@ -159,6 +169,7 @@ ${C_BOLD}Env overrides:${C_RESET}
   APP_LABEL        (default: $APP_LABEL)
   OVERLAY          (default: \$REPO/manifests/robots/mk09)
   CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
+  IMAGE_NAME       (default: $IMAGE_NAME)
 
 ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh status
@@ -169,6 +180,9 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh gpu-test
   bash scripts/positronic.sh set-cmd ros2 launch srg_localization global_positioning_launch.py
   bash scripts/positronic.sh clear-cmd
+  bash scripts/positronic.sh push-image positronic-control:0.2.45-cu130
+  bash scripts/positronic.sh push-image phantom-cuda:dev --tag 0.2.45-dev
+  bash scripts/positronic.sh push-image positronic-control:0.2.45 --no-redeploy
   bash scripts/positronic.sh redeploy
   bash scripts/positronic.sh teardown -y
   bash scripts/positronic.sh --dry-run set-cmd 'sleep 10'
@@ -436,6 +450,112 @@ cmd_clear_cmd() {
   patch_phantom_cmd ""
 }
 
+# ---------- subcommand: push-image ----------------------------------------
+
+# Update the overlay's kustomization.yaml `newTag` for $IMAGE_NAME. The
+# entry is matched by exact `name:` value; we fail if it's missing or
+# duplicated rather than guessing. Pure-stdlib python so we don't take a
+# PyYAML dependency on the robot.
+update_overlay_image_tag() {
+  local kfile="$1" image_name="$2" new_tag="$3"
+  KFILE="$kfile" IMG="$image_name" NEW_TAG="$new_tag" python3 - <<'PY'
+import os, re, sys, pathlib
+path = pathlib.Path(os.environ["KFILE"])
+img = os.environ["IMG"]
+new_tag = os.environ["NEW_TAG"]
+text = path.read_text()
+# Match:  - name: <IMG>\n    newTag: <something>
+# Tolerates any leading whitespace before `-` and any indent before newTag.
+pattern = re.compile(
+    r'(-\s+name:\s*' + re.escape(img) + r'\s*\r?\n\s+newTag:\s*)([^\s\r\n]+)'
+)
+new_text, count = pattern.subn(lambda m: m.group(1) + new_tag, text)
+if count == 0:
+    sys.stderr.write(f"no entry for image {img!r} in {path}\n")
+    sys.exit(2)
+if count > 1:
+    sys.stderr.write(f"multiple ({count}) entries for image {img!r} in {path}\n")
+    sys.exit(2)
+path.write_text(new_text)
+PY
+}
+
+cmd_push_image() {
+  local source="" dest_tag="" skip_redeploy=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag)         [ $# -ge 2 ] || die "--tag needs an argument"
+                     dest_tag="$2"; shift 2 ;;
+      --no-redeploy) skip_redeploy=1; shift ;;
+      -h|--help)     echo "push-image <src> [--tag <dest-tag>] [--no-redeploy]"; return 0 ;;
+      --) shift; while [ $# -gt 0 ]; do source="${source:-$1}"; shift; done ;;
+      -*) die "unknown push-image flag: $1" ;;
+      *)  if [ -z "$source" ]; then source="$1"; else die "unexpected extra arg: $1"; fi
+          shift ;;
+    esac
+  done
+
+  [ -n "$source" ] || die "push-image needs a source image (try: push-image --help)"
+
+  command -v docker >/dev/null 2>&1 || die "docker is required for push-image"
+
+  if [ -z "$dest_tag" ]; then
+    case "$source" in
+      *@*) die "source uses a digest; pass --tag <dest-tag> explicitly" ;;
+      *:*) dest_tag="${source##*:}" ;;
+      *)   die "source has no tag; pass --tag <dest-tag> or use <repo>:<tag>" ;;
+    esac
+  fi
+
+  local target="${IMAGE_NAME}:${dest_tag}"
+  local kfile="$OVERLAY/kustomization.yaml"
+  [ -f "$kfile" ] || die "overlay kustomization not found: $kfile"
+
+  bold "Source"
+  info "$source"
+  bold "Target"
+  info "$target"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ docker image inspect %q\n' "$source"
+    printf '+ docker tag %q %q\n' "$source" "$target"
+    printf '+ docker push %q\n' "$target"
+    bold "Would update $kfile"
+    info "set newTag=$dest_tag for image $IMAGE_NAME"
+  else
+    if ! docker image inspect "$source" >/dev/null 2>&1; then
+      die "source image not found in local docker: $source"
+    fi
+
+    bold "Tagging"
+    docker tag "$source" "$target" || die "docker tag failed"
+    ok "$source -> $target"
+
+    bold "Pushing $target"
+    docker push "$target" || die "docker push failed (registry up? insecure-registries set?)"
+    ok "pushed"
+
+    bold "Updating $kfile"
+    if ! update_overlay_image_tag "$kfile" "$IMAGE_NAME" "$dest_tag"; then
+      die "failed to update overlay's newTag — image was pushed but config is unchanged"
+    fi
+    ok "newTag = $dest_tag"
+  fi
+
+  if [ "$skip_redeploy" = 1 ]; then
+    info "skipping redeploy (--no-redeploy)"
+    info "next: bash scripts/positronic.sh redeploy"
+    return 0
+  fi
+
+  if ! resolve_kubectl && [ "$DRY_RUN" != 1 ]; then
+    warn "no kubectl backend on this host — overlay updated but pod was not bounced"
+    info "next: run 'bash scripts/positronic.sh redeploy' on a host with kubectl"
+    return 0
+  fi
+  cmd_redeploy
+}
+
 # ---------- subcommand: redeploy ------------------------------------------
 
 cmd_redeploy() {
@@ -534,6 +654,7 @@ case "$sub" in
   gpu-test)       cmd_gpu_test       "$@" ;;
   set-cmd)        cmd_set_cmd        "$@" ;;
   clear-cmd)      cmd_clear_cmd      "$@" ;;
+  push-image)     cmd_push_image     "$@" ;;
   redeploy)       cmd_redeploy       "$@" ;;
   teardown)       cmd_teardown       "$@" ;;
   *) die "unknown subcommand: $sub (try: $0 help)" ;;

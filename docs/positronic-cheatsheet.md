@@ -44,6 +44,31 @@ Verify the tag landed:
 curl -fs http://localhost:5443/v2/positronic-control/tags/list
 ```
 
+### One-shot: push + bump overlay + redeploy
+
+[`scripts/positronic.sh push-image`](../scripts/positronic.sh) folds the
+three steps (tag for local registry, `docker push`, bump `newTag` in the
+overlay, redeploy) into one. Use it after `docker build` to put a fresh
+image on the cluster without hand-editing YAML:
+
+```bash
+# Build with the local-registry tag straight away, then push + redeploy.
+docker build -f docker/phantom-cuda.Dockerfile \
+  -t positronic-control:$TAG .
+bash scripts/positronic.sh push-image positronic-control:$TAG
+
+# Skip the rollout (e.g. you want to commit the kustomization change first).
+bash scripts/positronic.sh push-image positronic-control:$TAG --no-redeploy
+
+# Override the tag pushed to the registry / written into the overlay.
+bash scripts/positronic.sh push-image foundationbot/phantom-cuda:0.2.45-cu130 \
+  --tag 0.2.45-cu130
+```
+
+The overlay's `localhost:5443/positronic-control` `images:` entry must
+already exist — the wrapper updates it in place but won't add a new
+entry. `--dry-run` prints every docker + YAML edit it would do.
+
 ---
 
 ## Build + push phantom-models
@@ -98,6 +123,10 @@ Kustomize's `images:` transformer rewrites both the main container and
 the `load-models` initContainer in one shot (both reference
 `localhost:5443/phantom-models` / `localhost:5443/positronic-control`).
 Then commit + push the YAML.
+
+For positronic-control specifically, `scripts/positronic.sh push-image`
+(see ["One-shot: push + bump overlay + redeploy"](#one-shot-push--bump-overlay--redeploy))
+does the bump for you as part of pushing the image.
 
 ---
 
