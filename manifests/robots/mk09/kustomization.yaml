@@ -17,7 +17,7 @@ images:
   # Locally-built positronic-control image. Bump newTag after each
   # `docker push localhost:5443/positronic-control:<sha>` on the robot.
   - name: localhost:5443/positronic-control
-    newTag: 0.2.44-cu130
+    newTag: 0.2.44-cu130-20260428
   # phantom-models is the initContainer image (load-models). Kustomize's
   # `images:` transformer rewrites both containers and initContainers, so
   # this entry covers it cleanly. Bump after each
