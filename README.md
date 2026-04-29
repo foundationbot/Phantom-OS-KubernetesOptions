@@ -281,14 +281,19 @@ The repo ships three scripts:
 
 ### Bootstrap on a new robot
 
+End-to-end (deps → host config → k0s → ArgoCD → validate):
+
 ```bash
-git pull
-sudo bash scripts/configure-k0s-containerd-mirror.sh
-# wait for ArgoCD to sync manifests/base/registry (~30s)
-docker login                  # so the prime script can pull private foundationbot/* images
+git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
+cd Phantom-OS-KubernetesOptions
+sudo bash scripts/bootstrap-robot.sh --robot <name>
+docker login                  # so the prime step can pull private foundationbot/* images
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
-sudo bash scripts/validate-local-registry.sh
 ```
+
+`scripts/bootstrap-robot.sh` is idempotent and reports per-phase
+PASS/FAIL/SKIP. See `--help` for the phase list and skip flags. Image
+priming is the separate manual step because it needs DockerHub creds.
 
 ### Building and deploying `positronic-control`
 

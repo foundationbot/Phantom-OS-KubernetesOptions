@@ -441,8 +441,30 @@ the new size declaration.
 
 ## One-time bootstrap (new robot)
 
-For reference; the README's "Local image registry" section also covers
-this.
+Single-command path:
+
+```bash
+git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
+cd Phantom-OS-KubernetesOptions
+sudo bash scripts/bootstrap-robot.sh --robot <name>      # mk09, argentum, ...
+```
+
+`bootstrap-robot.sh` orchestrates the six phases below. It's idempotent
+— re-running on a partially or fully bootstrapped host detects existing
+config and prints `SKIP` for what's already done. Useful flags:
+`--dry-run` (print the plan, change nothing), `--skip-deps` /
+`--skip-host` / `--skip-cluster` / `--skip-gitops` / `--skip-validate`
+to slice phases, `--skip-nvidia` to override the GPU autodetect.
+
+Followed by image priming (this is a separate step because it needs
+DockerHub credentials):
+
+```bash
+docker login                  # for private foundationbot/* images
+sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
+```
+
+Manual equivalent (what the bootstrap script runs under the hood):
 
 ```bash
 git pull
