@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
-    targetRevision: main
+    targetRevision: feat/disable-argus
     path: manifests/robots/ak-007
   destination:
     server: https://kubernetes.default.svc
