@@ -145,11 +145,85 @@ sudo k0s kubectl -n positronic rollout restart deploy/positronic-control
 sudo k0s kubectl -n positronic get pod -l app=positronic-control -w
 ```
 
+Note that with `selfHeal: true` on `phantomos-mk09`, ArgoCD will
+revert this manual apply within seconds — see
+["Test a feature branch end-to-end via ArgoCD"](#test-a-feature-branch-end-to-end-via-argocd)
+or ["Pause selfHeal for ad-hoc kubectl apply"](#pause-selfheal-for-ad-hoc-kubectl-apply)
+below for the two ways to actually iterate against the live cluster
+without merging first.
+
 Wrapper that does the apply + bounce + watch:
 
 ```bash
 APPLY=1 bash scripts/diagnose-positronic.sh
 ```
+
+### Test a feature branch end-to-end via ArgoCD
+
+The cluster runs an app-of-apps:
+[`gitops/root-app.yaml`](../gitops/root-app.yaml) (`root`) reads
+[`gitops/apps/`](../gitops/apps/) and creates child Applications like
+[`phantomos-mk09`](../gitops/apps/phantomos-mk09.yaml). Both are pinned
+to `main` with `selfHeal: true`. Patching only `phantomos-mk09` to
+point at a feature branch doesn't help — `root` reverts it from main.
+
+To pull a whole feature branch through ArgoCD without merging, point
+`root` itself at the branch. After committing manifest changes:
+
+```bash
+# uses the current local git branch by default
+bash scripts/positronic.sh track-branch
+
+# or pass a branch explicitly
+bash scripts/positronic.sh track-branch feat/my-fix
+```
+
+What the wrapper does:
+1. Edits `targetRevision:` in
+   [`gitops/apps/phantomos-mk09.yaml`](../gitops/apps/phantomos-mk09.yaml)
+   to `<branch>`.
+2. Commits + pushes that one-line change to the current local branch.
+3. Patches the live `root` Application's `spec.source.targetRevision`
+   in-cluster.
+
+ArgoCD reconciles within ~3 min. Trigger it now:
+
+```bash
+sudo k0s kubectl -n argocd annotate app root \
+  argocd.argoproj.io/refresh=hard --overwrite
+```
+
+When the test passes, merge to main and flip back:
+
+```bash
+bash scripts/positronic.sh track-branch main
+```
+
+Notes:
+- Any uncommitted changes under `manifests/` aren't on the branch yet —
+  commit + push them before ArgoCD reconciles, or it will pull the
+  previous tree.
+- `track-branch` only commits the gitops Application file; your image-tag
+  bumps from `push-image` are separate commits.
+
+### Pause selfHeal for ad-hoc kubectl apply
+
+If you'd rather iterate locally without committing, disable ArgoCD's
+selfHeal on `phantomos-mk09`. Auto-sync stays on (so any new git change
+still applies); cluster drift just isn't reverted:
+
+```bash
+bash scripts/positronic.sh argo-pause
+sudo k0s kubectl apply -k manifests/robots/mk09/         # sticks
+sudo k0s kubectl -n positronic rollout restart \
+  deploy/positronic-control
+# ... iterate, kubectl apply again, etc ...
+bash scripts/positronic.sh argo-resume                   # back to GitOps
+```
+
+Drawback: selfHeal is off until you resume — drift in *any* resource
+under `phantomos-mk09` (not just positronic-control) won't be corrected.
+Prefer `track-branch` for anything beyond a quick poke.
 
 ### Via ArgoCD (post-merge)
 
