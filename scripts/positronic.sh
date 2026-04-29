@@ -30,6 +30,16 @@ INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
 # AND the registry-qualified docker repo we push to. Defaults match mk09.
 IMAGE_NAME="${IMAGE_NAME:-localhost:5443/positronic-control}"
 
+# GitOps wiring for track-branch / argo-pause / argo-resume. The cluster runs
+# app-of-apps: a `root` Application (gitops/apps) creates the per-robot child
+# (`phantomos-mk09`). Pointing root at a branch is what lets pre-merge
+# kustomization edits flow through ArgoCD instead of being reverted by selfHeal.
+TRACK_APP_FILE="${TRACK_APP_FILE:-${REPO}/gitops/apps/phantomos-mk09.yaml}"
+TRACK_ROOT_APP="${TRACK_ROOT_APP:-root}"
+TRACK_ROOT_NS="${TRACK_ROOT_NS:-argocd}"
+ARGO_APP="${ARGO_APP:-phantomos-mk09}"
+ARGO_NS="${ARGO_NS:-argocd}"
+
 DRY_RUN=0
 
 # ---------- color helpers (only when stdout is a TTY) ---------------------
@@ -156,6 +166,18 @@ ${C_BOLD}Subcommands:${C_RESET}
   redeploy                     kubectl apply -k <overlay>, then bounce the
                                pod. Same as APPLY=1 diagnose-positronic.sh
                                minus the diagnose phase.
+  track-branch [<branch>]      Point ArgoCD's root app at <branch> (default:
+                               current git branch). Edits + commits + pushes
+                               targetRevision in
+                               gitops/apps/phantomos-mk09.yaml, then patches
+                               the live root Application. ArgoCD reconciles
+                               within ~3 min. Flip back: track-branch main.
+  argo-pause                   Disable selfHeal on phantomos-mk09 so a manual
+                               'kubectl apply -k' against the overlay sticks.
+                               Auto-sync stays on (git changes still apply);
+                               cluster drift just isn't reverted. Resume with
+                               argo-resume.
+  argo-resume                  Re-enable selfHeal on phantomos-mk09.
   teardown [-y|--yes]          Delete the Deployment + ConfigMap + ns.
                                Cluster-side only — does not touch manifests.
   help                         This message.
@@ -170,6 +192,11 @@ ${C_BOLD}Env overrides:${C_RESET}
   OVERLAY          (default: \$REPO/manifests/robots/mk09)
   CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
   IMAGE_NAME       (default: $IMAGE_NAME)
+  TRACK_APP_FILE   (default: \$REPO/gitops/apps/phantomos-mk09.yaml)
+  TRACK_ROOT_APP   (default: $TRACK_ROOT_APP)
+  TRACK_ROOT_NS    (default: $TRACK_ROOT_NS)
+  ARGO_APP         (default: $ARGO_APP)
+  ARGO_NS          (default: $ARGO_NS)
 
 ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh status
@@ -184,6 +211,11 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh push-image phantom-cuda:dev --tag 0.2.45-dev
   bash scripts/positronic.sh push-image positronic-control:0.2.45 --no-redeploy
   bash scripts/positronic.sh redeploy
+  bash scripts/positronic.sh track-branch                   # current git branch
+  bash scripts/positronic.sh track-branch feat/my-fix
+  bash scripts/positronic.sh track-branch main              # flip back
+  bash scripts/positronic.sh argo-pause
+  bash scripts/positronic.sh argo-resume
   bash scripts/positronic.sh teardown -y
   bash scripts/positronic.sh --dry-run set-cmd 'sleep 10'
 EOF
@@ -581,6 +613,131 @@ cmd_redeploy() {
   $KUBECTL -n "$NAMESPACE" get pod -l "$APP_LABEL" -o wide || true
 }
 
+# ---------- subcommand: track-branch --------------------------------------
+
+# Update the targetRevision: line in $1 to $2. Exit 0 if changed,
+# 1 if already at the desired value, 2 on parse error.
+_update_target_revision() {
+  FILE="$1" BRANCH="$2" python3 - <<'PY'
+import os, re, sys, pathlib
+path = pathlib.Path(os.environ["FILE"])
+br = os.environ["BRANCH"]
+text = path.read_text()
+pattern = re.compile(r'(targetRevision:\s*)([^\s\r\n]+)')
+m = pattern.search(text)
+if not m:
+    sys.stderr.write(f"no targetRevision: line in {path}\n")
+    sys.exit(2)
+if m.group(2) == br:
+    sys.exit(1)  # no-op
+new_text = pattern.sub(lambda x: x.group(1) + br, text, count=1)
+path.write_text(new_text)
+PY
+}
+
+cmd_track_branch() {
+  local branch=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help) echo "track-branch [<branch>]"; return 0 ;;
+      -*) die "unknown track-branch flag: $1" ;;
+      *)  if [ -z "$branch" ]; then branch="$1"; else die "unexpected extra arg: $1"; fi
+          shift ;;
+    esac
+  done
+
+  if [ -z "$branch" ]; then
+    branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+      die "could not determine current git branch — pass <branch> explicitly"
+    fi
+  fi
+
+  command -v git >/dev/null 2>&1 || die "git is required for track-branch"
+  [ -f "$TRACK_APP_FILE" ] || die "Application file not found: $TRACK_APP_FILE"
+
+  bold "Pointing $TRACK_ROOT_APP at branch: $branch"
+
+  # 1. Edit the Application file in place.
+  local edit_rc=0
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would set targetRevision=$branch in $TRACK_APP_FILE"
+  else
+    _update_target_revision "$TRACK_APP_FILE" "$branch" || edit_rc=$?
+    case "$edit_rc" in
+      0) ok "$TRACK_APP_FILE — targetRevision: $branch" ;;
+      1) info "$TRACK_APP_FILE already at targetRevision: $branch" ;;
+      *) die "failed to update $TRACK_APP_FILE" ;;
+    esac
+  fi
+
+  # 2. Commit + push the file (only if it actually changed).
+  if [ "$edit_rc" = 0 ] && [ "$DRY_RUN" != 1 ]; then
+    bold "Committing + pushing $TRACK_APP_FILE"
+    local cur_branch
+    cur_branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    git -C "$REPO" add "$TRACK_APP_FILE" || die "git add failed"
+    git -C "$REPO" commit -m "gitops: track $branch on $ARGO_APP" -- "$TRACK_APP_FILE" \
+      || die "git commit failed"
+    git -C "$REPO" push -u origin "$cur_branch" || die "git push failed"
+    ok "pushed to origin/$cur_branch"
+  fi
+
+  # 3. Patch the live root Application's targetRevision.
+  bold "Patching live $TRACK_ROOT_APP.spec.source.targetRevision -> $branch"
+  require_kubectl
+  local payload
+  if ! payload="$(BRANCH="$branch" python3 -c '
+import json, os
+print(json.dumps({"spec": {"source": {"targetRevision": os.environ["BRANCH"]}}}))
+' 2>/dev/null)"; then
+    die "python3 is required to build the patch JSON"
+  fi
+  kctl -n "$TRACK_ROOT_NS" patch app "$TRACK_ROOT_APP" --type=merge -p "$payload" \
+    || die "failed to patch live $TRACK_ROOT_APP Application"
+
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+
+  ok "$TRACK_ROOT_APP -> $branch"
+
+  bold "Next"
+  info "ArgoCD reconciles within ~3 min, or trigger now:"
+  info "  $KUBECTL -n $TRACK_ROOT_NS annotate app $TRACK_ROOT_APP \\"
+  info "    argocd.argoproj.io/refresh=hard --overwrite"
+  info ""
+  info "Heads up: any uncommitted changes under manifests/ aren't on the branch"
+  info "yet — commit + push them before ArgoCD reconciles, or it will pull the"
+  info "previous tree."
+  info ""
+  info "Flip back: bash scripts/positronic.sh track-branch main"
+}
+
+# ---------- subcommand: argo-pause / argo-resume --------------------------
+
+cmd_argo_pause() {
+  require_kubectl
+  bold "Disabling ArgoCD selfHeal on $ARGO_NS/$ARGO_APP"
+  info "auto-sync stays ON; cluster drift won't be reverted by ArgoCD."
+  kctl -n "$ARGO_NS" patch app "$ARGO_APP" --type=merge \
+    -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false,"prune":true}}}}' \
+    || die "patch failed"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  ok "$ARGO_APP selfHeal=false"
+  info "you can now: kubectl apply -k <overlay> (sticks until next git change)"
+  info "resume: bash scripts/positronic.sh argo-resume"
+}
+
+cmd_argo_resume() {
+  require_kubectl
+  bold "Re-enabling ArgoCD selfHeal on $ARGO_NS/$ARGO_APP"
+  kctl -n "$ARGO_NS" patch app "$ARGO_APP" --type=merge \
+    -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true}}}}' \
+    || die "patch failed"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  ok "$ARGO_APP selfHeal=true"
+  info "ArgoCD will revert any cluster-side drift on the next reconcile."
+}
+
 # ---------- subcommand: teardown ------------------------------------------
 
 cmd_teardown() {
@@ -656,6 +813,9 @@ case "$sub" in
   clear-cmd)      cmd_clear_cmd      "$@" ;;
   push-image)     cmd_push_image     "$@" ;;
   redeploy)       cmd_redeploy       "$@" ;;
+  track-branch)   cmd_track_branch   "$@" ;;
+  argo-pause)     cmd_argo_pause     "$@" ;;
+  argo-resume)    cmd_argo_resume    "$@" ;;
   teardown)       cmd_teardown       "$@" ;;
   *) die "unknown subcommand: $sub (try: $0 help)" ;;
 esac
