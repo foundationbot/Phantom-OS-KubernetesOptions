@@ -314,6 +314,12 @@ separate step because it needs DockerHub credentials.
   in `terraform/main.tf` and the `gitops/` tree. After this point,
   `kubectl apply` should not be used by hand for anything — every
   change flows through git → ArgoCD.
+- **App-of-apps structure.** The `root` ArgoCD Application reads from
+  `gitops/apps/<robot>/` (e.g. `gitops/apps/ak-007/`) and creates the
+  per-robot child Application (e.g. `phantomos-ak-007`). Each robot's
+  root app path must be scoped to its own subdirectory so it only
+  deploys its own Application — pointing at the parent `gitops/apps/`
+  would deploy every robot's app onto one cluster.
 
 **Disabling a workload before deployment** (e.g. you want to bring a
 robot up without `argus`): edit
@@ -347,6 +353,11 @@ mode is `sleep infinity` so operators can `kubectl exec` in for
 interactive ROS work; flip the `PHANTOM_CMD` key in the
 `positronic-config` ConfigMap to run as a service.
 
+`positronic.sh` auto-detects the robot from hostname (must match a
+directory under `manifests/robots/`), or accepts `--robot <name>`
+explicitly. All derived paths — overlay, gitops app file, ArgoCD app
+name — are resolved from the robot identity.
+
 - **How do I do X?** — [docs/positronic-cheatsheet.md](docs/positronic-cheatsheet.md):
   build/push images, bump tags, deploy, sanity-check, toggle
   `PHANTOM_CMD`, diagnose failures, registry ops.
@@ -354,10 +365,9 @@ interactive ROS work; flip the `PHANTOM_CMD` key in the
   the two repos, three images, storage layers, pod composition,
   per-robot overlays, ArgoCD wiring, known limitations.
 
-ArgoCD picks this up automatically once `feat/local-registry-mirror`
-merges to `main` (the per-robot Application at
-[`gitops/apps/phantomos-mk09.yaml`](gitops/apps/phantomos-mk09.yaml) is
-pinned to `targetRevision: main`).
+ArgoCD picks this up automatically via the per-robot Application at
+`gitops/apps/<robot>/phantomos-<robot>.yaml` (pinned to
+`targetRevision: main` by default).
 
 ---
 
