@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Owns the shared `phantom` namespace used by all robot-side Phantom
+# services (this server, yovariable-server, ...). Other bases that
+# target `phantom` do *not* redeclare the namespace — they assume an
+# overlay also pulls in this base.
+resources:
+  - namespace.yaml
+  - phantomos-api-server.yaml
