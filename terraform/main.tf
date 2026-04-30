@@ -67,7 +67,7 @@ resource "null_resource" "root_application" {
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
-    command     = "kubectl --kubeconfig='${local.kubeconfig_path}' apply -f '${path.module}/${var.root_app_manifest}'"
+    command     = "k0s kubectl --kubeconfig='${local.kubeconfig_path}' apply -f '${path.module}/${var.root_app_manifest}'"
   }
 
   depends_on = [helm_release.argocd]

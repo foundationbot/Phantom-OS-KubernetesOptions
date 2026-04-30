@@ -8,9 +8,9 @@
 #
 # Required:
 #   --robot <name>     Robot identifier; must match a directory under
-#                      manifests/robots/ (e.g. mk09, argentum). Also the
+#                      manifests/robots/ (e.g. ak-007, mk09). Also the
 #                      Application name expected at
-#                      gitops/apps/phantomos-<name>.yaml.
+#                      gitops/apps/<name>/phantomos-<name>.yaml.
 #
 # Flags:
 #   -y, --yes          skip confirmation prompts
@@ -32,6 +32,13 @@
 #   --skip-nvidia      force-skip nvidia runtime config (overrides
 #                      hardware autodetect)
 #   --skip-validate    skip the final validate-local-registry.sh run
+#   --setup-positronic after the cluster is up, push a positronic-control
+#                      image and build phantom-models so the pod can start.
+#                      Requires --positronic-image <image> (e.g.
+#                      foundationbot/phantom-cuda:0.2.44-cu130).
+#   --positronic-image <image>
+#                      local docker image to push as positronic-control
+#                      (used with --setup-positronic).
 #   -h, --help         this help
 #
 # Phases:
@@ -49,7 +56,10 @@
 #                   (installs ArgoCD via the official Helm chart and
 #                   applies gitops/root-app.yaml — the canonical path).
 #                   Wait for phantomos-<robot> to reach Synced + Healthy.
-#   6. validate     bash scripts/validate-local-registry.sh
+#   6. setup-positronic (optional, --setup-positronic)
+#                   Push positronic-control image to local registry,
+#                   build phantom-models, and redeploy the pod.
+#   7. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
@@ -70,6 +80,8 @@ SKIP_CLUSTER=0
 SKIP_GITOPS=0
 SKIP_NVIDIA=0
 SKIP_VALIDATE=0
+SETUP_POSITRONIC=0
+POSITRONIC_IMAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --robot)         ROBOT="${2:-}"; shift 2 ;;
@@ -83,6 +95,10 @@ while [ $# -gt 0 ]; do
     --skip-gitops)   SKIP_GITOPS=1; shift ;;
     --skip-nvidia)   SKIP_NVIDIA=1; shift ;;
     --skip-validate) SKIP_VALIDATE=1; shift ;;
+    --setup-positronic)
+                     SETUP_POSITRONIC=1; shift ;;
+    --positronic-image)
+                     POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     *)               printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -462,8 +478,8 @@ gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 5: gitops  (skipped)"; return; fi
   phase "phase 5: gitops (terraform)"
 
-  if [ ! -f "$REPO_ROOT/gitops/apps/phantomos-$ROBOT.yaml" ]; then
-    fail "gitops/apps/phantomos-$ROBOT.yaml not in repo — create it before re-running"
+  if [ ! -f "$REPO_ROOT/gitops/apps/$ROBOT/phantomos-$ROBOT.yaml" ]; then
+    fail "gitops/apps/$ROBOT/phantomos-$ROBOT.yaml not in repo — create it before re-running"
     return
   fi
 
@@ -519,11 +535,68 @@ gitops() {
   fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
 }
 
-# ---- phase 6: validate --------------------------------------------------
+# ---- phase 6: setup-positronic (optional) --------------------------------
+
+setup_positronic() {
+  if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
+  phase "phase 6: setup-positronic"
+
+  if [ -z "$POSITRONIC_IMAGE" ]; then
+    fail "--setup-positronic requires --positronic-image <image>"
+    return
+  fi
+
+  local script="$REPO_ROOT/scripts/positronic.sh"
+  if [ ! -f "$script" ]; then
+    fail "scripts/positronic.sh not found"; return
+  fi
+
+  # Push the positronic-control image to the local registry.
+  info "pushing $POSITRONIC_IMAGE via positronic.sh"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  bash $script --robot $ROBOT push-image $POSITRONIC_IMAGE --no-redeploy"
+  else
+    if bash "$script" --robot "$ROBOT" push-image "$POSITRONIC_IMAGE" --no-redeploy; then
+      pass "positronic-control image pushed"
+    else
+      fail "positronic-control image push failed"
+    fi
+  fi
+
+  # Build phantom-models (interactive by default; --all for non-interactive).
+  local build_script="$REPO_ROOT/scripts/phantom-models/build.py"
+  if [ ! -f "$build_script" ]; then
+    fail "scripts/phantom-models/build.py not found"; return
+  fi
+
+  info "building phantom-models image"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  python3 $build_script --all"
+  else
+    if python3 "$build_script" --all; then
+      pass "phantom-models image built and pushed"
+    else
+      fail "phantom-models build failed"
+    fi
+  fi
+
+  # Redeploy now that both images are in the registry.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  bash $script --robot $ROBOT redeploy"
+  else
+    if bash "$script" --robot "$ROBOT" redeploy; then
+      pass "positronic-control redeployed"
+    else
+      fail "positronic-control redeploy failed"
+    fi
+  fi
+}
+
+# ---- phase 7: validate --------------------------------------------------
 
 validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 6: validate  (skipped)"; return; fi
-  phase "phase 6: validate"
+  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 7: validate  (skipped)"; return; fi
+  phase "phase 7: validate"
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
@@ -547,7 +620,7 @@ validate() {
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-gitops, 6-validate
+phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 6-setup-positronic"), 7-validate
 flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
@@ -559,12 +632,13 @@ if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
   [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
 fi
 
-reset_cluster ; guard
-preflight     ; guard
-deps          ; guard
-host_config   ; guard
-cluster       ; guard
-gitops        ; guard
+reset_cluster      ; guard
+preflight          ; guard
+deps               ; guard
+host_config        ; guard
+cluster            ; guard
+gitops             ; guard
+setup_positronic   ; guard
 validate
 
 summary

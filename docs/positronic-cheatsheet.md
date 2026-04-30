@@ -1,7 +1,7 @@
 # positronic-control cheatsheet
 
-Terse runbook for the positronic-control + k0s + local-registry stack on
-mk09. For the *why* behind any of this, see
+Terse runbook for the positronic-control + k0s + local-registry stack.
+For the *why* behind any of this, see
 [positronic-design.md](positronic-design.md).
 
 Conventions:
@@ -11,7 +11,38 @@ Conventions:
 - The local registry lives at `localhost:5443`, hostNetwork bound to
   `127.0.0.1`.
 - Tags here are illustrative — real ones live in
-  [`manifests/robots/mk09/kustomization.yaml`](../manifests/robots/mk09/kustomization.yaml).
+  [`manifests/robots/<robot>/kustomization.yaml`](../manifests/robots/).
+- `positronic.sh` auto-detects the robot from hostname (must match a
+  directory under `manifests/robots/`). Pass `--robot <name>` to
+  override. If neither works, the script prompts interactively.
+
+---
+
+## Quick reference (`positronic.sh`)
+
+Most day-to-day operations are wrapped by
+[`scripts/positronic.sh`](../scripts/positronic.sh):
+
+```bash
+positronic.sh status                       # pod state, QoS, PHANTOM_CMD, PID 1
+positronic.sh logs -f                      # follow container logs
+positronic.sh logs --previous              # logs from the last crashed instance
+positronic.sh logs --init                  # logs from the load-models init container
+positronic.sh exec                         # bash into the running container
+positronic.sh exec -- ros2 topic list      # run a one-off command in the pod
+positronic.sh gpu-test                     # PyTorch CUDA matmul sanity check
+positronic.sh push-image <img>:<tag>       # tag + push + bump overlay + redeploy
+positronic.sh push-image <img> --no-redeploy  # push only, redeploy later
+positronic.sh redeploy                     # apply overlay + bounce the pod
+positronic.sh set-cmd <command...>         # set PHANTOM_CMD + rollout restart
+positronic.sh clear-cmd                    # clear PHANTOM_CMD (back to sleep infinity)
+positronic.sh track-branch [<branch>]      # point ArgoCD at a feature branch
+positronic.sh argo-pause                   # disable selfHeal for manual kubectl apply
+positronic.sh argo-resume                  # re-enable selfHeal
+positronic.sh teardown -y                  # delete deployment + configmap + namespace
+```
+
+All commands accept `--robot <name>` and `--dry-run` as global flags.
 
 ---
 
@@ -108,7 +139,7 @@ curl -fs http://localhost:5443/v2/phantom-models/tags/list
 ## Bump tags in the per-robot overlay
 
 Edit
-[`manifests/robots/mk09/kustomization.yaml`](../manifests/robots/mk09/kustomization.yaml)
+[`manifests/robots/<robot>/kustomization.yaml`](../manifests/robots/)
 under `images:`:
 
 ```yaml
@@ -134,18 +165,15 @@ does the bump for you as part of pushing the image.
 
 ### Manual (pre-merge / branch work)
 
-`feat/local-registry-mirror` is invisible to ArgoCD until merged
-(`targetRevision: main` on
-[`gitops/apps/phantomos-mk09.yaml`](../gitops/apps/phantomos-mk09.yaml)).
 Apply by hand from the branch:
 
 ```bash
-sudo k0s kubectl apply -k manifests/robots/mk09/
+sudo k0s kubectl apply -k manifests/robots/<robot>/
 sudo k0s kubectl -n positronic rollout restart deploy/positronic-control
 sudo k0s kubectl -n positronic get pod -l app=positronic-control -w
 ```
 
-Note that with `selfHeal: true` on `phantomos-mk09`, ArgoCD will
+Note that with `selfHeal: true` on the robot's ArgoCD app, ArgoCD will
 revert this manual apply within seconds — see
 ["Test a feature branch end-to-end via ArgoCD"](#test-a-feature-branch-end-to-end-via-argocd)
 or ["Pause selfHeal for ad-hoc kubectl apply"](#pause-selfheal-for-ad-hoc-kubectl-apply)
@@ -160,15 +188,13 @@ APPLY=1 bash scripts/diagnose-positronic.sh
 
 ### Test a feature branch end-to-end via ArgoCD
 
-The cluster runs an app-of-apps:
-[`gitops/root-app.yaml`](../gitops/root-app.yaml) (`root`) reads
-[`gitops/apps/`](../gitops/apps/) and creates child Applications like
-[`phantomos-mk09`](../gitops/apps/phantomos-mk09.yaml). Both are pinned
-to `main` with `selfHeal: true`. Patching only `phantomos-mk09` to
-point at a feature branch doesn't help — `root` reverts it from main.
+The cluster runs an app-of-apps: a `root` Application reads
+`gitops/apps/<robot>/` and creates the per-robot child Application
+(e.g. `phantomos-ak-007`). Both the root and child app are pinned to
+`main` with `selfHeal: true`.
 
 To pull a whole feature branch through ArgoCD without merging, point
-`root` itself at the branch. After committing manifest changes:
+both at the branch. After committing manifest changes:
 
 ```bash
 # uses the current local git branch by default
@@ -179,9 +205,8 @@ bash scripts/positronic.sh track-branch feat/my-fix
 ```
 
 What the wrapper does:
-1. Edits `targetRevision:` in
-   [`gitops/apps/phantomos-mk09.yaml`](../gitops/apps/phantomos-mk09.yaml)
-   to `<branch>`.
+1. Edits `targetRevision:` in the robot's app manifest
+   (`gitops/apps/<robot>/phantomos-<robot>.yaml`) to `<branch>`.
 2. Commits + pushes that one-line change to the current local branch.
 3. Patches the live `root` Application's `spec.source.targetRevision`
    in-cluster.
@@ -205,16 +230,19 @@ Notes:
   previous tree.
 - `track-branch` only commits the gitops Application file; your image-tag
   bumps from `push-image` are separate commits.
+- The child app's `targetRevision` must also point at your branch,
+  otherwise ArgoCD reads the kustomization from `main` regardless of
+  where `root` points. `track-branch` handles both.
 
 ### Pause selfHeal for ad-hoc kubectl apply
 
 If you'd rather iterate locally without committing, disable ArgoCD's
-selfHeal on `phantomos-mk09`. Auto-sync stays on (so any new git change
+selfHeal on the robot's app. Auto-sync stays on (so any new git change
 still applies); cluster drift just isn't reverted:
 
 ```bash
 bash scripts/positronic.sh argo-pause
-sudo k0s kubectl apply -k manifests/robots/mk09/         # sticks
+sudo k0s kubectl apply -k manifests/robots/<robot>/      # sticks
 sudo k0s kubectl -n positronic rollout restart \
   deploy/positronic-control
 # ... iterate, kubectl apply again, etc ...
@@ -222,29 +250,24 @@ bash scripts/positronic.sh argo-resume                   # back to GitOps
 ```
 
 Drawback: selfHeal is off until you resume — drift in *any* resource
-under `phantomos-mk09` (not just positronic-control) won't be corrected.
+under the robot's app (not just positronic-control) won't be corrected.
 Prefer `track-branch` for anything beyond a quick poke.
 
 ### Via ArgoCD (post-merge)
 
-Once `feat/local-registry-mirror` is merged to main, ArgoCD's
-auto-sync (`prune: true`, `selfHeal: true`) reconciles within ~3 min.
-Force a sync now:
+ArgoCD's auto-sync (`prune: true`, `selfHeal: true`) reconciles within
+~3 min. Force a sync now:
 
 ```bash
-# from a host with argocd CLI + login
-argocd app sync phantomos-mk09
-argocd app wait phantomos-mk09 --health --timeout 300
-
 # or via kubectl annotation
-sudo k0s kubectl -n argocd annotate app phantomos-mk09 \
+sudo k0s kubectl -n argocd annotate app phantomos-<robot> \
   argocd.argoproj.io/refresh=hard --overwrite
 ```
 
 Watch reconciliation:
 
 ```bash
-sudo k0s kubectl -n argocd get app phantomos-mk09 -w
+sudo k0s kubectl -n argocd get app phantomos-<robot> -w
 ```
 
 ---
@@ -379,8 +402,8 @@ APPLY=1 bash scripts/diagnose-positronic.sh
 ### Common failures
 
 **`ImagePullBackOff` on `positronic-control` or `phantom-models`** —
-the tag in `manifests/robots/mk09/kustomization.yaml` doesn't exist in
-the registry. Verify with:
+the tag in `manifests/robots/<robot>/kustomization.yaml` doesn't exist
+in the registry. Verify with:
 
 ```bash
 curl -fs http://localhost:5443/v2/_catalog
@@ -389,7 +412,10 @@ curl -fs http://localhost:5443/v2/phantom-models/tags/list
 ```
 
 If a tag is missing, build + push it (sections above), then bounce the
-pod.
+pod. Note that `push-image` only handles `positronic-control` — you
+must build `phantom-models` separately via
+`sudo python3 scripts/phantom-models/build.py` and bump its `newTag`
+in the kustomization by hand (or use `--tag` to match the existing tag).
 
 **`CreateContainerError` with cgroup mismatch** —
 `expected cgroupsPath to be of format slice:prefix:name`. Means the
@@ -530,7 +556,7 @@ sudo k0s kubectl -n registry delete pvc k0s-registry-pvc
 sudo k0s kubectl delete pv k0s-registry-pv
 
 # 4. re-apply the overlay
-sudo k0s kubectl apply -k manifests/robots/mk09/
+sudo k0s kubectl apply -k manifests/robots/<robot>/
 
 # 5. scale back up
 sudo k0s kubectl -n registry scale deploy/k0s-registry --replicas=1
@@ -542,6 +568,38 @@ the new size declaration.
 
 ---
 
+## ArgoCD
+
+### Admin password
+
+```bash
+sudo k0s kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Username: `admin`.
+
+### Orphaned pods after switching robot apps
+
+If you switch from one per-robot ArgoCD app to another (e.g.
+`phantomos-mk09` → `phantomos-ak-007`), the old app's finalizer
+deletes resources it managed — but pods in namespaces that the *new*
+app doesn't include may linger. Delete orphaned namespaces manually:
+
+```bash
+sudo k0s kubectl delete namespace <orphaned-ns>
+```
+
+### Full cluster status
+
+```bash
+sudo k0s status                    # k0s health
+sudo k0s kubectl get pods -A       # all pods across all namespaces
+sudo k0s kubectl -n argocd get app # ArgoCD app sync status
+```
+
+---
+
 ## One-time bootstrap (new robot)
 
 Single-command path:
@@ -549,7 +607,7 @@ Single-command path:
 ```bash
 git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
 cd Phantom-OS-KubernetesOptions
-sudo bash scripts/bootstrap-robot.sh --robot <name>      # mk09, argentum, ...
+sudo bash scripts/bootstrap-robot.sh --robot <name>      # ak-007, mk09, ...
 docker login                                              # for private foundationbot/* images
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 ```
