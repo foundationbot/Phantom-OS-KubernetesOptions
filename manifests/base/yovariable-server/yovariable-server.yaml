@@ -57,9 +57,13 @@ spec:
           image: foundationbot/yovariable-server:V-1-0-9-20260429-200257
           imagePullPolicy: IfNotPresent
 
-          # Matches the Dockerfile CMD; restated here so the args are
-          # visible in `kubectl describe` output.
-          args: ["--verbose"]
+          # Disable the JSON WebSocket bridge so the server doesn't try
+          # to bind port 8080 on the host (which is already in use under
+          # hostNetwork). Re-enable with --ws-port=<free-port> if needed.
+          # Dockerfile uses CMD without ENTRYPOINT, so command must
+          # restate the binary name when overriding args.
+          command: ["aersnal_variable_server"]
+          args: ["--verbose", "--no-bridge"]
 
           ports:
             - name: variable
