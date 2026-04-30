@@ -9,7 +9,7 @@ resources:
   - ../../base/registry
     #  - ../../base/argus
     #  - ../../base/nimbus
-    #  - ../../base/dma-video
+  - ../../base/dma-video
   - ../../base/positronic
   - ../../base/phantomos-api-server
   - ../../base/yovariable-server
