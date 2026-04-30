@@ -421,7 +421,7 @@ cd ~/development/foundation/imu-policy/positronic_control
 bash bin/build.sh phantom
 
 # Production overlay — copies /src, runs colcon build, sources the workspace.
-bash bin/build.sh phantom_production
+bash bin/build.sh phantom-production
 ```
 
 The two functions are `build_phantom` and `build_phantom_production` in
