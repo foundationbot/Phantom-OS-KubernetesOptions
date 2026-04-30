@@ -59,9 +59,8 @@ see `DMA.ethercat/scripts/CPUSETS.md`.
 The EtherCAT motor controller runs on **11, 12, 13** (matches
 `DMA_CPU_AFFINITY=11,12,13` / `DMA_RT_CPU=11` in step 1.3); core **10**
 is reserved for the **whole-body controller (WBC)**. Pinning the WBC
-explicitly is preferred but optional — leaving core 10 isolated without
-a partition assignment is acceptable, the WBC will still benefit from
-the housekeeping load being kept off that core.
+explicitly is preferred but optional — you can also limit the isolation
+to **11–13** and leave core 10 in the general housekeeping pool.
 
 ```bash
 cd ~/development/foundation/DMA/DMA.ethercat
@@ -76,7 +75,7 @@ description = EtherCAT master + motor controller RT loop
 
 [wbc]
 cpus = 10
-description = Whole-body controller (optional — omit this section to leave core 10 isolated but unassigned)
+description = Whole-body controller (optional — omit this section to leave core 10 in the general pool)
 ```
 
 Apply once, verify, install as a boot service, then migrate the kernel
