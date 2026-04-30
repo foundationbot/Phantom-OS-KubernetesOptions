@@ -60,6 +60,13 @@ spec:
       # Host-level singleton — no point starting a second copy.
       terminationGracePeriodSeconds: 15
 
+      # foundationbot/phantomos-api-server is a private DockerHub repo;
+      # the pull needs the deployment-account PAT. Per the convention
+      # used in dma-video, the Secret is created out-of-band in each
+      # namespace (see REQUIREMENTS.md) and pods reference it here.
+      imagePullSecrets:
+        - name: dockerhub-creds
+
       containers:
         - name: api
           # CircleCI publishes this image to DockerHub on every push to
