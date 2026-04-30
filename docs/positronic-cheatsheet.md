@@ -18,6 +18,34 @@ Conventions:
 
 ---
 
+## Quick reference (`positronic.sh`)
+
+Most day-to-day operations are wrapped by
+[`scripts/positronic.sh`](../scripts/positronic.sh):
+
+```bash
+positronic.sh status                       # pod state, QoS, PHANTOM_CMD, PID 1
+positronic.sh logs -f                      # follow container logs
+positronic.sh logs --previous              # logs from the last crashed instance
+positronic.sh logs --init                  # logs from the load-models init container
+positronic.sh exec                         # bash into the running container
+positronic.sh exec -- ros2 topic list      # run a one-off command in the pod
+positronic.sh gpu-test                     # PyTorch CUDA matmul sanity check
+positronic.sh push-image <img>:<tag>       # tag + push + bump overlay + redeploy
+positronic.sh push-image <img> --no-redeploy  # push only, redeploy later
+positronic.sh redeploy                     # apply overlay + bounce the pod
+positronic.sh set-cmd <command...>         # set PHANTOM_CMD + rollout restart
+positronic.sh clear-cmd                    # clear PHANTOM_CMD (back to sleep infinity)
+positronic.sh track-branch [<branch>]      # point ArgoCD at a feature branch
+positronic.sh argo-pause                   # disable selfHeal for manual kubectl apply
+positronic.sh argo-resume                  # re-enable selfHeal
+positronic.sh teardown -y                  # delete deployment + configmap + namespace
+```
+
+All commands accept `--robot <name>` and `--dry-run` as global flags.
+
+---
+
 ## Build + push positronic-control
 
 The image source lives in
