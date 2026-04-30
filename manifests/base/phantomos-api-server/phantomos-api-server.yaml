@@ -62,10 +62,11 @@ spec:
 
       containers:
         - name: api
-          # Substitute for your actual published image. The repo's
-          # Dockerfile produces this binary; build with:
-          #   make image  (or docker buildx build for aarch64 on Thor)
-          image: foundation.bot/phantomos-api-server:1.0.1
+          # CircleCI publishes this image to DockerHub on every push to
+          # the default branch as foundationbot/phantomos-api-server:V-<ver>-<ts>
+          # (and also retags :latest). Robot overlays pin a specific
+          # build tag via the `images:` block — see manifests/robots/*/.
+          image: foundationbot/phantomos-api-server:latest
           imagePullPolicy: IfNotPresent
 
           ports:

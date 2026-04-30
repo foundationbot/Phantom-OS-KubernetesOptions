@@ -45,9 +45,10 @@ spec:
       containers:
         - name: server
           # Built and pushed by .circleci/config.yml. The pipeline tags
-          # images as foundationbot/yovariable-server:V-<ver>-<ts>; pin
-          # to a specific build tag rather than relying on :latest.
-          image: foundationbot/yovariable-server:V-1-0-9-latest
+          # images as foundationbot/yovariable-server:V-<ver>-<ts> (and
+          # retags :latest). Robot overlays pin a specific build tag via
+          # the `images:` block — see manifests/robots/*/.
+          image: foundationbot/yovariable-server:latest
           imagePullPolicy: IfNotPresent
 
           # Matches the Dockerfile CMD; restated here so the args are
