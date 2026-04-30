@@ -27,9 +27,9 @@ spec:
             - name: GATEWAY_URL
               value: /api
             - name: CONTROL_PC_URL
-              value: http://100.85.53.56:5000
+              value: http://172.16.67.100:5000
             - name: AI_PC_URL
-              value: http://100.85.53.56:5000
+              value: http://100.71.81.1:5000
             - name: RERUN_URL
               value: rerun+http://nitrogen:9876/proxy
           resources:
