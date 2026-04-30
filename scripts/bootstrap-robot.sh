@@ -26,8 +26,8 @@
 #                      /var/lib/recordings/ is preserved (k0s reset does
 #                      not touch those paths).
 #   --skip-deps        skip phase 2 (apt installs + k0s/terraform binaries)
-#   --skip-host        skip phase 3 (host containerd/nvidia config)
-#   --skip-cluster     skip phase 4 (k0s install + systemd start)
+#   --skip-cluster     skip phase 3 (k0s install + systemd start)
+#   --skip-host        skip phase 4 (host containerd/nvidia config)
 #   --skip-seed-pull-secrets
 #                      skip phase 5 (propagate dockerhub-creds Secret to
 #                      argus / dma-video / nimbus namespaces)
@@ -65,13 +65,17 @@
 #   1. preflight    OS / arch / kernel / disk / sudo / port collisions
 #   2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
 #                   pciutils, unzip; k0s binary; terraform binary
-#   3. host config  configure-k0s-containerd-mirror.sh +
-#                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
-#                   via lspci or /dev/nvidia0)
-#   4. cluster      k0s install controller --single --enable-worker;
+#   3. cluster      k0s install controller --single --enable-worker;
 #                   systemctl enable --now k0scontroller; wait Ready;
 #                   write /root/.kube/config from `k0s kubeconfig admin`
-#                   (so kubectl + terraform have a config to read)
+#                   (so kubectl + terraform have a config to read).
+#                   Runs BEFORE host config because the host-config scripts
+#                   edit /etc/k0s/containerd.toml, which only exists after
+#                   k0s has started at least once.
+#   4. host config  configure-k0s-containerd-mirror.sh +
+#                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
+#                   via lspci or /dev/nvidia0). Restarts k0s; waits for
+#                   node Ready before returning so later phases don't race.
 #   5. seed pull secrets
 #                   ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
 #                   exists in `argus`, `dma-video`, `nimbus` so private
@@ -249,10 +253,10 @@ EOF
 
   # 2. Back up /etc/k0s/k0s.yaml. `k0s reset` removes /var/lib/k0s and the
   #    k0scontroller systemd unit but deliberately leaves this config file
-  #    behind. Phase 4's "already installed" check is keyed on this file,
-  #    so leaving it in place causes phase 4 to skip `k0s install controller`
-  #    (the step that creates the systemd unit) and then fail the
-  #    `systemctl enable --now k0scontroller` that follows.
+  #    behind. The cluster phase's "already installed" check is keyed on
+  #    this file, so leaving it in place causes that phase to skip
+  #    `k0s install controller` (the step that creates the systemd unit)
+  #    and then fail the `systemctl enable --now k0scontroller` that follows.
   if [ -e /etc/k0s/k0s.yaml ]; then
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  mv /etc/k0s/k0s.yaml /etc/k0s/k0s.yaml.bak.$ts"
@@ -290,7 +294,7 @@ EOF
   done
 
   # 5. Reset cached KUBECTL — k0s is gone, anything we cached at startup
-  #    is no longer valid until phase 4 reinstalls it.
+  #    is no longer valid until the cluster phase reinstalls it.
   KUBECTL=()
 }
 
@@ -400,7 +404,7 @@ deps() {
   fi
 }
 
-# ---- phase 3: host config -----------------------------------------------
+# ---- phase 4: host config -----------------------------------------------
 
 containerd_mirror_already_configured() {
   local f=/etc/k0s/containerd.d/hosts/docker.io/hosts.toml
@@ -418,8 +422,8 @@ nvidia_runtime_already_configured() {
 }
 
 host_config() {
-  if [ "$SKIP_HOST" = 1 ]; then phase "phase 3: host config  (skipped)"; return; fi
-  phase "phase 3: host config"
+  if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
+  phase "phase 4: host config"
 
   if containerd_mirror_already_configured; then
     skip "containerd mirror already configured (hosts.toml has localhost:5443 + upstream)"
@@ -452,13 +456,28 @@ host_config() {
       fail "configure-k0s-nvidia-runtime.sh"
     fi
   fi
+
+  # The configure scripts above restart k0scontroller, which causes a brief
+  # NotReady window. Block here until kubectl reports Ready again so the
+  # next phases (seed_pull_secrets, gitops) don't race the restart.
+  if [ "$DRY_RUN" = 0 ] && [ "${#KUBECTL[@]}" -gt 0 ]; then
+    info "waiting for node Ready after host config..."
+    for _ in $(seq 1 60); do
+      if "${KUBECTL[@]}" get nodes 2>/dev/null | awk '/Ready/{ok=1} END{exit !ok}'; then
+        info "node Ready"
+        return
+      fi
+      sleep 5
+    done
+    fail "node did not return to Ready within 5min after host config restart"
+  fi
 }
 
-# ---- phase 4: cluster ---------------------------------------------------
+# ---- phase 3: cluster ---------------------------------------------------
 
 cluster() {
-  if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 4: cluster  (skipped)"; return; fi
-  phase "phase 4: cluster"
+  if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
+  phase "phase 3: cluster"
 
   local already_running=0
   systemctl is-active --quiet k0scontroller && already_running=1
@@ -668,7 +687,7 @@ gitops() {
 
   local kc=/root/.kube/config
   if [ "$DRY_RUN" = 0 ] && [ ! -r "$kc" ]; then
-    fail "$kc not readable — phase 4 should have written it"; return
+    fail "$kc not readable — phase 3 (cluster) should have written it"; return
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
@@ -809,7 +828,7 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
+phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
 flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
@@ -824,8 +843,8 @@ fi
 reset_cluster      ; guard
 preflight          ; guard
 deps               ; guard
-host_config        ; guard
 cluster            ; guard
+host_config        ; guard
 seed_pull_secrets  ; guard
 gitops             ; guard
 setup_positronic   ; guard
