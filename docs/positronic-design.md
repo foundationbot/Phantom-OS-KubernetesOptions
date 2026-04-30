@@ -3,7 +3,7 @@
 How the positronic-control deployment fits together: the two repos, the
 three images, the storage layers, the pod composition, the per-robot
 overlay model, and the ArgoCD wiring. For day-to-day commands see
-[positronic-cheatsheet.md](positronic-cheatsheet.md).
+[trouble-shooting-guide.md](trouble-shooting-guide.md).
 
 ---
 

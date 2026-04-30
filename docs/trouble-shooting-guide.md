@@ -1,7 +1,7 @@
-# positronic-control cheatsheet
+# Troubleshooting guide
 
-Terse runbook for the positronic-control + k0s + local-registry stack.
-For the *why* behind any of this, see
+Operations runbook and troubleshooting guide for the k0s + ArgoCD +
+local-registry stack. For the *why* behind any of this, see
 [positronic-design.md](positronic-design.md).
 
 Conventions:
@@ -401,9 +401,51 @@ APPLY=1 bash scripts/diagnose-positronic.sh
 
 ### Common failures
 
-**`ImagePullBackOff` on `positronic-control` or `phantom-models`** —
-the tag in `manifests/robots/<robot>/kustomization.yaml` doesn't exist
-in the registry. Verify with:
+**`ImagePullBackOff` on any pod** — three common causes:
+
+1. **Image not in the local registry** (for locally-pushed images like
+   `positronic-control` or `phantom-models`). Verify:
+
+   ```bash
+   curl -fs http://localhost:5443/v2/_catalog
+   curl -fs http://localhost:5443/v2/<repo>/tags/list
+   ```
+
+2. **Missing `dockerhub-creds` secret** (for images pulled from
+   DockerHub). Each namespace that pulls private `foundationbot/*`
+   images needs its own copy of the pull secret:
+
+   ```bash
+   # Check if the secret exists
+   sudo k0s kubectl -n <namespace> get secret dockerhub-creds
+
+   # Create it if missing
+   sudo k0s kubectl -n <namespace> create secret docker-registry dockerhub-creds \
+     --docker-server=https://index.docker.io/v1/ \
+     --docker-username=<username> \
+     --docker-password=<token>
+
+   # Then delete the failing pods so they restart with the secret
+   sudo k0s kubectl -n <namespace> delete pods --all
+   ```
+
+   Namespaces that need this: `argus`, `nimbus`, `dma-video`, `phantom`
+   — any namespace with `imagePullSecrets: [{name: dockerhub-creds}]`
+   in its manifests.
+
+3. **Image priming** — for offline/faster pulls, prime the local
+   registry so containerd tries `localhost:5443` first:
+
+   ```bash
+   sudo bash scripts/prime-registry-cache.sh \
+     foundationbot/some-image:tag \
+     foundationbot/other-image:tag
+   ```
+
+**`ImagePullBackOff` on `positronic-control` or `phantom-models`
+specifically** — the tag in
+`manifests/robots/<robot>/kustomization.yaml` doesn't exist in the
+registry. Verify with:
 
 ```bash
 curl -fs http://localhost:5443/v2/_catalog
@@ -441,6 +483,21 @@ the allocatable pool; if the host doesn't have 8 free, edit
 `resources.requests.cpu` in
 [`manifests/base/positronic/positronic-control.yaml`](../manifests/base/positronic/positronic-control.yaml)
 or shrink the reserved pool in `k0s.yaml`.
+
+**DaemonSet pods show `DESIRED: 0`** — the DaemonSet has a
+`nodeSelector` (e.g. `foundation.bot/robot=true`) and no node has that
+label. Check and fix:
+
+```bash
+# See what labels the node has
+sudo k0s kubectl get node <node> --show-labels
+
+# Add the missing label
+sudo k0s kubectl label node <node> foundation.bot/robot=true
+```
+
+The DaemonSet controller picks up the label change immediately and
+schedules pods on matching nodes.
 
 **`NVIDIA Driver was not detected`** — pod started without the nvidia
 runtime. Verify:
@@ -597,6 +654,30 @@ sudo k0s status                    # k0s health
 sudo k0s kubectl get pods -A       # all pods across all namespaces
 sudo k0s kubectl -n argocd get app # ArgoCD app sync status
 ```
+
+---
+
+## Tear down and redeploy from scratch
+
+```bash
+sudo bash scripts/bootstrap-robot.sh --robot <name> --reset
+```
+
+`--reset` tears down the existing k0s cluster, backs up kubeconfig and
+terraform state, then runs the full bootstrap. On-disk data at
+`/var/lib/k0s-data/`, `/var/lib/registry/`, and `/var/lib/recordings/`
+is preserved.
+
+To also push the positronic images during bootstrap:
+
+```bash
+sudo bash scripts/bootstrap-robot.sh --robot <name> --reset \
+  --setup-positronic --positronic-image foundationbot/phantom-cuda:0.2.44-production-cu130
+```
+
+After a reset, remember to recreate any `dockerhub-creds` secrets in
+namespaces that pull from DockerHub and re-label the node if DaemonSets
+require it (see [Common failures](#common-failures)).
 
 ---
 

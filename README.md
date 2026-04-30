@@ -358,7 +358,7 @@ directory under `manifests/robots/`), or accepts `--robot <name>`
 explicitly. All derived paths — overlay, gitops app file, ArgoCD app
 name — are resolved from the robot identity.
 
-- **How do I do X?** — [docs/positronic-cheatsheet.md](docs/positronic-cheatsheet.md):
+- **How do I do X?** — [docs/trouble-shooting-guide.md](docs/trouble-shooting-guide.md):
   build/push images, bump tags, deploy, sanity-check, toggle
   `PHANTOM_CMD`, diagnose failures, registry ops.
 - **Why does it look this way?** — [docs/positronic-design.md](docs/positronic-design.md):
