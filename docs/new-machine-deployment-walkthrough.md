@@ -58,7 +58,10 @@ see `DMA.ethercat/scripts/CPUSETS.md`.
 **Target layout for this fleet** — isolate cores **10, 11, 12, 13**.
 The EtherCAT motor controller runs on **11, 12, 13** (matches
 `DMA_CPU_AFFINITY=11,12,13` / `DMA_RT_CPU=11` in step 1.3); core **10**
-is reserved as headroom for adjacent RT work (e.g. NIC IRQ pinning).
+is reserved for the **whole-body controller (WBC)**. Pinning the WBC
+explicitly is preferred but optional — leaving core 10 isolated without
+a partition assignment is acceptable, the WBC will still benefit from
+the housekeeping load being kept off that core.
 
 ```bash
 cd ~/development/foundation/DMA/DMA.ethercat
@@ -71,9 +74,9 @@ Write `/etc/cpusets.conf`:
 cpus = 11-13
 description = EtherCAT master + motor controller RT loop
 
-[ecat-irq]
+[wbc]
 cpus = 10
-description = Reserved for EtherCAT NIC IRQ / RT headroom
+description = Whole-body controller (optional — omit this section to leave core 10 isolated but unassigned)
 ```
 
 Apply once, verify, install as a boot service, then migrate the kernel
