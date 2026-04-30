@@ -27,6 +27,11 @@ images:
   # `sudo python3 scripts/phantom-models/build.py`.
   - name: localhost:5443/phantom-models
     newTag: 2026-04-26
+  # phantomos-api-server: pin to a specific CircleCI-published build
+  # rather than tracking :latest (so a fleet-wide tag bump on DockerHub
+  # doesn't move this robot without an explicit overlay change).
+  - name: foundationbot/phantomos-api-server
+    newTag: V-1-0-1-20260430-001713
 patches:
   #- path: patches/operator-ui-env.yaml
   #  target:
