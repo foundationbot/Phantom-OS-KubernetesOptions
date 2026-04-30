@@ -390,23 +390,18 @@ cp -r gitops/apps/ak-007       gitops/apps/<new-robot>
 
 ## 3. Build the production positronic-control image (`feat/se-union-receiver`)
 
-The image source lives in the **other** repo:
-`~/development/foundation/imu-policy/positronic_control`. This repo
-only stores the resulting `image:tag` in the overlay.
+The production image needs to be used here and not the development one.
 
 ### 3.1 Check out the policy branch
 
 ```bash
-cd ~/development/foundation/imu-policy/positronic_control
+cd <path to positronic_control>
 git fetch origin
 git checkout feat/se-union-receiver
 git submodule update --init --recursive
 ```
 
-`feat/se-union-receiver` is the branch carrying the SE (state-estimator)
-union receiver work. It produces a tag of the form
-`0.2.44-production-cu130-flat` once built (the version comes from
-`./VERSION`).
+`feat/se-union-receiver` is the branch carrying the latest DMA IPC integration.
 
 ### 3.2 Build the base + production image
 
@@ -415,7 +410,7 @@ The production image is a two-stage build: `phantom-cuda` base, then
 `colcon build`.
 
 ```bash
-cd ~/development/foundation/imu-policy/positronic_control
+cd ~/.../positronic_control
 
 # Base (cu130 on aarch64, cu128 on amd64). Auto-selected by uname -m.
 bash bin/build.sh phantom
