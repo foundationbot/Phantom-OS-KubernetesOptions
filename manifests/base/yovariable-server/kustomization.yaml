@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The phantom namespace is owned by manifests/base/phantomos-api-server/.
+# Overlays that include this base must also include base/phantomos-api-server
+# (or already create the namespace by some other means).
+resources:
+  - yovariable-server.yaml

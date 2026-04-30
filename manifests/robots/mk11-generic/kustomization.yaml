@@ -1,13 +1,14 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# mk09 (mk11000009) robot overlay.
+# mk11-generic robot overlay. Generic baseline for any mk11-class robot
+# that doesn't yet have its own per-unit overlay; cloned from ak-007.
 commonAnnotations:
-  robot: mk09
+  robot: mk11-generic
   fleet: phantomos
 resources:
   - ../../base/runtime-classes
   - ../../base/registry
-  - ../../base/argus
+    #  - ../../base/argus
   - ../../base/nimbus
   - ../../base/dma-video
   - ../../base/positronic
@@ -27,8 +28,8 @@ images:
   - name: localhost:5443/phantom-models
     newTag: 2026-04-26
 patches:
-  - path: patches/operator-ui-env.yaml
-    target:
-      kind: Deployment
-      name: operator-ui
-      namespace: argus
+  #- path: patches/operator-ui-env.yaml
+  #  target:
+  #    kind: Deployment
+  #    name: operator-ui
+  #    namespace: argus

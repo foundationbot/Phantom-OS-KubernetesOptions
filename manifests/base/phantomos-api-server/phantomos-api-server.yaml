@@ -1,0 +1,206 @@
+# phantomos-api-server — DaemonSet for in-cluster deployment on a robot node.
+#
+# Strategy A: bind-mount the host's /sys and /proc directly over the
+# container's own paths, so the codebase's hardcoded `/sys/class/thermal`,
+# `/sys/class/net`, `/proc/net/route` etc. read host data unchanged. No
+# code changes needed. Trade-off: the container's own /proc and /sys are
+# shadowed — fine for this image (Ubuntu base, no internal sysfs reads
+# beyond what the server itself does).
+#
+# This pod is a node-agent: it must run *on the robot*, not on a generic
+# worker node. Pin via nodeSelector/tolerations below.
+#
+# Source of truth lives in
+# ApiServer/native-ai-api-server/deploy/kubernetes/phantomos-api-server.yaml.
+# Keep this file in
+# sync with that source when the upstream manifest changes; robot
+# overlays in manifests/robots/<name>/ pull this in via kustomize.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: phantomos-api-server
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: phantomos-api-server
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: phantomos-api-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: phantomos-api-server
+    spec:
+      # ── Pin to robot node(s). Pick whichever selector your cluster
+      # already uses to identify robots. Examples:
+      #
+      #   nodeSelector:
+      #     foundation.bot/robot: "true"
+      #
+      #   nodeSelector:
+      #     kubernetes.io/hostname: hw-thor01
+      #
+      # If robots are tainted (typical for dedicated hardware nodes),
+      # add a matching toleration.
+      nodeSelector:
+        foundation.bot/robot: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # /proc/net/route only makes sense in the host's network namespace,
+      # the operator-UI dials the robot's real IP, and the TCP probe
+      # to 8.8.8.8:53 should exit via the host's stack.
+      hostNetwork: true
+      # Required so `nsenter -t 1 -a` can reach host PID 1.
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # Host-level singleton — no point starting a second copy.
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        - name: api
+          # Substitute for your actual published image. The repo's
+          # Dockerfile produces this binary; build with:
+          #   make image  (or docker buildx build for aarch64 on Thor)
+          image: foundation.bot/phantomos-api-server:1.0.1
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 5000
+              hostPort: 5000
+
+          env:
+            - name: API_HOST
+              value: "0.0.0.0"
+            - name: API_PORT
+              value: "5000"
+            - name: LOG_LEVEL
+              value: "INFO"
+            # The single most important knob: wraps every systemctl /
+            # journalctl / reboot / nvidia-smi invocation with `nsenter`
+            # so it runs in host PID 1's namespace. Without this, the
+            # container queries the (empty) container-local systemd and
+            # every service-status endpoint reports "inactive".
+            - name: HOST_EXEC_PREFIX
+              value: "nsenter -t 1 -a"
+            # Compose project paths default to /home/operator/...,
+            # /home/gaurav/.... If those don't exist on the robot,
+            # override here so /docker-compose/* points somewhere real.
+            # - name: OPERATOR_UI_COMPOSE_PATH
+            #   value: /opt/argus/operator_ui
+            # - name: PHANTOM_SCRIPT_DIRECTORY
+            #   value: /opt/phantom/scripts
+            # - name: PHANTOM_MODELS
+            #   value: /opt/phantom/models
+
+          securityContext:
+            # nsenter into PID 1 needs CAP_SYS_ADMIN + CAP_SYS_PTRACE.
+            # `privileged: true` is the blanket option and is what most
+            # node-agent DaemonSets use. If your cluster's PSP/PSA
+            # forbids privileged pods, switch to the narrower form:
+            #
+            #   privileged: false
+            #   capabilities:
+            #     add: ["SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "NET_RAW"]
+            #
+            # Note: /system/reboot needs SYS_BOOT in addition.
+            privileged: true
+            runAsUser: 0
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 10
+
+          volumeMounts:
+            # ── Strategy A: replace the container's /sys and /proc with
+            # the host's. mountPropagation: HostToContainer so mounts
+            # done on the host AFTER the pod starts (e.g. a USB device
+            # appearing under /sys) propagate in.
+            - name: host-sys
+              mountPath: /sys
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: host-proc
+              mountPath: /proc
+              mountPropagation: HostToContainer
+            # ── Docker daemon socket — required by every /docker/* and
+            # /docker-compose/* endpoint. The container ships the docker
+            # CLI; this gives it a daemon to talk to.
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            # ── Shared memory for DMA EtherCAT freshness check.
+            # internal/ethercat/CheckSHM stat()s /dev/shm/actuals.
+            - name: dev-shm
+              mountPath: /dev/shm
+            # ── USB device tree — required by `lsusb` (joystick status)
+            # and `adb`. /sys is already covered above; this adds the
+            # device nodes lsusb needs to read.
+            - name: dev
+              mountPath: /dev
+              mountPropagation: HostToContainer
+            # ── Compose project trees referenced by config.go's
+            # ComposeProjects map. Add one volume per project. Drop
+            # these mounts if you override the env vars above to point
+            # at in-container paths instead.
+            - name: operator-ui-repo
+              mountPath: /home/operator/repos/argus/operator_ui
+            - name: phantom-scripts
+              mountPath: /home/gaurav/foundation/ai-nix-phantom-apps
+            - name: phantom-models
+              mountPath: /home/gaurav/models
+
+      volumes:
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: operator-ui-repo
+          hostPath:
+            path: /home/operator/repos/argus/operator_ui
+            type: DirectoryOrCreate
+        - name: phantom-scripts
+          hostPath:
+            path: /home/gaurav/foundation/ai-nix-phantom-apps
+            type: DirectoryOrCreate
+        - name: phantom-models
+          hostPath:
+            path: /home/gaurav/models
+            type: DirectoryOrCreate

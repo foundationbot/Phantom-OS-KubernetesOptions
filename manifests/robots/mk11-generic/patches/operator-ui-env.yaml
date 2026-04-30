@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator-ui
+  namespace: argus
+spec:
+  template:
+    spec:
+      containers:
+        - name: operator-ui
+          env:
+            - name: AI_PC_URL
+              value: http://100.85.53.56:5000

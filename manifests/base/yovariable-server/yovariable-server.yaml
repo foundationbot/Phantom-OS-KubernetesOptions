@@ -1,0 +1,106 @@
+# yovariable-server — DaemonSet for in-cluster deployment on a robot node.
+#
+# Bridges DMA shared-memory IPC (under /dev/shm, populated by the host's
+# DMA EtherCAT stack) to network-accessible variable endpoints. Runs on
+# robot hardware only — pin via nodeSelector/tolerations below.
+#
+# Source of truth lives in
+# controller/repository-group/yovariable_server/deploy/kubernetes/.
+# Keep this file in sync with that source when the upstream manifest
+# changes; robot overlays in manifests/robots/<name>/ pull this in via
+# kustomize.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: yovariable-server
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: yovariable-server
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: yovariable-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: yovariable-server
+    spec:
+      # ── Pin to robot node(s). Pick whichever selector your cluster
+      # already uses to identify robots.
+      nodeSelector:
+        foundation.bot/robot: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # Variable endpoints are dialed directly via the robot's IP, so
+      # the pod sits in the host's network namespace.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # Host-level singleton — no point starting a second copy.
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        - name: server
+          # Built and pushed by .circleci/config.yml. The pipeline tags
+          # images as foundationbot/yovariable-server:V-<ver>-<ts>; pin
+          # to a specific build tag rather than relying on :latest.
+          image: foundationbot/yovariable-server:V-1-0-9-latest
+          imagePullPolicy: IfNotPresent
+
+          # Matches the Dockerfile CMD; restated here so the args are
+          # visible in `kubectl describe` output.
+          args: ["--verbose"]
+
+          ports:
+            - name: variable
+              containerPort: 8008
+              hostPort: 8008
+            - name: admin
+              containerPort: 8080
+              hostPort: 8080
+
+          securityContext:
+            # /dev/shm segments created by the host's DMA process are
+            # owned by root on the host; matching UID inside the
+            # container avoids permission gymnastics.
+            runAsUser: 0
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+
+          # The binary doesn't expose an HTTP /health endpoint, so probe
+          # the variable port via TCP — a successful connect means the
+          # listener is up.
+          livenessProbe:
+            tcpSocket:
+              port: 8008
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 8008
+            initialDelaySeconds: 2
+            periodSeconds: 10
+
+          volumeMounts:
+            # ── DMA shared memory: DmaShmSource / DmaShmCommandSink /
+            # DmaShmMotorParamsSink (see CMakeLists.txt) read & write
+            # SHM segments produced by the host's DMA EtherCAT stack.
+            # Must be the host's /dev/shm, not a pod-private one.
+            - name: dev-shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

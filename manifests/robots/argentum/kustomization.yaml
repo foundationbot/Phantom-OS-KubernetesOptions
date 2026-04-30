@@ -12,6 +12,8 @@ resources:
   - ../../base/argus
   - ../../base/nimbus
   - ../../base/dma-video
+  - ../../base/phantomos-api-server
+  - ../../base/yovariable-server
 # Per-robot image pins. CircleCI builds foundationbot/argus.operator-ui:<sha>
 # on every push to the default branch; this block overrides the base tag
 # (qa) with a specific SHA. Session D's CI automation will mutate newTag
