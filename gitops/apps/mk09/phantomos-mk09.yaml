@@ -7,7 +7,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git
-    targetRevision: feat/disable-argus
+    targetRevision: feat/mk09-positronic-0.2.44-production
     path: manifests/robots/mk09
   destination:
     server: https://kubernetes.default.svc
