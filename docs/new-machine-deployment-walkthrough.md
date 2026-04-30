@@ -13,6 +13,7 @@ so this walkthrough doesn't need to re-explain them.
 Companion reading:
 - [positronic-design.md](positronic-design.md) — why the stack is shaped this way
 - [trouble-shooting-guide.md](trouble-shooting-guide.md) — day-to-day commands and recovery
+- [dockerhub-creds.md](dockerhub-creds.md) — some more details on how to handle credentials 
 - DMA.ethercat `README.md` (sibling repo) — bare-metal EtherCAT master
 
 ---
