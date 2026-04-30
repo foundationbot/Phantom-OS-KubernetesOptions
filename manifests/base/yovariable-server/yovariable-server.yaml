@@ -57,9 +57,10 @@ spec:
           image: foundationbot/yovariable-server:V-1-0-9-20260429-200257
           imagePullPolicy: IfNotPresent
 
-          # Matches the Dockerfile CMD; restated here so the args are
-          # visible in `kubectl describe` output.
-          args: ["--verbose"]
+          # No `args:` — the image's Dockerfile CMD already supplies the
+          # binary + flags. Overriding `args:` here would replace the
+          # whole CMD (Dockerfile has no separate ENTRYPOINT) and leave
+          # the kubelet trying to exec the flag as a binary.
 
           ports:
             - name: variable
