@@ -28,6 +28,6 @@ spec:
   syncPolicy:
     automated:
       prune: true      # remove a child Application when its yaml is deleted from gitops/apps/
-      selfHeal: true
+      selfHeal: false
     syncOptions:
       - ApplyOutOfSyncOnly=true
