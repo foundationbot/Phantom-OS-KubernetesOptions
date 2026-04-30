@@ -472,7 +472,7 @@ the image.
 Three modes, pick one:
 
 ```bash
-cd ~/development/foundation/platformOsDepl/Phantom-OS-KubernetesOptions
+cd ~/.../Phantom-OS-KubernetesOptions
 
 # (a) Interactive — lists top-level entries, asks which to include.
 sudo python3 scripts/phantom-models/build.py
@@ -508,7 +508,7 @@ Bump the tag in the overlay (step 5.4).
 
 ### 5.1 Why a local registry
 
-The robot may lose DockerHub access. Anything required for a pod to
+The robot may lose DockerHub access or you may want to iterate on your local change before pushinig to the git repo. Anything required for a pod to
 start must come from the local registry. `containerd`'s `hosts.toml`
 routing tries `http://localhost:5443` first and falls through to
 `registry-1.docker.io` only on 404. See **§4.2** in the design doc.
@@ -524,7 +524,7 @@ If the bootstrap script hasn't started the registry yet, do step 7
 first and come back. If it has, push:
 
 ```bash
-cd ~/development/foundation/platformOsDepl/Phantom-OS-KubernetesOptions
+cd ~/.../Phantom-OS-KubernetesOptions
 
 docker push localhost:5443/positronic-control:0.2.44-production-cu130-flat
 docker push localhost:5443/phantom-models:2026-04-29
