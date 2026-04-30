@@ -27,6 +27,11 @@ images:
   - name: localhost:5443/phantom-models
     newTag: 2026-04-29
 patches:
+  - path: patches/positronic-replicas.yaml
+    target:
+      kind: Deployment
+      name: positronic-control
+      namespace: positronic
   #- path: patches/operator-ui-env.yaml
   #  target:
   #    kind: Deployment
