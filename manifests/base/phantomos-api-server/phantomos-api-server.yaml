@@ -71,9 +71,8 @@ spec:
         - name: api
           # CircleCI publishes this image to DockerHub on every push to
           # the default branch as foundationbot/phantomos-api-server:V-<ver>-<ts>
-          # (and also retags :latest). Robot overlays pin a specific
-          # build tag via the `images:` block — see manifests/robots/*/.
-          image: foundationbot/phantomos-api-server:latest
+          # (and also retags :latest). Bump this tag when a new build needs to roll.
+          image: foundationbot/phantomos-api-server:V-1-0-1-20260430-001713
           imagePullPolicy: IfNotPresent
 
           ports:
