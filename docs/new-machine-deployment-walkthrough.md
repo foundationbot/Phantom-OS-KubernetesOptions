@@ -44,29 +44,43 @@ the motors can be enabled.
 
 On aarch64 robots (Jetson-class), use the
 [`manage_cpusets.sh`](../../DMA/DMA.ethercat/scripts/manage_cpusets.sh)
-helper that ships in `DMA.ethercat/scripts/`. It carves out an isolated
-cgroup v2 cpuset partition at boot, ahead of `docker.service`,
-`user@.service`, and `systemd-logind.service`, so nothing else has
-already claimed those CPUs by the time `dma-ethercat` starts.
+helper. It carves out an isolated cgroup v2 cpuset partition at boot,
+ahead of `docker.service`, `user@.service`, and `systemd-logind.service`,
+so nothing else has already claimed those CPUs by the time
+`dma-ethercat` starts.
 
-This replaces the `isolcpus=` GRUB approach the README describes for
-x86 — `isolcpus=` and cpuset partitions can coexist, but keeping
-`isolcpus=` means the isolated CPUs can't be dynamically released.
-The cpuset path is the supported one on aarch64. For deeper context
-see `DMA.ethercat/scripts/CPUSETS.md`.
+The canonical runbook is
+[`DMA.ethercat/docs/CPUSETS_SETUP.md`](../../DMA/DMA.ethercat/docs/CPUSETS_SETUP.md);
+the architecture / library reference is `scripts/CPUSETS.md`. What's
+below is the fleet-specific application of that runbook — follow the
+runbook for the authoritative version.
 
-**Target layout for this fleet** — isolate cores **10, 11, 12, 13**.
-The EtherCAT motor controller runs on **11, 12, 13** (matches
-`DMA_CPU_AFFINITY=11,12,13` / `DMA_RT_CPU=11` in step 1.3); core **10**
-is reserved for the **whole-body controller (WBC)**. Pinning the WBC
-explicitly is preferred but optional — you can also limit the isolation
-to **11–13** and leave core 10 in the general housekeeping pool.
+This replaces the `isolcpus=` GRUB approach the README describes for x86.
+`isolcpus=` and cpuset partitions can coexist, but keeping `isolcpus=`
+means the isolated CPUs can't be dynamically released — Step 4 below
+migrates the cmdline off it.
+
+**Target layout for this fleet** — isolate cores **10–13** (matches
+the legacy `isolcpus=10-13` on Thor). The EtherCAT motor controller
+runs on **11, 12, 13** (matches `DMA_CPU_AFFINITY=11,12,13` /
+`DMA_RT_CPU=11` in step 1.3); core **10** is reserved for the
+**whole-body controller (WBC)**. Pinning the WBC explicitly is
+preferred but optional — you can also limit the isolation to **11–13**
+and leave core 10 in the general housekeeping pool.
+
+#### Step 0 — Write `/etc/cpusets.conf`
+
+The fleet default (single partition, matches `isolcpus=10-13`):
 
 ```bash
-cd ~/development/foundation/DMA/DMA.ethercat
+sudo install -m 0644 /dev/stdin /etc/cpusets.conf <<'EOF'
+[ecat]
+cpus = 10-13
+description = EtherCAT master RT loop (cores 11-13) + WBC (core 10)
+EOF
 ```
 
-Write `/etc/cpusets.conf`:
+Variant A — pin WBC explicitly to its own partition:
 
 ```ini
 [ecat]
@@ -75,44 +89,116 @@ description = EtherCAT master + motor controller RT loop
 
 [wbc]
 cpus = 10
-description = Whole-body controller (optional — omit this section to leave core 10 in the general pool)
+description = Whole-body controller
 ```
 
-Apply once, verify, install as a boot service, then migrate the kernel
-cmdline so isolation is owned by the cpuset partition and not by
-`isolcpus=`:
+Variant B — drop core 10 entirely, isolation limited to 11–13:
+
+```ini
+[ecat]
+cpus = 11-13
+description = EtherCAT master + motor controller RT loop
+```
+
+Constraints enforced by `apply`: alphanumeric section names, no
+overlapping CPUs across sections, ≥ 2 housekeeping CPUs left over.
+
+#### Step 1 — Apply at runtime
 
 ```bash
-# One-shot apply (creates partitions immediately).
+cd ~/development/foundation/DMA/DMA.ethercat
 sudo ./scripts/manage_cpusets.sh apply /etc/cpusets.conf
 sudo ./scripts/manage_cpusets.sh verify ecat
 sudo ./scripts/manage_cpusets.sh list
+```
 
-# Pin the EtherCAT NIC IRQs onto the isolated partition.
+If `apply` fails citing `docker.slice` (or another sibling slice)
+claiming the CPUs, stop the offending service and retry, or skip ahead
+to Step 3 — the boot service ordering takes care of it on the next
+reboot.
+
+#### Step 2 — Pin the EtherCAT NIC IRQs (interactive)
+
+```bash
 sudo ./scripts/manage_cpusets.sh ethercat-rt ecat --nic ecat1
+```
 
-# Boot persistence — service comes up before docker / user / logind.
+This step **prompts** for confirmation when picking the RT core inside
+the partition — don't pipe stdin or run under nohup. `--nic` defaults
+to `ecat0`; pass the actual interface from `ip -br link`. The script
+pins the NIC's IRQs to the chosen core, applies ethtool low-latency
+tuning, locks `cpufreq` governor to `performance` on every isolated
+core, restricts unbound kernel workqueues to housekeeping cores, and
+installs a separate boot service that re-applies the tuning after
+reboot or link flap.
+
+#### Step 3 — Install boot persistence
+
+```bash
 sudo ./scripts/manage_cpusets.sh install-service /etc/cpusets.conf
 sudo ./scripts/manage_cpusets.sh install-affinity-defaults
 sudo systemctl daemon-reexec
+```
 
-# Migrate kernel cmdline (extlinux on Jetson, GRUB on x86) — drops
-# isolcpus= and adds recommended RT flags. Reboots required.
+`install-service` orders `cpusets.service` `Before=docker.service
+user@.service systemd-logind.service` so those slices can't claim the
+isolated CPUs before the partition activates. It deliberately does
+**not** chain `install-affinity-defaults` — that step writes
+`/etc/systemd/system.conf.d/cpuaffinity.conf` keeping every
+systemd-spawned service off the isolated cores by default. The
+`daemon-reexec` is required for the affinity drop-in to apply to
+services started before this step.
+
+#### Step 4 — Migrate the kernel cmdline (interactive)
+
+```bash
 sudo ./scripts/manage_cpusets.sh migrate-cmdline --add-rt-flags
+```
+
+Detects bootloader (`/boot/extlinux/extlinux.conf` on Jetson,
+`/etc/default/grub` on x86), backs up the current config with a
+timestamp, removes `isolcpus=` tokens, and with `--add-rt-flags` adds
+`rcu_nocb_poll`, `skew_tick=1`, `irqaffinity=<housekeeping>`.
+**Prompts before writing — read the diff first; don't pass `--yes`
+on the first run.** On Jetson there's no in-place rollback after
+reboot if the new cmdline doesn't come up — recovery requires booting
+from recovery media. The backup path is printed by the script.
+
+#### Step 5 — Reboot
+
+```bash
 sudo reboot
 ```
 
-After reboot, sanity-check that cores 10–13 are isolated and not in
-any other slice's `cpuset.cpus`:
+#### Step 6 — Verify after reboot
 
 ```bash
+systemctl status cpusets.service
+journalctl -u cpusets.service -b                 # no "CPUs not exclusive"
+sudo ./scripts/manage_cpusets.sh list
+sudo ./scripts/manage_cpusets.sh verify
 sudo ./scripts/manage_cpusets.sh status
-sudo ./scripts/manage_cpusets.sh verify ecat
+
+cat /proc/cmdline                                # must NOT contain isolcpus=
+                                                  # must contain rcu_nocb_poll, skew_tick=1, irqaffinity=
+cat /sys/devices/system/cpu/isolated             # matches your config CPUs
+grep ecat1 /proc/interrupts                      # IRQ counts only on the pinned core
 ```
 
 The `dma-ethercat` unit's `taskset -c ${DMA_CPU_AFFINITY}` will land
 its threads on cores 11–13 inside the `ecat` partition. k0s, docker,
 and systemd user sessions are confined to the remaining cores.
+
+#### One-shot alternative (single partition, single NIC)
+
+If you only have one partition and one NIC and don't want a config file,
+Steps 1 + 2 collapse to:
+
+```bash
+sudo ./scripts/manage_cpusets.sh create ecat 10-13 --with-ethercat-rt --nic ecat1
+```
+
+Steps 3, 4, 5, 6 still need to run separately.
 
 ### 1.1 Get the `.deb`
 
