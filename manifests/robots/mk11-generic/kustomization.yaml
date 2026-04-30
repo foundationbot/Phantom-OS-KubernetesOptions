@@ -32,6 +32,10 @@ images:
   # doesn't move this robot without an explicit overlay change).
   - name: foundationbot/phantomos-api-server
     newTag: V-1-0-1-20260430-001713
+  # yovariable-server: same convention — pin a specific CircleCI build
+  # rather than tracking :latest.
+  - name: foundationbot/yovariable-server
+    newTag: V-1-0-9-20260429-200257
 patches:
   #- path: patches/operator-ui-env.yaml
   #  target:
