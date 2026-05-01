@@ -16,6 +16,64 @@
 #   -y, --yes          skip confirmation prompts
 #   --dry-run          print what each phase would do, change nothing
 #   --keep-going       continue after failures (default: bail at first)
+#   --skip-docker-stop
+#                      Skip the docker pre-phase. By DEFAULT the script
+#                      sends `docker stop` to every running container on
+#                      the host so they release ports / device handles /
+#                      mounts before the next phase. This is non-
+#                      destructive (containers and images stay; they can
+#                      be `docker start`-ed again). Already a no-op if
+#                      docker is not installed or no containers are
+#                      running, so this flag is mainly for when you have
+#                      docker workloads on the host that must keep
+#                      running through the bootstrap.
+#   --skip-stop-services
+#                      Skip the host-systemd cleanup pre-phase. By
+#                      DEFAULT, right after the docker-stop pre-phase,
+#                      the script lists enabled services via
+#                      `systemctl list-unit-files --state=enabled` and
+#                      stops + disables anything matching the patterns
+#                      in `SYSTEM_SERVICE_PATTERNS` (defined near the
+#                      top of this script). Match is case-insensitive
+#                      and separator-agnostic, so an entry like
+#                      `api.*server` catches `api-server`, `api_server`,
+#                      `api.server`, `apiserver`. Default patterns
+#                      cover host-systemd copies of services the
+#                      cluster will manage as pods (api-server) or
+#                      re-install (dma-ethercat), so they don't fight
+#                      the pod-managed copy for ports / device
+#                      handles. Append entries to that array to extend.
+#   --skip-ethercat-uninstall
+#                      Skip the dma-ethercat teardown pre-phase. By
+#                      DEFAULT, after the docker stop / reset pre-phases
+#                      (so pods are gone first), the script checks for
+#                      `dma-ethercat.service`: if active it stops it, if
+#                      enabled it disables it, then runs
+#                      `/usr/sbin/dma-ethercat-uninstall`. Each step is a
+#                      no-op when already in the desired state. Use this
+#                      flag on a routine re-bootstrap of a healthy robot
+#                      where you want to leave the realtime stack alone.
+#   --skip-ethercat-install
+#                      Skip the dma-ethercat install phase. By DEFAULT,
+#                      AFTER phase 5 (seed pull secrets) and BEFORE
+#                      phase 6 (gitops), the script applies the
+#                      manifests/installers/dma-ethercat/robots/<robot>/
+#                      kustomization (a one-shot k8s Job using the
+#                      foundationbot/dma-ethercat image), waits for the
+#                      Job to copy /usr/local/share/dma/deb/*.deb to
+#                      /var/lib/dma-ethercat-installer/ on the host,
+#                      then runs `dpkg -i` on the .deb and
+#                      `systemctl enable --now dma-ethercat.service`.
+#                      Failure at ANY of those steps halts the bootstrap
+#                      with a DMA-ETHERCAT FAILURE banner and gitops is
+#                      NOT run — positronic-control / dma-video / nimbus
+#                      pods only come up after the realtime stack is
+#                      healthy. Use this flag to bypass that gate (e.g.
+#                      operator already installed the .deb manually).
+#                      The Job is bootstrap-managed (not in ArgoCD) so
+#                      every bootstrap forces a fresh extract via
+#                      delete-then-apply. Robot overlay must exist at
+#                      manifests/installers/dma-ethercat/robots/<robot>/.
 #   --reset            BEFORE phase 1, tear down any pre-existing k0s
 #                      cluster (`k0s stop && k0s reset`) and back up
 #                      /root/.kube/config and terraform/terraform.tfstate*
@@ -102,6 +160,10 @@ ROBOT=""
 YES=0
 DRY_RUN=0
 KEEP_GOING=0
+SKIP_DOCKER_STOP=0
+SKIP_STOP_SERVICES=0
+SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_INSTALL=0
 RESET=0
 SKIP_DEPS=0
 SKIP_HOST=0
@@ -117,9 +179,21 @@ SEED_PULL_SECRETS_ONLY=0
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
-# `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus)
+# `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/
+# and manifests/installers/dma-ethercat/base/job.yaml (phantom).
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom)
 PULL_SECRET_NAME="dockerhub-creds"
+
+# Host-systemd services to stop + disable before bringing up the cluster.
+# Each entry is an ERE substring matched case-insensitively against
+# `systemctl list-unit-files --state=enabled` output, so any unit whose
+# name contains the substring is matched — separator-agnostic
+# (`api-server`, `api_server`, `api.server`, `apiserver` all match a
+# pattern of `api.*server`). To add a new service, append a pattern.
+SYSTEM_SERVICE_PATTERNS=(
+  'api.*server'      # *api*server*    (host-systemd copies will be replaced by pods)
+  'dma.*ethercat'    # *dma*ethercat*  (replaced by phase 5.5 deb install)
+)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -127,6 +201,14 @@ while [ $# -gt 0 ]; do
     -y|--yes)        YES=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     --keep-going)    KEEP_GOING=1; shift ;;
+    --skip-docker-stop)
+                     SKIP_DOCKER_STOP=1; shift ;;
+    --skip-stop-services)
+                     SKIP_STOP_SERVICES=1; shift ;;
+    --skip-ethercat-uninstall)
+                     SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+    --skip-ethercat-install)
+                     SKIP_ETHERCAT_INSTALL=1; shift ;;
     --reset)         RESET=1; shift ;;
     --skip-deps)     SKIP_DEPS=1; shift ;;
     --skip-host)     SKIP_HOST=1; shift ;;
@@ -152,15 +234,33 @@ done
 # ---- helpers ------------------------------------------------------------
 
 PASS=0; FAIL=0; SKIP=0
-pass() { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
-skip() { SKIP=$((SKIP + 1)); printf '  \033[33mSKIP\033[0m  %s\n' "$1"; }
-info() { printf '  %s\n' "$1"; }
-phase() { printf '\n==> %s\n' "$1"; }
-die()  { printf 'error: %s\n' "$*" >&2; exit 2; }
+pass()   { PASS=$((PASS + 1)); printf '  \033[32m✓ PASS\033[0m  %s\n' "$1"; }
+fail()   { FAIL=$((FAIL + 1)); printf '  \033[31m✗ FAIL\033[0m  %s\n' "$1"; }
+skip()   { SKIP=$((SKIP + 1)); printf '  \033[33m• SKIP\033[0m  %s\n' "$1"; }
+info()   { printf '  \033[2m·\033[0m %s\n' "$1"; }
+note()   { printf '  \033[36m→\033[0m %s\n' "$1"; }   # action announcement (e.g. "stopping 3 containers...")
+phase()  { printf '\n\033[1;36m──\033[0m \033[1m%s\033[0m\n' "$1"; }
+die()    { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 2; }
 
 # Bail early on FAIL unless --keep-going is set.
 guard() { [ "$FAIL" -gt 0 ] && [ "$KEEP_GOING" = 0 ] && summary && exit "$FAIL"; }
+
+# Hard-stop helper for the dma-ethercat install path. The realtime
+# stack must be healthy before the rest of the gitops-managed pods come
+# up — positronic-control and friends talk to the EtherCAT bus via the
+# dma_main binary the .deb installs. On any failure here we abort the
+# bootstrap with a dedicated banner so the cause isn't buried under
+# noise from downstream phases that would otherwise still run under
+# --keep-going. Intentionally bypasses the --keep-going semantics that
+# guard() respects: ethercat is non-negotiable.
+ethercat_die() {
+  printf '\n  \033[31mDMA-ETHERCAT FAILURE\033[0m  %s\n' "$1" >&2
+  printf '  bootstrap halted — gitops and downstream pods are NOT applied\n' >&2
+  printf '  until the realtime stack is healthy. fix the underlying issue\n' >&2
+  printf '  and re-run, or pass --skip-ethercat-install to bypass.\n' >&2
+  summary
+  exit "${FAIL:-1}"
+}
 
 summary() {
   printf '\n==> summary\n  PASS=%d  FAIL=%d  SKIP=%d\n' "$PASS" "$FAIL" "$SKIP"
@@ -198,6 +298,132 @@ elif command -v k0s >/dev/null 2>&1; then
 else
   KUBECTL=()
 fi
+
+# ---- pre-phase: stop docker containers (default; --skip-docker-stop) ---
+
+# Send `docker stop` to every running container so they release ports,
+# device handles, and bind mounts before the rest of bootstrap proceeds.
+# Non-destructive: containers and images are left in place and can be
+# `docker start`-ed again afterward. Runs by default; --skip-docker-stop
+# opts out. Top-level "Proceed?" prompt already gates execution, so this
+# function does not prompt again.
+purge_docker() {
+  if [ "$SKIP_DOCKER_STOP" = 1 ]; then
+    phase "pre-phase: stop docker containers  (skipped — --skip-docker-stop)"
+    return
+  fi
+  phase "pre-phase: stop docker containers"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    skip "docker not installed — nothing to stop"
+    return
+  fi
+  if [ "$DRY_RUN" = 0 ] && ! docker info >/dev/null 2>&1; then
+    skip "docker daemon not reachable — nothing to stop"
+    return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    note "DRY-RUN: docker stop \$(docker ps -q)"
+    return
+  fi
+
+  local running n
+  running=$(docker ps -q 2>/dev/null || true)
+  if [ -z "$running" ]; then
+    skip "no running containers to stop"
+    return
+  fi
+  n=$(printf '%s\n' "$running" | wc -l | tr -d ' ')
+  note "stopping $n running container(s)..."
+  if docker stop $running >/dev/null 2>&1; then
+    pass "stopped $n container(s)"
+  else
+    fail "docker stop"
+  fi
+}
+
+# ---- pre-phase: stop+disable enabled system services -------------------
+
+# Walk `systemctl list-unit-files --state=enabled --type=service` and
+# stop + disable anything whose name matches one of the patterns in
+# SYSTEM_SERVICE_PATTERNS (defined at the top of this script). Default
+# patterns cover host-systemd copies of services the cluster will own
+# once the bootstrap finishes:
+#   - api.*server   -> brought up as a pod by the gitops phase; the
+#                      host copy listening on the same port would block
+#                      the Service / collide on dependencies.
+#   - dma.*ethercat -> uninstalled by the next pre-phase and reinstalled
+#                      fresh from the .deb baked into the foundationbot
+#                      image; stopping it here ensures phase 4 (cluster)
+#                      never sees the running unit.
+# Idempotent: a service that's already stopped/disabled produces a
+# no-op and we move on. Failures are recorded but do not abort — we'd
+# rather get to the cluster phase and let the operator deal with a
+# stubborn unit than wedge here on a transient systemd hiccup.
+stop_existing_services() {
+  if [ "$SKIP_STOP_SERVICES" = 1 ]; then
+    phase "pre-phase: stop system services  (skipped — --skip-stop-services)"
+    return
+  fi
+  phase "pre-phase: stop system services"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    skip "systemctl not present — nothing to do"
+    return
+  fi
+
+  # Compose the SYSTEM_SERVICE_PATTERNS array into a single ERE alternation
+  # for grep. `-i` is case-insensitive; no anchors so each pattern matches
+  # anywhere in the unit name (a pattern of `api.*server` catches
+  # `api-server`, `api_server`, `api.server`, `apiserver`, …).
+  local pattern_re
+  pattern_re=$(IFS='|'; printf '%s' "${SYSTEM_SERVICE_PATTERNS[*]}")
+
+  local matches
+  matches=$(systemctl list-unit-files --state=enabled --type=service --no-legend --no-pager 2>/dev/null \
+    | awk '{print $1}' \
+    | grep -iE "($pattern_re)" \
+    || true)
+
+  if [ -z "$matches" ]; then
+    skip "no enabled services match SYSTEM_SERVICE_PATTERNS — nothing to stop"
+    return
+  fi
+
+  local count
+  count=$(printf '%s\n' "$matches" | wc -l | tr -d ' ')
+  note "found $count matching service(s):"
+  while IFS= read -r u; do
+    [ -n "$u" ] && info "  - $u"
+  done <<< "$matches"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    note "DRY-RUN: would stop (if active) + disable each"
+    return
+  fi
+
+  note "stopping + disabling each..."
+  while IFS= read -r unit; do
+    [ -z "$unit" ] && continue
+    local active
+    active=$(systemctl is-active "$unit" 2>/dev/null || true)
+    if [ "$active" = "active" ]; then
+      if systemctl stop "$unit" 2>/dev/null; then
+        pass "stopped  $unit"
+      else
+        fail "stop     $unit"
+      fi
+    else
+      skip "stop     $unit  (state=${active:-unknown}, not active)"
+    fi
+    if systemctl disable "$unit" 2>/dev/null; then
+      pass "disabled $unit"
+    else
+      fail "disable  $unit"
+    fi
+  done <<< "$matches"
+}
 
 # ---- pre-phase: reset (only if --reset) --------------------------------
 
@@ -292,6 +518,106 @@ EOF
   # 5. Reset cached KUBECTL — k0s is gone, anything we cached at startup
   #    is no longer valid until phase 4 reinstalls it.
   KUBECTL=()
+}
+
+# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall)
+
+# Tear down the dma-ethercat realtime control service. Runs by default;
+# --skip-ethercat-uninstall opts out (use it for routine re-bootstraps
+# where the realtime stack should stay in place). Designed to run AFTER
+# purge_docker and reset_cluster so the pods that talk to ethercat are
+# already gone — stopping the service while pods are still pinging its
+# socket can leave the kernel module in a wedged state.
+#
+# Sequence (each step independent + idempotent):
+#   1. if no unit file installed                  -> skip whole phase
+#   2. if active                                  -> systemctl stop
+#   3. if stop failed                             -> bail (do NOT disable
+#                                                   or run uninstaller —
+#                                                   leaving the service
+#                                                   half-torn-down is
+#                                                   worse than no-op)
+#   4. if enabled / enabled-runtime / alias       -> systemctl disable
+#   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
+uninstall_ethercat() {
+  if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
+    return
+  fi
+  phase "pre-phase: uninstall dma-ethercat"
+
+  local svc=dma-ethercat.service
+  local uninstaller=/usr/sbin/dma-ethercat-uninstall
+
+  if ! systemctl list-unit-files "$svc" 2>/dev/null | grep -q "^$svc"; then
+    skip "$svc unit not installed — nothing to tear down"
+    if [ -x "$uninstaller" ]; then
+      note "running $uninstaller anyway (cleanup of stray files)..."
+      if [ "$DRY_RUN" = 1 ]; then
+        note "DRY-RUN: $uninstaller"
+      elif "$uninstaller"; then
+        pass "$uninstaller completed"
+      else
+        fail "$uninstaller exited non-zero"
+      fi
+    fi
+    return
+  fi
+
+  local active enabled
+  active=$(systemctl is-active  "$svc" 2>/dev/null || true)
+  enabled=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+  note "current state: active=${active:-unknown}  enabled=${enabled:-unknown}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    [ "$active" = "active" ]              && note "DRY-RUN: systemctl stop $svc"
+    [[ "$enabled" =~ ^enabled ]]          && note "DRY-RUN: systemctl disable $svc"
+    [ -x "$uninstaller" ]                 && note "DRY-RUN: $uninstaller"
+    return
+  fi
+
+  # 1. stop (only if active)
+  if [ "$active" = "active" ]; then
+    note "stopping $svc..."
+    if systemctl stop "$svc"; then
+      pass "stopped  $svc"
+    else
+      fail "stop $svc — refusing to disable/uninstall a running service"
+      return
+    fi
+  else
+    skip "stop     $svc  (not active)"
+  fi
+
+  # 2. disable (only if enabled in some form)
+  # `is-enabled` returns 'enabled', 'enabled-runtime', 'alias', etc. when
+  # there's something to disable. 'static', 'masked', 'disabled' are no-op.
+  if [[ "$enabled" =~ ^(enabled|enabled-runtime|alias)$ ]]; then
+    if systemctl disable "$svc" 2>/dev/null; then
+      pass "disabled $svc"
+    else
+      fail "disable  $svc"
+      return
+    fi
+  else
+    skip "disable  $svc  (state=${enabled:-unknown})"
+  fi
+
+  # 3. run the uninstaller
+  if [ ! -e "$uninstaller" ]; then
+    fail "$uninstaller not found — cannot complete uninstall"
+    return
+  fi
+  if [ ! -x "$uninstaller" ]; then
+    fail "$uninstaller not executable"
+    return
+  fi
+  note "running $uninstaller..."
+  if "$uninstaller"; then
+    pass "$uninstaller completed"
+  else
+    fail "$uninstaller exited non-zero"
+  fi
 }
 
 # ---- phase 1: preflight -------------------------------------------------
@@ -696,8 +1022,14 @@ gitops() {
   ) || { fail "terraform apply"; return; }
   pass "terraform apply"
 
-  info "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
-  local sync health
+  note "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
+  # Image-pull watchdog runs alongside the Synced+Healthy wait. Kubelet
+  # retries ImagePullBackOff/ErrImagePull forever (exponential backoff,
+  # no retry-count cap) — without this gate, a misconfigured tag or
+  # missing dockerhub-creds quietly burns DockerHub rate-limit credits
+  # for the full 10-min sync window, then for hours after we exit. We
+  # bail as soon as the same pod has been stuck on image pull for >2min.
+  local sync health pull_stuck_since=0 stuck
   for _ in $(seq 1 120); do
     sync=$("${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
     health=$("${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
@@ -705,9 +1037,166 @@ gitops() {
       pass "phantomos-$ROBOT  Synced + Healthy"
       return
     fi
+
+    # Pod STATUS column shows "ImagePullBackOff", "ErrImagePull", or
+    # "Init:ImagePullBackOff" when an image pull is failing. The
+    # substring match catches the init-container variant too.
+    stuck=$("${KUBECTL[@]}" get pods -A --no-headers 2>/dev/null \
+      | awk '$4 ~ /ImagePullBackOff|ErrImagePull/ {print $1"/"$2"  ("$4")"}' \
+      || true)
+    if [ -n "$stuck" ]; then
+      if [ "$pull_stuck_since" = 0 ]; then
+        pull_stuck_since=$(date +%s)
+        note "image-pull failures detected — will abort if still stuck in 120s"
+      elif [ "$(( $(date +%s) - pull_stuck_since ))" -ge 120 ]; then
+        local n
+        n=$(printf '%s\n' "$stuck" | wc -l | tr -d ' ')
+        fail "image pulls stuck >120s on $n pod(s):"
+        while IFS= read -r line; do
+          [ -n "$line" ] && info "  - $line"
+        done <<< "$stuck"
+        info ""
+        info "kubelet retries ImagePullBackOff forever — common causes:"
+        info "  • missing/expired dockerhub-creds in the pod's namespace"
+        info "  • bad image tag in the robot overlay"
+        info "  • DockerHub rate limit (anonymous: 100/6h, free authed: 200/6h)"
+        info "  • image not pre-pulled into localhost:5443 and DockerHub unreachable"
+        info ""
+        info "fix the root cause then re-run. To stop the in-flight retry storm:"
+        info "  kubectl -n <ns> delete pod <name>"
+        return
+      fi
+    else
+      pull_stuck_since=0  # something cleared up; reset the watchdog
+    fi
     sleep 5
   done
   fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
+}
+
+# ---- phase 5.5: install dma-ethercat (default; --skip-ethercat-install)
+
+# Install the dma-ethercat .deb that ships baked into the
+# foundationbot/dma-ethercat container image, then enable + start the
+# service. Runs strictly BEFORE phase 6 (gitops) — the realtime stack
+# must be up before positronic-control / dma-video / nimbus pods start
+# because they talk to the EtherCAT bus through the dma_main binary
+# this .deb installs.
+#
+# Any failure in this phase calls ethercat_die(): the bootstrap halts
+# with a dedicated DMA-ETHERCAT FAILURE banner and gitops never runs,
+# even under --keep-going. Pass --skip-ethercat-install if you need to
+# bypass this gate (e.g. operator already installed the .deb manually).
+#
+# Flow:
+#   1. ensure ns/phantom exists (so the Job can land there)
+#   2. delete any prior dma-ethercat-installer Job — fresh extract every
+#      bootstrap, per the design. The Job is NOT in ArgoCD; it lives at
+#      manifests/installers/dma-ethercat/ specifically so the bootstrap
+#      can manage it without racing Argo.
+#   3. kubectl apply -k manifests/installers/dma-ethercat/robots/<robot>/
+#   4. wait for Job to reach Complete (5 min cap; image pulls on a slow
+#      link can dominate)
+#   5. dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb
+#   6. systemctl enable --now dma-ethercat.service
+install_dma_ethercat() {
+  if [ "$SKIP_ETHERCAT_INSTALL" = 1 ]; then phase "phase 5.5: install dma-ethercat  (skipped — --skip-ethercat-install)"; return; fi
+  phase "phase 5.5: install dma-ethercat (gates phase 6)"
+
+  local overlay="$REPO_ROOT/manifests/installers/dma-ethercat/robots/$ROBOT"
+  if [ ! -d "$overlay" ]; then
+    fail "$overlay not found"
+    ethercat_die "missing robot overlay — add manifests/installers/dma-ethercat/robots/$ROBOT/ and pin the image tag"
+  fi
+
+  if [ "${#KUBECTL[@]}" -eq 0 ]; then
+    fail "no kubectl/k0s available"
+    ethercat_die "kubectl missing — phase 4 (cluster) should have set this up"
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    note "DRY-RUN: kubectl create ns phantom (if missing)"
+    note "DRY-RUN: kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
+    note "DRY-RUN: kubectl apply -k $overlay"
+    note "DRY-RUN: kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
+    note "DRY-RUN: dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    note "DRY-RUN: systemctl enable --now dma-ethercat.service"
+    return
+  fi
+
+  # 1. namespace
+  if "${KUBECTL[@]}" get ns phantom >/dev/null 2>&1; then
+    skip "ns/phantom already exists"
+  else
+    note "creating ns/phantom..."
+    if "${KUBECTL[@]}" create ns phantom >/dev/null; then
+      pass "ns/phantom created"
+    else
+      fail "could not create ns/phantom"
+      ethercat_die "could not create ns/phantom — cluster may be unhealthy"
+    fi
+  fi
+
+  # 2. force fresh extract — drop any prior Job (and its pod) before re-applying
+  if "${KUBECTL[@]}" -n phantom get job dma-ethercat-installer >/dev/null 2>&1; then
+    note "removing prior installer Job (forces fresh extract)..."
+    "${KUBECTL[@]}" -n phantom delete job dma-ethercat-installer --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    pass "prior Job removed"
+  else
+    skip "no prior installer Job to remove"
+  fi
+
+  # 3. apply the per-robot kustomization
+  note "applying installer manifest from $overlay..."
+  if "${KUBECTL[@]}" apply -k "$overlay" >/dev/null; then
+    pass "installer Job applied"
+  else
+    fail "kubectl apply -k $overlay"
+    ethercat_die "could not apply installer Job — check kustomize render at $overlay"
+  fi
+
+  # 4. wait for completion (or surface failure)
+  note "waiting up to 5min for installer Job to reach Complete..."
+  if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=300s job/dma-ethercat-installer >/dev/null 2>&1; then
+    pass "installer Job Complete"
+  else
+    local jstat
+    jstat=$("${KUBECTL[@]}" -n phantom get job dma-ethercat-installer -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}' 2>/dev/null || true)
+    fail "installer Job did not Complete in 5min (status: ${jstat:-unknown})"
+    info "pod logs:"
+    "${KUBECTL[@]}" -n phantom logs -l app=dma-ethercat-installer --tail=50 2>&1 | sed 's/^/      /' || true
+    ethercat_die "installer Job never reached Complete — likely image pull (check dockerhub-creds in phantom ns) or the .deb path inside the image"
+  fi
+
+  # 5. dpkg -i. Glob match: image bakes one .deb per arch — exactly one
+  #    file should be present after the Job's `cp`.
+  local deb
+  deb=$(ls -1t /var/lib/dma-ethercat-installer/dma-ethercat-*.deb 2>/dev/null | head -1 || true)
+  if [ -z "$deb" ]; then
+    fail "no dma-ethercat-*.deb at /var/lib/dma-ethercat-installer/"
+    ethercat_die "Job ran but did not write the .deb to the host volume — check the Job's pod logs"
+  fi
+  note "found .deb on host: $(basename "$deb")"
+
+  note "running dpkg -i..."
+  if dpkg -i "$deb"; then
+    pass "dpkg -i $(basename "$deb")"
+  else
+    fail "dpkg -i $deb"
+    ethercat_die "dpkg -i failed — check above output for missing dependencies (libstdc++/libfoo) or conflicting packages"
+  fi
+
+  # 6. enable + start. Per the user's spec, "rest of the pods" only run
+  #    after this succeeds — so a failed start halts the bootstrap.
+  note "enabling + starting dma-ethercat.service..."
+  if systemctl enable --now dma-ethercat.service; then
+    pass "dma-ethercat.service enabled and started"
+  else
+    fail "systemctl enable --now dma-ethercat.service"
+    info "unit status:"
+    systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/      /' || true
+    ethercat_die "service did not start — check systemctl status / journalctl -u dma-ethercat for the underlying cause"
+  fi
 }
 
 # ---- phase 7: setup-positronic (optional) --------------------------------
@@ -806,12 +1295,44 @@ EOF
   exit "$FAIL"
 fi
 
-cat <<EOF
-bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
-repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
-EOF
+print_plan() {
+  # One line per phase. $1: 1=run, 0=skip. $2: human label. $3: skip-reason
+  # (only shown on skipped lines). Aligned by padding the label column.
+  _step() {
+    local on=$1 label=$2 why=$3
+    if [ "$on" = "1" ]; then
+      printf '   \033[32m✓\033[0m  %s\n' "$label"
+    elif [ -n "$why" ]; then
+      printf '   \033[2m─  %-44s  %s\033[0m\n' "$label" "($why)"
+    else
+      printf '   \033[2m─  %s\033[0m\n' "$label"
+    fi
+  }
+
+  printf '\n'
+  printf '\033[1;36m──\033[0m \033[1mbootstrap-robot.sh\033[0m  robot=\033[36m%s\033[0m' "$ROBOT"
+  [ "$DRY_RUN" = 1 ] && printf '  \033[33m(dry-run)\033[0m'
+  printf '\n'
+  printf '   \033[2mrepo:\033[0m %s\n' "$REPO_ROOT"
+  printf '\n   \033[1mplanned phases (in execution order):\033[0m\n'
+
+  _step $([ "$SKIP_DOCKER_STOP"        = 0 ] && echo 1 || echo 0) "stop docker containers"                       "--skip-docker-stop"
+  _step $([ "$SKIP_STOP_SERVICES"      = 0 ] && echo 1 || echo 0) "stop system services"                         "--skip-stop-services"
+  _step "$RESET"                                                  "reset cluster"                                "--reset not set"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                       "--skip-ethercat-uninstall"
+  _step 1                                                         "phase 1  preflight"                           ""
+  _step $([ "$SKIP_DEPS"               = 0 ] && echo 1 || echo 0) "phase 2  deps"                                "--skip-deps"
+  _step $([ "$SKIP_HOST"               = 0 ] && echo 1 || echo 0) "phase 3  host-config"                         "--skip-host"
+  _step $([ "$SKIP_CLUSTER"            = 0 ] && echo 1 || echo 0) "phase 4  cluster"                             "--skip-cluster"
+  _step $([ "$SKIP_SEED_PULL_SECRETS"  = 0 ] && echo 1 || echo 0) "phase 5  seed pull secrets"                   "--skip-seed-pull-secrets"
+  _step $([ "$SKIP_ETHERCAT_INSTALL"   = 0 ] && echo 1 || echo 0) "phase 5.5  install dma-ethercat (gates 6)"    "--skip-ethercat-install"
+  _step $([ "$SKIP_GITOPS"             = 0 ] && echo 1 || echo 0) "phase 6  gitops"                              "--skip-gitops"
+  _step "$SETUP_POSITRONIC"                                       "phase 7  setup-positronic"                    "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"           = 0 ] && echo 1 || echo 0) "phase 8  validate"                            "--skip-validate"
+
+  printf '\n'
+}
+print_plan
 
 # When --reset is set, it has its own confirmation prompt with a
 # detailed warning. Skip the generic confirmation.
@@ -821,12 +1342,16 @@ if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
   [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
 fi
 
-reset_cluster      ; guard
+purge_docker            ; guard
+stop_existing_services  ; guard
+reset_cluster           ; guard
+uninstall_ethercat      ; guard
 preflight          ; guard
 deps               ; guard
 host_config        ; guard
 cluster            ; guard
 seed_pull_secrets  ; guard
+install_dma_ethercat ; guard
 gitops             ; guard
 setup_positronic   ; guard
 validate
