@@ -1282,12 +1282,44 @@ EOF
   exit "$FAIL"
 fi
 
-cat <<EOF
-bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
-repo: $REPO_ROOT
-phases: $([ "$SKIP_DOCKER_STOP" = 0 ] && echo "STOP-DOCKER, ")$([ "$SKIP_STOP_SERVICES" = 0 ] && echo "STOP-SERVICES, ")$([ "$RESET" = 1 ] && echo "RESET, ")$([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo "UNINSTALL-ETHERCAT, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets$([ "$SKIP_ETHERCAT_INSTALL" = 0 ] && echo ", INSTALL-ETHERCAT [gates 6]"), 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING skip_docker_stop=$SKIP_DOCKER_STOP skip_stop_services=$SKIP_STOP_SERVICES skip_ethercat_uninstall=$SKIP_ETHERCAT_UNINSTALL skip_ethercat_install=$SKIP_ETHERCAT_INSTALL reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
-EOF
+print_plan() {
+  # One line per phase. $1: 1=run, 0=skip. $2: human label. $3: skip-reason
+  # (only shown on skipped lines). Aligned by padding the label column.
+  _step() {
+    local on=$1 label=$2 why=$3
+    if [ "$on" = "1" ]; then
+      printf '   \033[32m✓\033[0m  %s\n' "$label"
+    elif [ -n "$why" ]; then
+      printf '   \033[2m─  %-44s  %s\033[0m\n' "$label" "($why)"
+    else
+      printf '   \033[2m─  %s\033[0m\n' "$label"
+    fi
+  }
+
+  printf '\n'
+  printf '\033[1;36m──\033[0m \033[1mbootstrap-robot.sh\033[0m  robot=\033[36m%s\033[0m' "$ROBOT"
+  [ "$DRY_RUN" = 1 ] && printf '  \033[33m(dry-run)\033[0m'
+  printf '\n'
+  printf '   \033[2mrepo:\033[0m %s\n' "$REPO_ROOT"
+  printf '\n   \033[1mplanned phases (in execution order):\033[0m\n'
+
+  _step $([ "$SKIP_DOCKER_STOP"        = 0 ] && echo 1 || echo 0) "stop docker containers"                       "--skip-docker-stop"
+  _step $([ "$SKIP_STOP_SERVICES"      = 0 ] && echo 1 || echo 0) "stop api-server / dma-ethercat services"      "--skip-stop-services"
+  _step "$RESET"                                                  "reset cluster"                                "--reset not set"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                       "--skip-ethercat-uninstall"
+  _step 1                                                         "phase 1  preflight"                           ""
+  _step $([ "$SKIP_DEPS"               = 0 ] && echo 1 || echo 0) "phase 2  deps"                                "--skip-deps"
+  _step $([ "$SKIP_HOST"               = 0 ] && echo 1 || echo 0) "phase 3  host-config"                         "--skip-host"
+  _step $([ "$SKIP_CLUSTER"            = 0 ] && echo 1 || echo 0) "phase 4  cluster"                             "--skip-cluster"
+  _step $([ "$SKIP_SEED_PULL_SECRETS"  = 0 ] && echo 1 || echo 0) "phase 5  seed pull secrets"                   "--skip-seed-pull-secrets"
+  _step $([ "$SKIP_ETHERCAT_INSTALL"   = 0 ] && echo 1 || echo 0) "phase 5.5  install dma-ethercat (gates 6)"    "--skip-ethercat-install"
+  _step $([ "$SKIP_GITOPS"             = 0 ] && echo 1 || echo 0) "phase 6  gitops"                              "--skip-gitops"
+  _step "$SETUP_POSITRONIC"                                       "phase 7  setup-positronic"                    "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"           = 0 ] && echo 1 || echo 0) "phase 8  validate"                            "--skip-validate"
+
+  printf '\n'
+}
+print_plan
 
 # When --reset is set, it has its own confirmation prompt with a
 # detailed warning. Skip the generic confirmation.
