@@ -88,17 +88,20 @@ disconnected/dev environments and for offline imaging.
 
 ### Migration
 
-- **Phase 1 (this RFC's implementation):** stand up the control plane,
-  register existing robots in it (mk09, ak-007, mk11-generic, mk11000010)
-  by their serials. The repo's `host-config-templates/<robot>/` becomes
-  the seed data we POST into the control plane during migration.
+- **Phase 0 (already done):** repo carries no per-robot data. Per-robot
+  values live in each device's `/etc/phantomos/host-config.yaml`. Team
+  runbook holds the canonical record while we get the control plane up.
+- **Phase 1 (this RFC's implementation):** stand up the control plane.
+  Bulk-register existing robots in it (read each device's
+  `/etc/phantomos/host-config.yaml`, POST to the API, key by serial).
 - **Phase 2:** robots opt in by adding `--fleet-api` to their bootstrap
   command. Existing `--host-config` flow keeps working.
-- **Phase 3:** delete `host-config-templates/<robot>/` from the repo —
-  control plane is the only source of truth. `host-config-templates/_template/`
-  stays as the schema reference.
-- **Phase 4:** delete `manifests/robots/<name>/` — overlays parameterized
-  via Kustomize components selected by the rendered Application CR.
+- **Phase 3:** retire the runbook's per-robot config table — control
+  plane is the only source of truth. `host-config-templates/_template/`
+  in the repo stays as the schema reference.
+- **Phase 4:** parameterize `manifests/robots/<name>/` overlays via
+  Kustomize components selected by the rendered Application CR. Eventual
+  goal: a single generic overlay tree, fully driven by per-host config.
 
 ## Open questions
 

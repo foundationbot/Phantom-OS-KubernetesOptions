@@ -114,18 +114,28 @@ You can skip this whole section for a first bringup — the overlay's
 default tags will apply, and you can set per-host tags later by
 re-running `configure-host.sh`.
 
-### Pre-filling from a known robot
+### Pre-filling from another robot
 
-If the robot you're bringing up is similar to an existing one, start
-from its template:
+The repo no longer carries per-robot template files. To re-image or
+duplicate an existing robot, copy its `host-config.yaml` from a
+working sibling first:
 
 ```bash
-sudo bash scripts/configure-host.sh --from-template mk09
+ssh <other-robot> "sudo cat /etc/phantomos/host-config.yaml" \
+  | sudo tee /etc/phantomos/host-config.yaml
+sudo bash scripts/configure-host.sh    # wizard treats the existing
+                                       # file as the seed; press enter
+                                       # to keep each value or override
+sudo bash scripts/bootstrap-robot.sh
 ```
 
-The wizard pre-fills every value from
-`host-config-templates/mk09/host-config.yaml`. You can press enter on
-each prompt to accept all of them, or override only what's different.
+If you have a tree of operator-supplied templates outside the repo
+(e.g. `~/phantom-fleet-config/<robot>/host-config.yaml`), point
+`--from-template` at that path:
+
+```bash
+sudo bash scripts/configure-host.sh --from-template ~/phantom-fleet-config/mk09
+```
 
 ### Tip: review what was written
 
@@ -233,16 +243,18 @@ often as you want:
 cd /opt/Phantom-OS-KubernetesOptions
 sudo git pull
 
-# Use mk09's known-good values as the starting point, accept defaults
-sudo bash scripts/configure-host.sh --from-template mk09 --yes
+# Pull this robot's known-good config from a working sibling
+ssh <other-mk09> "sudo cat /etc/phantomos/host-config.yaml" \
+  | sudo tee /etc/phantomos/host-config.yaml
 sudo bash scripts/bootstrap-robot.sh
 ```
 
-Or in one shot — bootstrap can read a template directly:
+If no sibling is reachable, run the wizard and fill values from the
+team runbook:
 
 ```bash
-sudo bash scripts/bootstrap-robot.sh \
-  --host-config host-config-templates/mk09/host-config.yaml
+sudo bash scripts/configure-host.sh
+sudo bash scripts/bootstrap-robot.sh
 ```
 
 ### Bringing up a brand-new robot (no template)
@@ -465,9 +477,10 @@ sudo bash scripts/bootstrap-robot.sh
 sudo bash scripts/configure-host.sh
 sudo bash scripts/bootstrap-robot.sh
 
-# fast path: known robot, accept all defaults
-sudo bash scripts/bootstrap-robot.sh \
-  --host-config host-config-templates/<robot>/host-config.yaml
+# fast path: copy from a working sibling
+ssh <other-robot> "sudo cat /etc/phantomos/host-config.yaml" \
+  | sudo tee /etc/phantomos/host-config.yaml
+sudo bash scripts/bootstrap-robot.sh
 
 # wipe and rebuild
 sudo bash scripts/bootstrap-robot.sh --reset

@@ -7,22 +7,33 @@
 # once on a fresh machine, then bootstrap-robot.sh consumes the file.
 #
 # Usage:
-#   sudo bash scripts/configure-host.sh                   # full wizard
-#   sudo bash scripts/configure-host.sh --from-template mk09
-#                                                          # pre-fill from
-#                                                          # host-config-templates/mk09/host-config.yaml
+#   sudo bash scripts/configure-host.sh                  # full wizard
+#   sudo bash scripts/configure-host.sh --from-template ~/fleet-config/mk09
+#                                                         # pre-fill from an
+#                                                         # operator-supplied
+#                                                         # template tree
 #   sudo bash scripts/configure-host.sh --output /tmp/hc.yaml --no-write
-#                                                          # render to a
-#                                                          # custom path
-#                                                          # without root
-#   sudo bash scripts/configure-host.sh --show             # print current
-#                                                          # host-config
-#   sudo bash scripts/configure-host.sh --validate         # validate
-#                                                          # current host-config
+#                                                         # render to a custom
+#                                                         # path without root
+#   sudo bash scripts/configure-host.sh --show            # print current
+#                                                         # host-config
+#   sudo bash scripts/configure-host.sh --validate        # validate current
+#                                                         # host-config
+#
+# The repo only ships host-config-templates/_template/ as a generic
+# schema. Per-robot values live on each device under /etc/phantomos/
+# (or, eventually, in the fleet control plane). To pre-fill the wizard
+# from another robot's known-good values, either pass --from-template
+# pointing at an operator-supplied template tree OR copy that robot's
+# /etc/phantomos/host-config.yaml in advance and let the wizard pick it
+# up as the existing seed.
 #
 # Flags:
-#   --from-template <robot>  pre-fill from host-config-templates/<robot>/host-config.yaml
-#   --output <path>          target file (default: /etc/phantomos/host-config.yaml)
+#   --from-template <name|path>  pre-fill from a template tree. If the
+#                                value is a plain name (no '/'), looks
+#                                under host-config-templates/<name>/.
+#                                Otherwise treats the value as a path.
+#   --output <path>              target file (default: /etc/phantomos/host-config.yaml)
 #   --no-write               write only if user confirms (always on by default,
 #                            included for symmetry with --yes)
 #   -y, --yes                accept all defaults, no prompts
@@ -181,7 +192,20 @@ fi
 #   4. host-config-templates/_template/host-config.yaml
 seed_path=""
 if [ -n "$FROM_TEMPLATE" ]; then
-  seed_path="$TEMPLATES_DIR/$FROM_TEMPLATE/host-config.yaml"
+  # Two forms:
+  #   --from-template mk09             -> host-config-templates/mk09/host-config.yaml
+  #                                       (no longer ships in the repo, but an
+  #                                       operator-supplied tree under
+  #                                       host-config-templates/ would still match)
+  #   --from-template /path/to/dir     -> /path/to/dir/host-config.yaml
+  #   --from-template /path/to/file.yaml -> use directly
+  if [ -d "$FROM_TEMPLATE" ]; then
+    seed_path="$FROM_TEMPLATE/host-config.yaml"
+  elif [ -f "$FROM_TEMPLATE" ]; then
+    seed_path="$FROM_TEMPLATE"
+  else
+    seed_path="$TEMPLATES_DIR/$FROM_TEMPLATE/host-config.yaml"
+  fi
   [ -r "$seed_path" ] || die "template not found: $seed_path"
 elif [ -r "$OUTPUT_FILE" ]; then
   seed_path="$OUTPUT_FILE"
