@@ -1009,14 +1009,52 @@ gitops() {
   ) || { fail "terraform apply"; return; }
   pass "terraform apply"
 
-  info "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
-  local sync health
+  note "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
+  # Image-pull watchdog runs alongside the Synced+Healthy wait. Kubelet
+  # retries ImagePullBackOff/ErrImagePull forever (exponential backoff,
+  # no retry-count cap) — without this gate, a misconfigured tag or
+  # missing dockerhub-creds quietly burns DockerHub rate-limit credits
+  # for the full 10-min sync window, then for hours after we exit. We
+  # bail as soon as the same pod has been stuck on image pull for >2min.
+  local sync health pull_stuck_since=0 stuck
   for _ in $(seq 1 120); do
     sync=$("${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
     health=$("${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
     if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
       pass "phantomos-$ROBOT  Synced + Healthy"
       return
+    fi
+
+    # Pod STATUS column shows "ImagePullBackOff", "ErrImagePull", or
+    # "Init:ImagePullBackOff" when an image pull is failing. The
+    # substring match catches the init-container variant too.
+    stuck=$("${KUBECTL[@]}" get pods -A --no-headers 2>/dev/null \
+      | awk '$4 ~ /ImagePullBackOff|ErrImagePull/ {print $1"/"$2"  ("$4")"}' \
+      || true)
+    if [ -n "$stuck" ]; then
+      if [ "$pull_stuck_since" = 0 ]; then
+        pull_stuck_since=$(date +%s)
+        note "image-pull failures detected — will abort if still stuck in 120s"
+      elif [ "$(( $(date +%s) - pull_stuck_since ))" -ge 120 ]; then
+        local n
+        n=$(printf '%s\n' "$stuck" | wc -l | tr -d ' ')
+        fail "image pulls stuck >120s on $n pod(s):"
+        while IFS= read -r line; do
+          [ -n "$line" ] && info "  - $line"
+        done <<< "$stuck"
+        info ""
+        info "kubelet retries ImagePullBackOff forever — common causes:"
+        info "  • missing/expired dockerhub-creds in the pod's namespace"
+        info "  • bad image tag in the robot overlay"
+        info "  • DockerHub rate limit (anonymous: 100/6h, free authed: 200/6h)"
+        info "  • image not pre-pulled into localhost:5443 and DockerHub unreachable"
+        info ""
+        info "fix the root cause then re-run. To stop the in-flight retry storm:"
+        info "  kubectl -n <ns> delete pod <name>"
+        return
+      fi
+    else
+      pull_stuck_since=0  # something cleared up; reset the watchdog
     fi
     sleep 5
   done
