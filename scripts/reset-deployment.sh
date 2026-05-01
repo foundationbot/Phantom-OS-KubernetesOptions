@@ -42,9 +42,23 @@
 set -u -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
-OVERLAY="${OVERLAY:-${REPO}/manifests/robots/mk09}"
 ARGOCD_NS="${ARGOCD_NS:-argocd}"
-ARGOCD_APP="${ARGOCD_APP:-phantomos-mk09}"
+
+# Resolve robot identity via the shared helper. Falls through to mk09
+# only if everything else fails AND the operator has explicitly opted
+# in via ROBOT=mk09 — otherwise it's a hard error.
+if [ -z "${OVERLAY:-}" ] || [ -z "${ARGOCD_APP:-}" ]; then
+  REPO_ROOT="$REPO"
+  # shellcheck source=lib/robot-id.sh
+  . "$(dirname "$0")/lib/robot-id.sh"
+  if _robot="$(resolve_robot "${ROBOT:-}")"; then
+    OVERLAY="${OVERLAY:-${REPO}/manifests/robots/${_robot}}"
+    ARGOCD_APP="${ARGOCD_APP:-phantomos-${_robot}}"
+  else
+    echo "error: could not resolve robot — set OVERLAY and ARGOCD_APP, or ROBOT" >&2
+    exit 2
+  fi
+fi
 
 # kubectl resolution: prefer standalone kubectl, fall back to `k0s kubectl`.
 KUBECTL=""

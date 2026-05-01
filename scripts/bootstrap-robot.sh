@@ -6,11 +6,17 @@
 # Usage:
 #   sudo bash scripts/bootstrap-robot.sh --robot <name> [flags]
 #
-# Required:
+# Required (first bringup only):
 #   --robot <name>     Robot identifier; must match a directory under
 #                      manifests/robots/ (e.g. ak-007, mk09). Also the
 #                      Application name expected at
 #                      gitops/apps/<name>/phantomos-<name>.yaml.
+#                      On first bringup the value is persisted to
+#                      /etc/phantomos/robot; subsequent runs (and other
+#                      scripts like positronic.sh) read that file and
+#                      no longer require --robot. The flag still wins
+#                      when supplied — pass it again to retarget the
+#                      host to a different overlay.
 #
 # Flags:
 #   -y, --yes          skip confirmation prompts
@@ -184,26 +190,27 @@ summary() {
 
 # ---- preconditions ------------------------------------------------------
 
-# --seed-pull-secrets-only is namespace-level work — no robot context
-# needed. The other invocations all need to know which robot's overlay
-# they're applying.
-if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ -z "$ROBOT" ]; then
-  usage >&2
-  printf '\nerror: --robot <name> is required\n' >&2
-  exit 2
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 
-if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ ! -d "$REPO_ROOT/manifests/robots/$ROBOT" ]; then
-  available=$(ls "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')
-  die "manifests/robots/$ROBOT/ not found — typo? available: ${available:-<none>}"
+# Pull in the shared robot-identity helper. Provides resolve_robot and
+# persist_robot. ROBOT_ID_FILE defaults to /etc/phantomos/robot.
+# shellcheck source=scripts/lib/robot-id.sh
+. "$SCRIPT_DIR/lib/robot-id.sh"
+
+# --seed-pull-secrets-only is namespace-level work — no robot context
+# needed. The other invocations all need to know which robot's overlay
+# they're applying. If --robot wasn't passed, fall back to the persisted
+# /etc/phantomos/robot file or hostname; first bringup must supply --robot.
+if [ "$SEED_PULL_SECRETS_ONLY" = 0 ]; then
+  if ! ROBOT="$(resolve_robot "$ROBOT")"; then
+    exit 2
+  fi
 fi
 
 if [ "$DRY_RUN" = 0 ] && [ "$(id -u)" -ne 0 ]; then
-  die "must run as root (try: sudo bash $0 --robot $ROBOT ...)"
+  die "must run as root (try: sudo bash $0 --robot ${ROBOT:-<name>} ...)"
 fi
 
 # kubectl resolution (may not exist yet on a fresh machine; fall back later)
@@ -932,6 +939,19 @@ fi
 
 reset_cluster      ; guard
 preflight          ; guard
+
+# Persist the resolved robot identity to /etc/phantomos/robot so future
+# script runs on this host don't need --robot. Skipped in dry-run and
+# in --seed-pull-secrets-only mode (no robot context).
+if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ "$DRY_RUN" = 0 ] && [ -n "${ROBOT:-}" ]; then
+  if persist_robot "$ROBOT"; then
+    pass "robot identity persisted: $ROBOT_ID_FILE -> $ROBOT"
+  else
+    fail "could not write $ROBOT_ID_FILE"
+  fi
+fi
+guard
+
 deps               ; guard
 cluster            ; guard
 host_config        ; guard

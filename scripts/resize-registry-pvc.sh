@@ -50,7 +50,19 @@ DEPLOYMENT="${DEPLOYMENT:-k0s-registry}"
 PVC_NAME="${PVC_NAME:-k0s-registry-pvc}"
 PV_NAME="${PV_NAME:-k0s-registry-pv}"
 HOST_PATH="${HOST_PATH:-/var/lib/registry}"
-OVERLAY_DIR="${OVERLAY_DIR:-${REPO}/manifests/robots/mk09}"
+# Resolve robot identity via the shared helper if OVERLAY_DIR is unset.
+if [ -z "${OVERLAY_DIR:-}" ]; then
+  REPO_ROOT="$REPO"
+  # shellcheck source=lib/robot-id.sh
+  . "$(dirname "$0")/lib/robot-id.sh"
+  if _robot="$(resolve_robot "${ROBOT:-}")"; then
+    OVERLAY_DIR="${REPO}/manifests/robots/${_robot}"
+  else
+    echo "error: could not resolve robot — set OVERLAY_DIR or ROBOT" >&2
+    exit 2
+  fi
+fi
+
 REGISTRY_MANIFEST="${REGISTRY_MANIFEST:-${REPO}/manifests/base/registry/registry.yaml}"
 REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 

@@ -38,34 +38,26 @@ ARGO_NS="${ARGO_NS:-argocd}"
 
 DRY_RUN=0
 
+# Pull in the shared robot-identity helper. resolve_robot honors (in
+# order): explicit --robot/ROBOT, /etc/phantomos/robot, hostname.
+REPO_ROOT="$REPO"
+# shellcheck source=lib/robot-id.sh
+. "$(dirname "$0")/lib/robot-id.sh"
+
 # _resolve_robot — called after arg parsing to finalise ROBOT and derived vars.
 _resolve_robot() {
-  # 1. Explicit --robot or ROBOT env already set.
-  # 2. Fall back to hostname if it matches a manifests/robots/<name> dir.
-  # 3. Prompt interactively.
-  if [ -z "$ROBOT" ]; then
-    local hn
-    hn="$(hostname 2>/dev/null || true)"
-    if [ -n "$hn" ] && [ -d "$REPO/manifests/robots/$hn" ]; then
-      ROBOT="$hn"
-    fi
-  fi
-
-  if [ -z "$ROBOT" ]; then
-    local available
-    available="$(ls -1 "$REPO/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
-    printf 'Could not determine robot name.\n' >&2
-    printf 'Available robots: %s\n' "${available:-<none>}" >&2
+  local resolved
+  if ! resolved="$(resolve_robot "$ROBOT")"; then
+    # resolve_robot prints its own diagnostic. Fall back to interactive
+    # prompt for backwards compatibility on dev laptops.
     printf 'Enter robot name: ' >&2
     read -r ROBOT
     [ -n "$ROBOT" ] || die "robot name is required"
+    if ! resolved="$(resolve_robot "$ROBOT")"; then
+      die "robot name $ROBOT did not resolve"
+    fi
   fi
-
-  if [ ! -d "$REPO/manifests/robots/$ROBOT" ]; then
-    local available
-    available="$(ls -1 "$REPO/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
-    die "manifests/robots/$ROBOT/ not found — available: ${available:-<none>}"
-  fi
+  ROBOT="$resolved"
 
   # Derived paths (still env-overridable).
   OVERLAY="${OVERLAY:-${REPO}/manifests/robots/${ROBOT}}"

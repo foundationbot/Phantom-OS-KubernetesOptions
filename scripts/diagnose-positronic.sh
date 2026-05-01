@@ -21,7 +21,20 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 NAMESPACE="${NAMESPACE:-positronic}"
 APP_LABEL="${APP_LABEL:-app=positronic-control}"
 REGISTRY="${REGISTRY:-localhost:5443}"
-OVERLAY="${OVERLAY:-${REPO}/manifests/robots/mk09}"
+
+# Resolve robot identity via the shared helper (honors --robot, then
+# /etc/phantomos/robot, then hostname). Only used if OVERLAY is unset.
+if [ -z "${OVERLAY:-}" ]; then
+  REPO_ROOT="$REPO"
+  # shellcheck source=lib/robot-id.sh
+  . "$(dirname "$0")/lib/robot-id.sh"
+  if _robot="$(resolve_robot "${ROBOT:-}")"; then
+    OVERLAY="${REPO}/manifests/robots/${_robot}"
+  else
+    echo "error: could not resolve robot — set OVERLAY or ROBOT explicitly" >&2
+    exit 2
+  fi
+fi
 
 # kubectl resolution — robot has only `k0s kubectl`, laptops may have either.
 KUBECTL=""
