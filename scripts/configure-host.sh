@@ -114,6 +114,12 @@ ask() {
 
     if [ -n "$validator" ]; then
       if ! "$validator" "$value"; then
+        # In --yes mode there's no way to recover from a bad default,
+        # so exit instead of looping forever on the same invalid value.
+        if [ "$YES" = 1 ]; then
+          err "--yes: default $value failed validation; aborting"
+          exit 1
+        fi
         continue
       fi
     fi
@@ -190,13 +196,49 @@ fi
 
 # Read seed values via the helper. Empty strings if seed has no value.
 seed_robot=""; seed_ai=""; seed_images_yaml=""
+seed_dev_source=""; seed_dev_privileged="false"
+declare -a seed_dev_mount_hosts
+declare -a seed_dev_mount_containers
+
 if [ -n "$seed_path" ]; then
   seed_robot="$(python3 "$HELPER" "$seed_path" get robot 2>/dev/null || true)"
   seed_ai="$(python3 "$HELPER" "$seed_path" get aiPcUrl 2>/dev/null || true)"
   # Pull the images: block out by chopping everything before the
   # first 'images:' line. Crude but adequate — seed files come from
   # this repo or were last written by us.
-  seed_images_yaml="$(awk '/^images:/{flag=1} flag' "$seed_path" || true)"
+  # Pull the images: block — start at 'images:' line, stop at the
+  # next top-level key (anything matching ^[a-zA-Z] that isn't
+  # 'images:' itself).
+  seed_images_yaml="$(awk '
+    /^images:/         { flag=1; print; next }
+    flag && /^[a-zA-Z]/{ exit }
+    flag               { print }
+  ' "$seed_path" || true)"
+
+  # devMode harvest. Inline Python so we don't have to teach the
+  # helper script every accessor.
+  while IFS=$'\t' read -r kind a b; do
+    case "$kind" in
+      source)     seed_dev_source="$a" ;;
+      privileged) seed_dev_privileged="$a" ;;
+      mount)      seed_dev_mount_hosts+=("$a"); seed_dev_mount_containers+=("$b") ;;
+    esac
+  done < <(python3 - "$seed_path" <<'PY'
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(0)
+pos = ((cfg.get("devMode") or {}).get("positronic-control") or {})
+src = pos.get("source") or ""
+if src:
+    print(f"source\t{src}\t")
+print(f"privileged\t{'true' if pos.get('privileged') else 'false'}\t")
+for m in pos.get("mounts") or []:
+    if isinstance(m, dict) and m.get("host") and m.get("container"):
+        print(f"mount\t{m['host']}\t{m['container']}")
+PY
+)
 fi
 
 # ---- validators ---------------------------------------------------------
@@ -222,6 +264,30 @@ validate_url() {
     *) err "URL must start with http:// or https:// (got: $v)"; return 1 ;;
   esac
 }
+
+validate_abs_path() {
+  local v="$1"
+  if [ -z "$v" ]; then err "path required"; return 1; fi
+  case "$v" in
+    "~"*) err "'~' is not allowed (bootstrap runs as root). Use the absolute path."; return 1 ;;
+    /*) ;;
+    *) err "must be an absolute path (got: $v)"; return 1 ;;
+  esac
+  if [ ! -d "$v" ]; then
+    warn "$v does not exist on this host (will be auto-created on first pod start via DirectoryOrCreate)"
+  fi
+  return 0
+}
+
+# Resolve the invoking user's home dir so we can suggest sane mount
+# defaults. When run via sudo, $HOME is /root — useless for mount
+# defaults — so prefer SUDO_USER's home.
+invoking_home="${HOME:-/root}"
+if [ -n "${SUDO_USER:-}" ]; then
+  if uh="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)" && [ -n "$uh" ]; then
+    invoking_home="$uh"
+  fi
+fi
 
 # ---- wizard -------------------------------------------------------------
 
@@ -283,8 +349,8 @@ fi
 # Image entries to write. We collect them as parallel arrays
 # (name + tag) and emit at the end. The seed images go in first, then
 # the operator can edit each one.
-declare -a img_names
-declare -a img_tags
+img_names=()
+img_tags=()
 
 if [ "$inject_images" = 1 ]; then
   # Parse seed images into the arrays.
@@ -326,6 +392,113 @@ if [ "$inject_images" = 1 ]; then
   done
 fi
 
+# --- devMode (positronic-control hostPath mounts) ---
+heading "dev mode (positronic-control hostPath mounts)"
+hint "Optional. Bind-mounts your local source tree + data dirs into the"
+hint "positronic-control pod so code changes are visible without rebuilding."
+hint "Production robots should leave this OFF."
+
+declare -a dev_mount_hosts
+declare -a dev_mount_containers
+dev_enabled=0
+dev_source=""
+dev_privileged="false"
+
+# If the seed already has devMode, default to "yes, edit existing".
+# Otherwise default to "no" so production bringups don't accidentally
+# enable host mounts.
+dev_default_enable="n"
+if [ -n "$seed_dev_source" ] || [ "${#seed_dev_mount_hosts[@]}" -gt 0 ]; then
+  hint "Seed has an existing devMode block — defaulting to keep-and-edit."
+  dev_default_enable="y"
+fi
+
+if confirm "Enable dev-mode hostPath mounts for positronic-control?" "$dev_default_enable"; then
+  dev_enabled=1
+
+  # source path — single host dir mounted at /src
+  hint "Single source-tree path (mounted at /src in the pod)."
+  example "$invoking_home/development/foundation/positronic_control"
+  dev_source_default="$seed_dev_source"
+  if [ -z "$dev_source_default" ]; then
+    dev_source_default="$invoking_home/development/foundation/positronic_control"
+  fi
+  dev_source="$(ask "source" "$dev_source_default" "Absolute host path (no '~'). Mounted at /src." validate_abs_path)"
+  ok "source = $dev_source"
+
+  # mounts — start from seed if any, else propose the canonical set
+  if [ "${#seed_dev_mount_hosts[@]}" -gt 0 ]; then
+    for i in "${!seed_dev_mount_hosts[@]}"; do
+      dev_mount_hosts+=("${seed_dev_mount_hosts[$i]}")
+      dev_mount_containers+=("${seed_dev_mount_containers[$i]}")
+    done
+    hint "Editing ${#dev_mount_hosts[@]} mounts from seed. Press enter to keep each, type 'd' to drop."
+  else
+    # canonical fleet dev mount set, mirrors development.docker-compose.yaml
+    dev_mount_hosts+=("/data");                                  dev_mount_containers+=("/data")
+    dev_mount_hosts+=("/data2");                                 dev_mount_containers+=("/data2")
+    dev_mount_hosts+=("$invoking_home/recordings");              dev_mount_containers+=("/recordings")
+    dev_mount_hosts+=("$invoking_home/trainground");             dev_mount_containers+=("/trainground")
+    dev_mount_hosts+=("$invoking_home/.cache/torch/hub");        dev_mount_containers+=("/root/.cache/torch/hub")
+    hint "Proposed standard mount set (matches development.docker-compose.yaml)."
+    hint "Press enter to keep each pair, type 'd' to drop, or type a new path."
+  fi
+
+  declare -a kept_hosts
+  declare -a kept_containers
+  for i in "${!dev_mount_hosts[@]}"; do
+    h="${dev_mount_hosts[$i]}"
+    c="${dev_mount_containers[$i]}"
+    new_host="$(ask "mount $((i+1)) host  -> $c" "$h" "Type 'd' to drop this mount, or press enter to keep.")"
+    if [ "$new_host" = "d" ] || [ "$new_host" = "D" ]; then
+      info "  dropped"
+      continue
+    fi
+    if ! validate_abs_path "$new_host"; then
+      warn "  skipping invalid path"
+      continue
+    fi
+    new_container="$(ask "mount $((i+1)) container path" "$c" "Where this should appear inside the pod.")"
+    kept_hosts+=("$new_host")
+    kept_containers+=("$new_container")
+  done
+
+  # offer to add more
+  while confirm "Add another mount?" "n"; do
+    nh="$(ask "host path" "" "Absolute host path." validate_abs_path)"
+    nc="$(ask "container path" "" "Absolute path inside the pod.")"
+    kept_hosts+=("$nh")
+    kept_containers+=("$nc")
+  done
+
+  dev_mount_hosts=()
+  dev_mount_containers=()
+  for i in "${!kept_hosts[@]}"; do
+    dev_mount_hosts+=("${kept_hosts[$i]}")
+    dev_mount_containers+=("${kept_containers[$i]}")
+  done
+  ok "${#dev_mount_hosts[@]} mounts kept"
+
+  # privileged
+  hint "privileged: true grants /dev passthrough and full host access."
+  hint "Required if the pod opens /dev/* (USB, GPIO, /dev/shm with host quirks)."
+  hint "DO NOT enable on production robots."
+  priv_default="$seed_dev_privileged"
+  [ -z "$priv_default" ] && priv_default="false"
+  if [ "$priv_default" = "true" ]; then
+    if confirm "privileged?" "y"; then
+      dev_privileged="true"
+      warn "privileged enabled — pod will run with /dev passthrough"
+    fi
+  else
+    if confirm "privileged?" "n"; then
+      dev_privileged="true"
+      warn "privileged enabled — pod will run with /dev passthrough"
+    fi
+  fi
+  ok "privileged = $dev_privileged"
+fi
+
 # ---- render -------------------------------------------------------------
 
 tmp=""
@@ -338,12 +511,32 @@ tmp="$(mktemp)"
   printf 'robot: %s\n' "$robot"
   printf 'aiPcUrl: %s\n' "$ai_pc_url"
   if [ "$inject_images" = 1 ]; then
-    printf 'images:\n'
+    # Count non-empty tags so we don't emit an empty `images:` header.
+    nonempty=0
     for i in "${!img_names[@]}"; do
-      [ -z "${img_tags[$i]}" ] && continue
-      printf '  - name: %s\n' "${img_names[$i]}"
-      printf '    newTag: %s\n' "${img_tags[$i]}"
+      [ -n "${img_tags[$i]}" ] && nonempty=$((nonempty + 1))
     done
+    if [ "$nonempty" -gt 0 ]; then
+      printf 'images:\n'
+      for i in "${!img_names[@]}"; do
+        [ -z "${img_tags[$i]}" ] && continue
+        printf '  - name: %s\n' "${img_names[$i]}"
+        printf '    newTag: %s\n' "${img_tags[$i]}"
+      done
+    fi
+  fi
+  if [ "$dev_enabled" = 1 ]; then
+    printf 'devMode:\n'
+    printf '  positronic-control:\n'
+    [ -n "$dev_source" ] && printf '    source: %s\n' "$dev_source"
+    if [ "${#dev_mount_hosts[@]}" -gt 0 ]; then
+      printf '    mounts:\n'
+      for i in "${!dev_mount_hosts[@]}"; do
+        printf '      - {host: %s, container: %s}\n' \
+          "${dev_mount_hosts[$i]}" "${dev_mount_containers[$i]}"
+      done
+    fi
+    printf '    privileged: %s\n' "$dev_privileged"
   fi
 } > "$tmp"
 
