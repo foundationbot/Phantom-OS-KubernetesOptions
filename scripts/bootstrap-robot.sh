@@ -26,9 +26,15 @@
 #                      /var/lib/recordings/ is preserved (k0s reset does
 #                      not touch those paths).
 #   --skip-deps        skip phase 2 (apt installs + k0s/terraform binaries)
-#   --skip-host        skip phase 3 (host containerd/nvidia config)
-#   --skip-cluster     skip phase 4 (k0s install + systemd start)
-#   --skip-gitops      skip phase 5 (terraform apply)
+#   --skip-cluster     skip phase 3 (k0s install + systemd start)
+#   --skip-host        skip phase 4 (host containerd/nvidia config)
+#   --skip-seed-pull-secrets
+#                      skip phase 5 (propagate dockerhub-creds Secret to
+#                      argus / dma-video / nimbus namespaces)
+#   --skip-gitops      skip phase 6 (terraform apply)
+#   --skip-argocd-admin
+#                      skip phase 6.5 (install argocd CLI + reset admin
+#                      password to 1984)
 #   --skip-nvidia      force-skip nvidia runtime config (overrides
 #                      hardware autodetect)
 #   --skip-validate    skip the final validate-local-registry.sh run
@@ -39,27 +45,63 @@
 #   --positronic-image <image>
 #                      local docker image to push as positronic-control
 #                      (used with --setup-positronic).
+#   --dockerhub-secret-file <path>
+#                      path to a file containing the raw `.dockerconfigjson`
+#                      payload (the JSON object with `auths`) for the
+#                      foundationbot DockerHub deployment account. Used by
+#                      phase 5 to build the `dockerhub-creds` Secret.
+#                      Default: ~/.docker/config.json (the file `docker
+#                      login` writes). If that file is absent or has no
+#                      inline `auths` (credsStore-only), phase 5 falls
+#                      back to copying an existing `dockerhub-creds`
+#                      Secret from the `phantom` namespace.
+#   --seed-pull-secrets-only
+#                      run ONLY phase 5 (seed pull secrets) on an already-
+#                      bootstrapped cluster, then exit. Useful when a robot
+#                      came up before the operator had the credential, or
+#                      to recover from `ImagePullBackOff` after rotating
+#                      the foundationbot PAT. Skips preflight/deps/host
+#                      config/cluster/gitops/validate.
 #   -h, --help         this help
 #
 # Phases:
 #   1. preflight    OS / arch / kernel / disk / sudo / port collisions
 #   2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
 #                   pciutils, unzip; k0s binary; terraform binary
-#   3. host config  configure-k0s-containerd-mirror.sh +
-#                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
-#                   via lspci or /dev/nvidia0)
-#   4. cluster      k0s install controller --single --enable-worker;
+#   3. cluster      k0s install controller --single --enable-worker;
 #                   systemctl enable --now k0scontroller; wait Ready;
 #                   write /root/.kube/config from `k0s kubeconfig admin`
-#                   (so kubectl + terraform have a config to read)
-#   5. gitops       cd terraform && terraform init && terraform apply
+#                   (so kubectl + terraform have a config to read).
+#                   Runs BEFORE host config because the host-config scripts
+#                   edit /etc/k0s/containerd.toml, which only exists after
+#                   k0s has started at least once.
+#   4. host config  configure-k0s-containerd-mirror.sh +
+#                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
+#                   via lspci or /dev/nvidia0). Restarts k0s; waits for
+#                   node Ready before returning so later phases don't race.
+#   5. seed pull secrets
+#                   ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
+#                   exists in `argus`, `dma-video`, `nimbus` so private
+#                   foundationbot/* images can be pulled. Source order:
+#                   --dockerhub-secret-file, then ~/.docker/config.json
+#                   (default), then existing Secret in the `phantom`
+#                   namespace, then no-op if already present in every
+#                   target namespace. Creates the namespace if it doesn't
+#                   exist yet. Idempotent.
+#   6. gitops       cd terraform && terraform init && terraform apply
 #                   (installs ArgoCD via the official Helm chart and
 #                   applies gitops/root-app.yaml — the canonical path).
 #                   Wait for phantomos-<robot> to reach Synced + Healthy.
-#   6. setup-positronic (optional, --setup-positronic)
+#   6.5 argocd admin install argocd CLI (latest release) under
+#                   /usr/local/bin/argocd and reset the admin password
+#                   to "1984" by patching argocd-secret with a bcrypt
+#                   hash. Idempotent (always rewrites the hash). Also
+#                   removes argocd-initial-admin-secret since it is no
+#                   longer authoritative.
+#   7. setup-positronic (optional, --setup-positronic)
 #                   Push positronic-control image to local registry,
 #                   build phantom-models, and redeploy the pod.
-#   7. validate     bash scripts/validate-local-registry.sh
+#   8. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
@@ -77,11 +119,22 @@ RESET=0
 SKIP_DEPS=0
 SKIP_HOST=0
 SKIP_CLUSTER=0
+SKIP_SEED_PULL_SECRETS=0
 SKIP_GITOPS=0
+SKIP_ARGOCD_ADMIN=0
 SKIP_NVIDIA=0
 SKIP_VALIDATE=0
 SETUP_POSITRONIC=0
 POSITRONIC_IMAGE=""
+DOCKERHUB_SECRET_FILE=""
+SEED_PULL_SECRETS_ONLY=0
+
+# Namespaces that pull `foundationbot/*` images and therefore need the
+# dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
+# `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus)
+PULL_SECRET_NAME="dockerhub-creds"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --robot)         ROBOT="${2:-}"; shift 2 ;;
@@ -92,13 +145,21 @@ while [ $# -gt 0 ]; do
     --skip-deps)     SKIP_DEPS=1; shift ;;
     --skip-host)     SKIP_HOST=1; shift ;;
     --skip-cluster)  SKIP_CLUSTER=1; shift ;;
+    --skip-seed-pull-secrets)
+                     SKIP_SEED_PULL_SECRETS=1; shift ;;
     --skip-gitops)   SKIP_GITOPS=1; shift ;;
+    --skip-argocd-admin)
+                     SKIP_ARGOCD_ADMIN=1; shift ;;
     --skip-nvidia)   SKIP_NVIDIA=1; shift ;;
     --skip-validate) SKIP_VALIDATE=1; shift ;;
     --setup-positronic)
                      SETUP_POSITRONIC=1; shift ;;
     --positronic-image)
                      POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
+    --dockerhub-secret-file)
+                     DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
+    --seed-pull-secrets-only)
+                     SEED_PULL_SECRETS_ONLY=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     *)               printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -123,13 +184,20 @@ summary() {
 
 # ---- preconditions ------------------------------------------------------
 
-[ -z "$ROBOT" ] && { usage >&2; printf '\nerror: --robot <name> is required\n' >&2; exit 2; }
+# --seed-pull-secrets-only is namespace-level work — no robot context
+# needed. The other invocations all need to know which robot's overlay
+# they're applying.
+if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ -z "$ROBOT" ]; then
+  usage >&2
+  printf '\nerror: --robot <name> is required\n' >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 
-if [ ! -d "$REPO_ROOT/manifests/robots/$ROBOT" ]; then
+if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ ! -d "$REPO_ROOT/manifests/robots/$ROBOT" ]; then
   available=$(ls "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')
   die "manifests/robots/$ROBOT/ not found — typo? available: ${available:-<none>}"
 fi
@@ -197,10 +265,10 @@ EOF
 
   # 2. Back up /etc/k0s/k0s.yaml. `k0s reset` removes /var/lib/k0s and the
   #    k0scontroller systemd unit but deliberately leaves this config file
-  #    behind. Phase 4's "already installed" check is keyed on this file,
-  #    so leaving it in place causes phase 4 to skip `k0s install controller`
-  #    (the step that creates the systemd unit) and then fail the
-  #    `systemctl enable --now k0scontroller` that follows.
+  #    behind. The cluster phase's "already installed" check is keyed on
+  #    this file, so leaving it in place causes that phase to skip
+  #    `k0s install controller` (the step that creates the systemd unit)
+  #    and then fail the `systemctl enable --now k0scontroller` that follows.
   if [ -e /etc/k0s/k0s.yaml ]; then
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  mv /etc/k0s/k0s.yaml /etc/k0s/k0s.yaml.bak.$ts"
@@ -238,7 +306,7 @@ EOF
   done
 
   # 5. Reset cached KUBECTL — k0s is gone, anything we cached at startup
-  #    is no longer valid until phase 4 reinstalls it.
+  #    is no longer valid until the cluster phase reinstalls it.
   KUBECTL=()
 }
 
@@ -348,7 +416,7 @@ deps() {
   fi
 }
 
-# ---- phase 3: host config -----------------------------------------------
+# ---- phase 4: host config -----------------------------------------------
 
 containerd_mirror_already_configured() {
   local f=/etc/k0s/containerd.d/hosts/docker.io/hosts.toml
@@ -366,8 +434,8 @@ nvidia_runtime_already_configured() {
 }
 
 host_config() {
-  if [ "$SKIP_HOST" = 1 ]; then phase "phase 3: host config  (skipped)"; return; fi
-  phase "phase 3: host config"
+  if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
+  phase "phase 4: host config"
 
   if containerd_mirror_already_configured; then
     skip "containerd mirror already configured (hosts.toml has localhost:5443 + upstream)"
@@ -400,13 +468,28 @@ host_config() {
       fail "configure-k0s-nvidia-runtime.sh"
     fi
   fi
+
+  # The configure scripts above restart k0scontroller, which causes a brief
+  # NotReady window. Block here until kubectl reports Ready again so the
+  # next phases (seed_pull_secrets, gitops) don't race the restart.
+  if [ "$DRY_RUN" = 0 ] && [ "${#KUBECTL[@]}" -gt 0 ]; then
+    info "waiting for node Ready after host config..."
+    for _ in $(seq 1 60); do
+      if "${KUBECTL[@]}" get nodes 2>/dev/null | awk '/Ready/{ok=1} END{exit !ok}'; then
+        info "node Ready"
+        return
+      fi
+      sleep 5
+    done
+    fail "node did not return to Ready within 5min after host config restart"
+  fi
 }
 
-# ---- phase 4: cluster ---------------------------------------------------
+# ---- phase 3: cluster ---------------------------------------------------
 
 cluster() {
-  if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 4: cluster  (skipped)"; return; fi
-  phase "phase 4: cluster"
+  if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
+  phase "phase 3: cluster"
 
   local already_running=0
   systemctl is-active --quiet k0scontroller && already_running=1
@@ -472,11 +555,134 @@ cluster() {
   fi
 }
 
-# ---- phase 5: gitops ----------------------------------------------------
+# ---- phase 5: seed pull secrets ----------------------------------------
+
+# Build a `dockerhub-creds` Secret (kubernetes.io/dockerconfigjson) and
+# apply it to every namespace in PULL_SECRET_NAMESPACES so private
+# foundationbot/* image pulls succeed. Fully idempotent — safe to call on
+# a fresh cluster, after a rotated PAT, or to recover an existing cluster
+# whose pods are stuck in ImagePullBackOff because the secret was missing.
+#
+# Source resolution order:
+#   1. --dockerhub-secret-file <path>      explicit override
+#   2. ~/.docker/config.json                default (the file `docker login`
+#                                           writes); skipped if it has no
+#                                           inline `auths` section, e.g.
+#                                           when a credsStore is in use.
+#   3. existing Secret in `phantom` ns      cluster-internal fallback (the
+#                                           operator pre-created it there
+#                                           but didn't propagate to the
+#                                           workload namespaces).
+#   4. already present in every target ns   no-op skip.
+#   5. otherwise                            FAIL with remediation hint.
+seed_pull_secrets() {
+  if [ "$SKIP_SEED_PULL_SECRETS" = 1 ]; then phase "phase 5: seed pull secrets  (skipped)"; return; fi
+  phase "phase 5: seed pull secrets"
+
+  # Resolve KUBECTL — needed when invoked standalone via
+  # --seed-pull-secrets-only on a host where /usr/local/bin/kubectl was
+  # never installed (k0s ships its own).
+  if [ "${#KUBECTL[@]}" -eq 0 ]; then
+    if command -v kubectl >/dev/null 2>&1; then
+      KUBECTL=(kubectl)
+    elif command -v k0s >/dev/null 2>&1; then
+      KUBECTL=(k0s kubectl)
+    else
+      fail "neither kubectl nor k0s on PATH — cannot seed pull secrets"
+      return
+    fi
+  fi
+
+  # Pick a source file (explicit override, then ~/.docker/config.json).
+  local secret_file=""
+  if [ -n "$DOCKERHUB_SECRET_FILE" ]; then
+    if [ ! -r "$DOCKERHUB_SECRET_FILE" ]; then
+      fail "--dockerhub-secret-file $DOCKERHUB_SECRET_FILE: not readable"
+      return
+    fi
+    secret_file="$DOCKERHUB_SECRET_FILE"
+    info "source: $secret_file (--dockerhub-secret-file)"
+  elif [ -r "$HOME/.docker/config.json" ]; then
+    # credsStore-backed configs have no inline auths, so the resulting
+    # Secret would authenticate to nothing. Detect that and fall through.
+    if jq -e '(.auths // {}) | length > 0' "$HOME/.docker/config.json" >/dev/null 2>&1; then
+      secret_file="$HOME/.docker/config.json"
+      info "source: $secret_file (default)"
+    else
+      info "$HOME/.docker/config.json has no inline auths (credsStore?); falling back to phantom ns"
+    fi
+  fi
+
+  # Build the secret YAML from whichever source resolved.
+  local secret_yaml=""
+  if [ -n "$secret_file" ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  build $PULL_SECRET_NAME from $secret_file"
+    else
+      secret_yaml=$("${KUBECTL[@]}" create secret generic "$PULL_SECRET_NAME" \
+        --type=kubernetes.io/dockerconfigjson \
+        --from-file=".dockerconfigjson=$secret_file" \
+        --dry-run=client -o yaml 2>/dev/null) || {
+          fail "kubectl create secret --dry-run failed (is $secret_file valid dockerconfigjson?)"
+          return
+        }
+    fi
+  elif "${KUBECTL[@]}" -n phantom get secret "$PULL_SECRET_NAME" >/dev/null 2>&1; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  copy $PULL_SECRET_NAME from phantom namespace"
+    else
+      secret_yaml=$("${KUBECTL[@]}" -n phantom get secret "$PULL_SECRET_NAME" -o json \
+        | jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.annotations, .metadata.namespace, .metadata.labels)') || {
+          fail "could not read $PULL_SECRET_NAME from phantom ns"
+          return
+        }
+      info "source: phantom/$PULL_SECRET_NAME"
+    fi
+  else
+    # No source. If the secret is already in every target namespace this
+    # phase is a clean no-op — the most common case on a re-run.
+    local missing=()
+    for ns in "${PULL_SECRET_NAMESPACES[@]}"; do
+      "${KUBECTL[@]}" -n "$ns" get secret "$PULL_SECRET_NAME" >/dev/null 2>&1 || missing+=("$ns")
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then
+      skip "$PULL_SECRET_NAME already present in: ${PULL_SECRET_NAMESPACES[*]}"
+      return
+    fi
+    fail "$PULL_SECRET_NAME missing in: ${missing[*]}; provide --dockerhub-secret-file <path>, run \`docker login\` so ~/.docker/config.json is populated, or pre-create the Secret in the phantom namespace"
+    return
+  fi
+
+  # Apply to each target namespace, creating the namespace first if it
+  # doesn't exist yet (gitops/argocd may not have created it on first run).
+  for ns in "${PULL_SECRET_NAMESPACES[@]}"; do
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  ensure ns/$ns; apply $PULL_SECRET_NAME"
+      continue
+    fi
+
+    if ! "${KUBECTL[@]}" get ns "$ns" >/dev/null 2>&1; then
+      if "${KUBECTL[@]}" create ns "$ns" >/dev/null; then
+        info "created ns/$ns"
+      else
+        fail "could not create ns/$ns"
+        continue
+      fi
+    fi
+
+    if printf '%s' "$secret_yaml" | "${KUBECTL[@]}" apply -n "$ns" -f - >/dev/null; then
+      pass "$PULL_SECRET_NAME -> $ns"
+    else
+      fail "$PULL_SECRET_NAME apply to $ns failed"
+    fi
+  done
+}
+
+# ---- phase 6: gitops ----------------------------------------------------
 
 gitops() {
-  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 5: gitops  (skipped)"; return; fi
-  phase "phase 5: gitops (terraform)"
+  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 6: gitops  (skipped)"; return; fi
+  phase "phase 6: gitops (terraform)"
 
   if [ ! -f "$REPO_ROOT/gitops/apps/$ROBOT/phantomos-$ROBOT.yaml" ]; then
     fail "gitops/apps/$ROBOT/phantomos-$ROBOT.yaml not in repo — create it before re-running"
@@ -493,7 +699,7 @@ gitops() {
 
   local kc=/root/.kube/config
   if [ "$DRY_RUN" = 0 ] && [ ! -r "$kc" ]; then
-    fail "$kc not readable — phase 4 should have written it"; return
+    fail "$kc not readable — phase 3 (cluster) should have written it"; return
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
@@ -535,11 +741,89 @@ gitops() {
   fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
 }
 
-# ---- phase 6: setup-positronic (optional) --------------------------------
+# ---- phase 6.5: argocd admin (install CLI + reset password) -------------
+
+# Installs the argocd CLI binary (latest release from GitHub) and resets
+# the admin password to "1984" by writing a bcrypt hash into
+# argocd-secret. Done as a script step rather than via `argocd account
+# update-password` so we don't need a port-forward + login round-trip.
+ARGOCD_ADMIN_PASSWORD="${ARGOCD_ADMIN_PASSWORD:-1984}"
+
+argocd_admin() {
+  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 6.5: argocd admin  (skipped)"; return; fi
+  phase "phase 6.5: argocd admin (install CLI + set admin password)"
+
+  # 1) install argocd CLI if missing
+  if command -v argocd >/dev/null 2>&1; then
+    skip "argocd CLI already in PATH ($(argocd version --client --short 2>/dev/null || echo present))"
+  else
+    local argo_arch=""
+    case "$(uname -m)" in
+      x86_64)  argo_arch=amd64 ;;
+      aarch64) argo_arch=arm64 ;;
+      *)       fail "no argocd CLI binary for arch $(uname -m)" ;;
+    esac
+    if [ -n "$argo_arch" ]; then
+      local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
+      if [ "$DRY_RUN" = 1 ]; then
+        info "DRY-RUN  download $url -> /usr/local/bin/argocd"
+      elif curl -fsSL "$url" -o /tmp/argocd \
+           && install -m 0555 /tmp/argocd /usr/local/bin/argocd \
+           && rm -f /tmp/argocd; then
+        pass "argocd CLI installed ($(argocd version --client --short 2>/dev/null || echo ok))"
+      else
+        fail "argocd CLI install failed ($url)"
+      fi
+    fi
+  fi
+
+  # 2) reset admin password by patching argocd-secret
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  patch argocd-secret with bcrypt(admin password '$ARGOCD_ADMIN_PASSWORD')"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot patch argocd-secret"
+    return
+  fi
+
+  if ! "${KUBECTL[@]}" -n argocd get secret argocd-secret >/dev/null 2>&1; then
+    fail "argocd-secret not found in argocd ns — gitops phase must run first"
+    return
+  fi
+
+  # bcrypt the password. Prefer htpasswd (apache2-utils); install on demand
+  # since phase 2 doesn't pull it in.
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    info "installing apache2-utils (for htpasswd)"
+    apt-get install -y apache2-utils >/dev/null 2>&1 || true
+  fi
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    fail "htpasswd unavailable — install apache2-utils manually and re-run with --skip-* flags up to phase 6.5"
+    return
+  fi
+
+  local hash mtime
+  hash=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
+  mtime=$(date +%FT%T%Z)
+
+  if "${KUBECTL[@]}" -n argocd patch secret argocd-secret --type merge \
+       -p "{\"stringData\":{\"admin.password\":\"$hash\",\"admin.passwordMtime\":\"$mtime\"}}" >/dev/null; then
+    pass "argocd admin password set to '$ARGOCD_ADMIN_PASSWORD'"
+    # initial-admin-secret is no longer authoritative once admin.password
+    # is rotated. Drop it so future operators don't try to use it.
+    "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret --ignore-not-found >/dev/null 2>&1 || true
+  else
+    fail "could not patch argocd-secret"
+  fi
+}
+
+# ---- phase 7: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
   if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 6: setup-positronic"
+  phase "phase 7: setup-positronic"
 
   if [ -z "$POSITRONIC_IMAGE" ]; then
     fail "--setup-positronic requires --positronic-image <image>"
@@ -592,11 +876,11 @@ setup_positronic() {
   fi
 }
 
-# ---- phase 7: validate --------------------------------------------------
+# ---- phase 8: validate --------------------------------------------------
 
 validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 7: validate  (skipped)"; return; fi
-  phase "phase 7: validate"
+  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 8: validate  (skipped)"; return; fi
+  phase "phase 8: validate"
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
@@ -617,11 +901,25 @@ validate() {
 
 # ---- main ---------------------------------------------------------------
 
+# Standalone mode: only seed pull secrets, then exit. Used to fix an
+# already-running cluster whose pods are stuck in ImagePullBackOff.
+if [ "$SEED_PULL_SECRETS_ONLY" = 1 ]; then
+  cat <<EOF
+bootstrap-robot.sh — seed-pull-secrets-only $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
+repo: $REPO_ROOT
+namespaces: ${PULL_SECRET_NAMESPACES[*]}
+source:    $([ -n "$DOCKERHUB_SECRET_FILE" ] && echo "$DOCKERHUB_SECRET_FILE" || echo "~/.docker/config.json (default), then phantom/$PULL_SECRET_NAME")
+EOF
+  seed_pull_secrets
+  summary
+  exit "$FAIL"
+fi
+
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 6-setup-positronic"), 7-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 6-gitops, 6.5-argocd-admin$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
 # When --reset is set, it has its own confirmation prompt with a
@@ -635,9 +933,11 @@ fi
 reset_cluster      ; guard
 preflight          ; guard
 deps               ; guard
-host_config        ; guard
 cluster            ; guard
+host_config        ; guard
+seed_pull_secrets  ; guard
 gitops             ; guard
+argocd_admin       ; guard
 setup_positronic   ; guard
 validate
 
