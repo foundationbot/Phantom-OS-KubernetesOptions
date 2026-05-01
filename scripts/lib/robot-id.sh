@@ -42,6 +42,10 @@ resolve_robot() {
     fi
   fi
 
+  # Robot overlay directories are lowercase by convention. Normalize
+  # so --robot MK11000010 and --robot mk11000010 both work.
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+
   if [ -z "$name" ]; then
     local available
     available="$(ls -1 "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
