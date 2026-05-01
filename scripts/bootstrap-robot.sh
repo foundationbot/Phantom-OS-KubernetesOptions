@@ -37,6 +37,20 @@
 #                      no-op when already in the desired state. Use this
 #                      flag on a routine re-bootstrap of a healthy robot
 #                      where you want to leave the realtime stack alone.
+#   --skip-ethercat-install
+#                      Skip the dma-ethercat install post-phase. By
+#                      DEFAULT, after gitops, the script applies the
+#                      manifests/installers/dma-ethercat/robots/<robot>/
+#                      kustomization (a one-shot k8s Job using the
+#                      foundationbot/dma-ethercat image), waits for the
+#                      Job to copy /usr/local/share/dma/deb/*.deb to
+#                      /var/lib/dma-ethercat-installer/ on the host,
+#                      then runs `dpkg -i` on the .deb and
+#                      `systemctl enable --now dma-ethercat.service`.
+#                      The Job is bootstrap-managed (not in ArgoCD) so
+#                      every bootstrap forces a fresh extract via
+#                      delete-then-apply. Robot overlay must exist at
+#                      manifests/installers/dma-ethercat/robots/<robot>/.
 #   --reset            BEFORE phase 1, tear down any pre-existing k0s
 #                      cluster (`k0s stop && k0s reset`) and back up
 #                      /root/.kube/config and terraform/terraform.tfstate*
@@ -125,6 +139,7 @@ DRY_RUN=0
 KEEP_GOING=0
 SKIP_DOCKER_STOP=0
 SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_INSTALL=0
 RESET=0
 SKIP_DEPS=0
 SKIP_HOST=0
@@ -140,8 +155,9 @@ SEED_PULL_SECRETS_ONLY=0
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
-# `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus)
+# `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/
+# and manifests/installers/dma-ethercat/base/job.yaml (phantom).
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom)
 PULL_SECRET_NAME="dockerhub-creds"
 
 while [ $# -gt 0 ]; do
@@ -154,6 +170,8 @@ while [ $# -gt 0 ]; do
                      SKIP_DOCKER_STOP=1; shift ;;
     --skip-ethercat-uninstall)
                      SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+    --skip-ethercat-install)
+                     SKIP_ETHERCAT_INSTALL=1; shift ;;
     --reset)         RESET=1; shift ;;
     --skip-deps)     SKIP_DEPS=1; shift ;;
     --skip-host)     SKIP_HOST=1; shift ;;
@@ -870,6 +888,109 @@ gitops() {
   fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
 }
 
+# ---- post-phase: install dma-ethercat (default; --skip-ethercat-install)
+
+# Install the dma-ethercat .deb that ships baked into the
+# foundationbot/dma-ethercat container image. Runs by default; pair the
+# default --skip-ethercat-uninstall=0 (uninstall pre-phase) with this so
+# every bootstrap rolls forward to whatever .deb is in the image tag
+# pinned by the robot's installer overlay.
+#
+# Flow:
+#   1. ensure ns/phantom exists (so the Job can land there)
+#   2. delete any prior dma-ethercat-installer Job — fresh extract every
+#      bootstrap, per the design. The Job is NOT in ArgoCD; it lives at
+#      manifests/installers/dma-ethercat/ specifically so the bootstrap
+#      can manage it without racing Argo.
+#   3. kubectl apply -k manifests/installers/dma-ethercat/robots/<robot>/
+#   4. wait for Job to reach Complete (5 min cap; image pulls on a slow
+#      link can dominate)
+#   5. dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb
+#   6. systemctl enable --now dma-ethercat.service
+install_dma_ethercat() {
+  if [ "$SKIP_ETHERCAT_INSTALL" = 1 ]; then phase "post-phase: install dma-ethercat  (skipped)"; return; fi
+  phase "post-phase: install dma-ethercat"
+
+  local overlay="$REPO_ROOT/manifests/installers/dma-ethercat/robots/$ROBOT"
+  if [ ! -d "$overlay" ]; then
+    fail "$overlay not found — add a robot overlay (copy mk11-generic/) and pin the image tag"
+    return
+  fi
+
+  if [ "${#KUBECTL[@]}" -eq 0 ]; then
+    fail "no kubectl/k0s available — phase 4 should have set this up"
+    return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  kubectl create ns phantom (if missing)"
+    info "DRY-RUN  kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
+    info "DRY-RUN  kubectl apply -k $overlay"
+    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
+    info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    info "DRY-RUN  systemctl enable --now dma-ethercat.service"
+    return
+  fi
+
+  # 1. namespace
+  if ! "${KUBECTL[@]}" get ns phantom >/dev/null 2>&1; then
+    if "${KUBECTL[@]}" create ns phantom >/dev/null; then
+      pass "ns/phantom created"
+    else
+      fail "could not create ns/phantom"
+      return
+    fi
+  fi
+
+  # 2. force fresh extract — drop any prior Job (and its pod) before re-applying
+  "${KUBECTL[@]}" -n phantom delete job dma-ethercat-installer --ignore-not-found --wait=true >/dev/null 2>&1 || true
+
+  # 3. apply the per-robot kustomization
+  if "${KUBECTL[@]}" apply -k "$overlay" >/dev/null; then
+    pass "kubectl apply -k $overlay"
+  else
+    fail "kubectl apply -k $overlay"
+    return
+  fi
+
+  # 4. wait for completion (or surface failure)
+  info "waiting for job/dma-ethercat-installer to complete..."
+  if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=300s job/dma-ethercat-installer >/dev/null 2>&1; then
+    pass "job/dma-ethercat-installer Complete"
+  else
+    local jstat
+    jstat=$("${KUBECTL[@]}" -n phantom get job dma-ethercat-installer -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}' 2>/dev/null || true)
+    fail "job/dma-ethercat-installer did not Complete in 5min (status: ${jstat:-unknown})"
+    info "  pod logs:"
+    "${KUBECTL[@]}" -n phantom logs -l app=dma-ethercat-installer --tail=50 2>&1 | sed 's/^/    /' || true
+    return
+  fi
+
+  # 5. dpkg -i. Glob match: image bakes one .deb per arch — exactly one
+  #    file should be present after the Job's `cp`.
+  local deb
+  deb=$(ls -1t /var/lib/dma-ethercat-installer/dma-ethercat-*.deb 2>/dev/null | head -1 || true)
+  if [ -z "$deb" ]; then
+    fail "no dma-ethercat-*.deb at /var/lib/dma-ethercat-installer/ — Job ran but didn't write the package"
+    return
+  fi
+  info "deb: $deb"
+
+  if dpkg -i "$deb"; then
+    pass "dpkg -i $(basename "$deb")"
+  else
+    fail "dpkg -i $deb"
+    return
+  fi
+
+  # 6. start the service
+  if systemctl enable --now dma-ethercat.service; then
+    pass "dma-ethercat.service enabled and started"
+  else
+    fail "systemctl enable --now dma-ethercat.service"
+  fi
+}
+
 # ---- phase 7: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
@@ -969,8 +1090,8 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$SKIP_DOCKER_STOP" = 0 ] && echo "STOP-DOCKER, ")$([ "$RESET" = 1 ] && echo "RESET, ")$([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo "UNINSTALL-ETHERCAT, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING skip_docker_stop=$SKIP_DOCKER_STOP skip_ethercat_uninstall=$SKIP_ETHERCAT_UNINSTALL reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$SKIP_DOCKER_STOP" = 0 ] && echo "STOP-DOCKER, ")$([ "$RESET" = 1 ] && echo "RESET, ")$([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo "UNINSTALL-ETHERCAT, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets, 6-gitops$([ "$SKIP_ETHERCAT_INSTALL" = 0 ] && echo ", INSTALL-ETHERCAT")$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING skip_docker_stop=$SKIP_DOCKER_STOP skip_ethercat_uninstall=$SKIP_ETHERCAT_UNINSTALL skip_ethercat_install=$SKIP_ETHERCAT_INSTALL reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
 # When --reset is set, it has its own confirmation prompt with a
@@ -990,6 +1111,7 @@ host_config        ; guard
 cluster            ; guard
 seed_pull_secrets  ; guard
 gitops             ; guard
+install_dma_ethercat ; guard
 setup_positronic   ; guard
 validate
 
