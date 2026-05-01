@@ -699,7 +699,7 @@ image-overrides, dev-mounts, validate) and is idempotent — re-running
 on a bootstrapped host detects existing config and prints `SKIP` for
 what's already done. Useful flags: `--dry-run` (print plan, change
 nothing), per-phase opt-in flags
-(`--deps`/`--cluster`/`--host`/`--seed-pull-secrets`/`--pairing`/`--gitops`/`--argocd-admin`/`--image-overrides`/`--dev-mounts`/`--validate`)
+(`--deps`/`--cluster`/`--host`/`--seed-pull-secrets`/`--operator-ui-config`/`--gitops`/`--argocd-admin`/`--image-overrides`/`--dev-mounts`/`--validate`)
 to run only the named phases, `--skip-nvidia` to override GPU
 autodetect, `--skip-validate` to skip the final validate pass.
 

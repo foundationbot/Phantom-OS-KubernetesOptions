@@ -29,7 +29,9 @@
 #   --host               host containerd / nvidia runtime config
 #   --seed-pull-secrets  propagate dockerhub-creds Secret to argus,
 #                        dma-video, nimbus namespaces
-#   --pairing            render+apply the operator-ui-pairing ConfigMap
+#   --operator-ui-config render+apply the operator-ui-pairing ConfigMap
+#                        (currently holds AI_PC_URL; reserved for any
+#                        future per-host operator-ui env)
 #   --gitops             terraform apply (argocd Helm) + render+apply
 #                        the per-host phantomos-<robot> Application
 #   --argocd-admin       install argocd CLI; prompt and set admin
@@ -100,7 +102,7 @@
 #   sudo bash scripts/bootstrap-robot.sh --argocd-admin        # rotate password
 #   sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets   # re-seed creds
 #   sudo bash scripts/bootstrap-robot.sh --image-overrides     # push tag changes
-#   sudo bash scripts/bootstrap-robot.sh --pairing --image-overrides
+#   sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
 #
 #   -h, --help         this help
 #
@@ -128,7 +130,8 @@
 #                   namespace, then no-op if already present in every
 #                   target namespace. Creates the namespace if it doesn't
 #                   exist yet. Idempotent.
-#   5.5 pairing     create/refresh the operator-ui-pairing ConfigMap in
+#   5.5 operator-ui-config
+#                   create/refresh the operator-ui-pairing ConfigMap in
 #                   the `argus` namespace from
 #                   /etc/phantomos/operator-ui-pairing.yaml. The base
 #                   operator-ui Deployment reads AI_PC_URL via
@@ -186,7 +189,7 @@ SKIP_DEPS=0
 SKIP_HOST=0
 SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
-SKIP_PAIRING=0
+SKIP_OPERATOR_UI_CONFIG=0
 SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
@@ -210,7 +213,7 @@ while [ $# -gt 0 ]; do
     --cluster)           SELECTED_PHASES+=(cluster); shift ;;
     --host)              SELECTED_PHASES+=(host); shift ;;
     --seed-pull-secrets) SELECTED_PHASES+=(seed-pull-secrets); shift ;;
-    --pairing)           SELECTED_PHASES+=(pairing); shift ;;
+    --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
@@ -327,7 +330,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_CLUSTER=1
   SKIP_HOST=1
   SKIP_SEED_PULL_SECRETS=1
-  SKIP_PAIRING=1
+  SKIP_OPERATOR_UI_CONFIG=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
@@ -339,7 +342,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       cluster)           SKIP_CLUSTER=0 ;;
       host)              SKIP_HOST=0 ;;
       seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
-      pairing)           SKIP_PAIRING=0 ;;
+      operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
@@ -848,7 +851,7 @@ seed_pull_secrets() {
   done
 }
 
-# ---- phase 5.5: pairing (operator-ui AI_PC_URL ConfigMap) ---------------
+# ---- phase 5.5: operator-ui-config (AI_PC_URL ConfigMap) ---------------
 
 # Per-host pairing file. Holds a ConfigMap manifest that the operator-ui
 # Deployment in the argus namespace reads via configMapKeyRef. Lives on
@@ -877,9 +880,9 @@ EOF
   chmod 0644 "$PAIRING_FILE"
 }
 
-pairing() {
-  if [ "$SKIP_PAIRING" = 1 ]; then phase "phase 5.5: pairing  (skipped)"; return; fi
-  phase "phase 5.5: pairing (operator-ui AI_PC_URL ConfigMap)"
+operator_ui_config() {
+  if [ "$SKIP_OPERATOR_UI_CONFIG" = 1 ]; then phase "phase 5.5: operator-ui-config  (skipped)"; return; fi
+  phase "phase 5.5: operator-ui-config (operator-ui AI_PC_URL ConfigMap)"
 
   if [ "$DRY_RUN" = 1 ]; then
     if [ -n "$AI_PC_URL" ]; then
@@ -1499,7 +1502,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
 elif [ "$RESET" = 1 ]; then
   _phase_summary="RESET (purge then exit)"
 else
-  _phase_summary="full bootstrap (preflight, deps, cluster, host, seed-pull-secrets, pairing, gitops, argocd-admin, image-overrides, dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", setup-positronic"), validate)"
+  _phase_summary="full bootstrap (preflight, deps, cluster, host, seed-pull-secrets, operator-ui-config, gitops, argocd-admin, image-overrides, dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", setup-positronic"), validate)"
 fi
 
 cat <<EOF
@@ -1551,7 +1554,7 @@ deps               ; guard
 cluster            ; guard
 host_config        ; guard
 seed_pull_secrets  ; guard
-pairing            ; guard
+operator_ui_config ; guard
 gitops             ; guard
 argocd_admin       ; guard
 image_overrides    ; guard

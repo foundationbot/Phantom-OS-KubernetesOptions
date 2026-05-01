@@ -231,7 +231,7 @@ often as you want:
 | `configure-host.sh --validate` | Check the file is valid YAML |
 | `bootstrap-robot.sh` | Re-apply config after editing host-config.yaml |
 | `bootstrap-robot.sh --reset` | Wipe the cluster (purge then exit) |
-| `bootstrap-robot.sh --<phase>` | Run just that one phase. Pass multiple `--<phase>` flags to run several. Available: `--deps --cluster --host --seed-pull-secrets --pairing --gitops --argocd-admin --image-overrides --dev-mounts --validate`. |
+| `bootstrap-robot.sh --<phase>` | Run just that one phase. Pass multiple `--<phase>` flags to run several. Available: `--deps --cluster --host --seed-pull-secrets --operator-ui-config --gitops --argocd-admin --image-overrides --dev-mounts --validate`. |
 
 ---
 
