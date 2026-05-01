@@ -32,14 +32,17 @@
 #                      DEFAULT, right after the docker-stop pre-phase,
 #                      the script lists enabled services via
 #                      `systemctl list-unit-files --state=enabled` and
-#                      stops + disables anything matching `*api*server*`
-#                      or `*dma*ethercat*` (separator-agnostic — picks
-#                      up hyphen, underscore, dot, or no-separator
-#                      variants). This catches host-systemd
-#                      copies of services that the cluster will manage
-#                      (api-server pods) or re-install (dma-ethercat),
-#                      so they don't fight the pod-managed copy for
-#                      ports / device handles.
+#                      stops + disables anything matching the patterns
+#                      in `SYSTEM_SERVICE_PATTERNS` (defined near the
+#                      top of this script). Match is case-insensitive
+#                      and separator-agnostic, so an entry like
+#                      `api.*server` catches `api-server`, `api_server`,
+#                      `api.server`, `apiserver`. Default patterns
+#                      cover host-systemd copies of services the
+#                      cluster will manage as pods (api-server) or
+#                      re-install (dma-ethercat), so they don't fight
+#                      the pod-managed copy for ports / device
+#                      handles. Append entries to that array to extend.
 #   --skip-ethercat-uninstall
 #                      Skip the dma-ethercat teardown pre-phase. By
 #                      DEFAULT, after the docker stop / reset pre-phases
@@ -180,6 +183,17 @@ SEED_PULL_SECRETS_ONLY=0
 # and manifests/installers/dma-ethercat/base/job.yaml (phantom).
 PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom)
 PULL_SECRET_NAME="dockerhub-creds"
+
+# Host-systemd services to stop + disable before bringing up the cluster.
+# Each entry is an ERE substring matched case-insensitively against
+# `systemctl list-unit-files --state=enabled` output, so any unit whose
+# name contains the substring is matched — separator-agnostic
+# (`api-server`, `api_server`, `api.server`, `apiserver` all match a
+# pattern of `api.*server`). To add a new service, append a pattern.
+SYSTEM_SERVICE_PATTERNS=(
+  'api.*server'      # *api*server*    (host-systemd copies will be replaced by pods)
+  'dma.*ethercat'    # *dma*ethercat*  (replaced by phase 5.5 deb install)
+)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -329,52 +343,51 @@ purge_docker() {
   fi
 }
 
-# ---- pre-phase: stop+disable enabled api-server / dma-ethercat services
+# ---- pre-phase: stop+disable enabled system services -------------------
 
 # Walk `systemctl list-unit-files --state=enabled --type=service` and
-# stop + disable anything matching `*api-server*` or `dma*ethercat*`.
-# These are host-systemd copies of services the cluster will own once
-# the bootstrap finishes:
-#   - api-server  -> brought up as a pod by the gitops phase; the host
-#                    copy listening on the same port would block the
-#                    Service / collide on dependencies.
-#   - dma-ethercat -> uninstalled by the next pre-phase and reinstalled
-#                    fresh from the .deb baked into the foundationbot
-#                    image; stopping it here ensures phase 4 (cluster)
-#                    never sees the running unit.
+# stop + disable anything whose name matches one of the patterns in
+# SYSTEM_SERVICE_PATTERNS (defined at the top of this script). Default
+# patterns cover host-systemd copies of services the cluster will own
+# once the bootstrap finishes:
+#   - api.*server   -> brought up as a pod by the gitops phase; the
+#                      host copy listening on the same port would block
+#                      the Service / collide on dependencies.
+#   - dma.*ethercat -> uninstalled by the next pre-phase and reinstalled
+#                      fresh from the .deb baked into the foundationbot
+#                      image; stopping it here ensures phase 4 (cluster)
+#                      never sees the running unit.
 # Idempotent: a service that's already stopped/disabled produces a
 # no-op and we move on. Failures are recorded but do not abort — we'd
 # rather get to the cluster phase and let the operator deal with a
 # stubborn unit than wedge here on a transient systemd hiccup.
 stop_existing_services() {
   if [ "$SKIP_STOP_SERVICES" = 1 ]; then
-    phase "pre-phase: stop api-server / dma-ethercat services  (skipped — --skip-stop-services)"
+    phase "pre-phase: stop system services  (skipped — --skip-stop-services)"
     return
   fi
-  phase "pre-phase: stop api-server / dma-ethercat services"
+  phase "pre-phase: stop system services"
 
   if ! command -v systemctl >/dev/null 2>&1; then
     skip "systemctl not present — nothing to do"
     return
   fi
 
-  # Naming-convention-agnostic match. The ERE `.*` between tokens
-  # corresponds to the shell-glob `*` between substrings, so all of
-  # these match the api branch:
-  #   api-server, api_server, api.server, apiserver,
-  #   phantomos-api-server, my.api.rest.server, ...
-  # And all of these match the dma branch:
-  #   dma-ethercat, dma_ethercat, dma.ethercat, dmaethercat, ...
-  # `-i` makes the match case-insensitive (Api-Server, DMA-EtherCAT, …).
-  # No anchors — the substrings can appear anywhere in the unit name.
+  # Compose the SYSTEM_SERVICE_PATTERNS array into a single ERE alternation
+  # for grep. `-i` is case-insensitive; no anchors so each pattern matches
+  # anywhere in the unit name (a pattern of `api.*server` catches
+  # `api-server`, `api_server`, `api.server`, `apiserver`, …).
+  local pattern_re
+  pattern_re=$(IFS='|'; printf '%s' "${SYSTEM_SERVICE_PATTERNS[*]}")
+
   local matches
   matches=$(systemctl list-unit-files --state=enabled --type=service --no-legend --no-pager 2>/dev/null \
     | awk '{print $1}' \
-    | grep -iE '(api.*server|dma.*ethercat)' \
+    | grep -iE "($pattern_re)" \
     || true)
 
   if [ -z "$matches" ]; then
-    skip "no enabled api-server / dma-ethercat services on this host"
+    skip "no enabled services match SYSTEM_SERVICE_PATTERNS — nothing to stop"
     return
   fi
 
@@ -1304,7 +1317,7 @@ print_plan() {
   printf '\n   \033[1mplanned phases (in execution order):\033[0m\n'
 
   _step $([ "$SKIP_DOCKER_STOP"        = 0 ] && echo 1 || echo 0) "stop docker containers"                       "--skip-docker-stop"
-  _step $([ "$SKIP_STOP_SERVICES"      = 0 ] && echo 1 || echo 0) "stop api-server / dma-ethercat services"      "--skip-stop-services"
+  _step $([ "$SKIP_STOP_SERVICES"      = 0 ] && echo 1 || echo 0) "stop system services"                         "--skip-stop-services"
   _step "$RESET"                                                  "reset cluster"                                "--reset not set"
   _step $([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                       "--skip-ethercat-uninstall"
   _step 1                                                         "phase 1  preflight"                           ""
