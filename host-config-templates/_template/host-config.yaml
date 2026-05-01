@@ -28,3 +28,26 @@ images:
     newTag: REPLACE-WITH-MODEL-BUILD-DATE
   - name: foundationbot/argus.operator-ui
     newTag: REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
+
+# Optional: dev-mode hostPath mounts. Only set this on developer
+# machines. Bootstrap injects a strategic-merge patch into the live
+# Argo Application; ArgoCD will not revert it. Leaving the block out
+# (or commenting it) reverts the robot to a clean production topology
+# the next time bootstrap runs.
+#
+# Rules:
+#   - Paths must be ABSOLUTE. '~' is rejected (bootstrap runs as root).
+#   - privileged: true grants /dev passthrough — only enable on dev
+#     machines you control. Bootstrap warns loudly when you do.
+#   - Single source path is mounted into the container at /src.
+#
+# devMode:
+#   positronic-control:
+#     source: /home/<user>/development/foundation/positronic_control
+#     mounts:
+#       - {host: /data,                       container: /data}
+#       - {host: /data2,                      container: /data2}
+#       - {host: /home/<user>/recordings,     container: /recordings}
+#       - {host: /home/<user>/trainground,    container: /trainground}
+#       - {host: /home/<user>/.cache/torch/hub, container: /root/.cache/torch/hub}
+#     privileged: true

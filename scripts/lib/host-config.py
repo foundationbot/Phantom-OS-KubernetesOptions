@@ -11,6 +11,7 @@ Usage:
   host-config.py <path> get robot
   host-config.py <path> get aiPcUrl
   host-config.py <path> get-images-json
+  host-config.py <path> get-dev-patches-json
   host-config.py <path> validate
 
 Exit codes:
@@ -97,6 +98,112 @@ def cmd_get_images_json(cfg: dict) -> int:
     return 0
 
 
+def _build_dev_patch_for_positronic(spec: dict) -> tuple[str, list[str]]:
+    """Render a strategic-merge YAML patch for the positronic-control
+    Deployment from a `devMode.positronic-control` spec. Returns
+    (patch_yaml, warnings)."""
+    warnings: list[str] = []
+    src = spec.get("source")
+    mounts = spec.get("mounts") or []
+    privileged = bool(spec.get("privileged"))
+
+    volumes: list[dict] = []
+    volume_mounts: list[dict] = []
+
+    def _add(host_path: str, container_path: str, vol_name: str) -> None:
+        volumes.append({
+            "name": vol_name,
+            "hostPath": {"path": host_path, "type": "DirectoryOrCreate"},
+        })
+        volume_mounts.append({"name": vol_name, "mountPath": container_path})
+
+    if src:
+        _add(src, "/src", "dev-src")
+
+    for i, m in enumerate(mounts):
+        if not isinstance(m, dict):
+            raise ValueError(f"devMode mount[{i}] is not a mapping")
+        host = m.get("host")
+        container = m.get("container")
+        if not host or not container:
+            raise ValueError(
+                f"devMode mount[{i}] needs both 'host' and 'container'"
+            )
+        # name must be DNS-1123: lowercase alnum + hyphens.
+        name = f"dev-mount-{i}"
+        _add(host, container, name)
+
+    container_spec: dict = {
+        "name": "positronic-control",
+        "volumeMounts": volume_mounts,
+    }
+    if privileged:
+        warnings.append(
+            "devMode.positronic-control.privileged=true — container will run "
+            "with full host access (/dev passthrough enabled)"
+        )
+        container_spec["securityContext"] = {"privileged": True}
+
+    patch = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "positronic-control", "namespace": "positronic"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "volumes": volumes,
+                    "containers": [container_spec],
+                }
+            }
+        },
+    }
+    return yaml.safe_dump(patch, sort_keys=False), warnings
+
+
+def cmd_get_dev_patches_json(cfg: dict) -> int:
+    """Emit the kustomize.patches array (Argo Application format) as
+    JSON, suitable for `kubectl patch app ... -p '{"spec":{"source":
+    {"kustomize":{"patches":[...]}}}}'`. Empty array if devMode is
+    unset — that explicitly clears any previously injected dev patches."""
+    dev = cfg.get("devMode") or {}
+    if not isinstance(dev, dict):
+        print("error: 'devMode' must be a mapping", file=sys.stderr)
+        return 2
+
+    patches: list[dict] = []
+    all_warnings: list[str] = []
+
+    pos = dev.get("positronic-control")
+    if pos:
+        if not isinstance(pos, dict):
+            print(
+                "error: 'devMode.positronic-control' must be a mapping",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            patch_yaml, warnings = _build_dev_patch_for_positronic(pos)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        all_warnings.extend(warnings)
+        patches.append(
+            {
+                "target": {
+                    "kind": "Deployment",
+                    "name": "positronic-control",
+                    "namespace": "positronic",
+                },
+                "patch": patch_yaml,
+            }
+        )
+
+    for w in all_warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    print(json.dumps(patches))
+    return 0
+
+
 def cmd_validate(cfg: dict) -> int:
     errors: list[str] = []
     if not cfg.get("robot"):
@@ -115,6 +222,41 @@ def cmd_validate(cfg: dict) -> int:
             errors.append(f"images[{i}]: missing 'name'")
         if not entry.get("newTag"):
             errors.append(f"images[{i}]: missing 'newTag'")
+
+    # devMode is optional. Reject relative paths and ~ — bootstrap runs
+    # as root, so ~ resolves to /root, which is almost never what the
+    # operator meant.
+    dev = cfg.get("devMode") or {}
+    if dev and not isinstance(dev, dict):
+        errors.append("'devMode' must be a mapping")
+    else:
+        for component, spec in dev.items():
+            if not isinstance(spec, dict):
+                errors.append(f"devMode.{component}: must be a mapping")
+                continue
+            paths_to_check: list[tuple[str, str]] = []
+            src = spec.get("source")
+            if src:
+                paths_to_check.append((f"devMode.{component}.source", src))
+            for j, m in enumerate(spec.get("mounts") or []):
+                if isinstance(m, dict) and m.get("host"):
+                    paths_to_check.append(
+                        (f"devMode.{component}.mounts[{j}].host", m["host"])
+                    )
+            for label, p in paths_to_check:
+                if not isinstance(p, str):
+                    errors.append(f"{label}: must be a string")
+                    continue
+                if p.startswith("~"):
+                    errors.append(
+                        f"{label}: '~' is not allowed (bootstrap runs as root, "
+                        f"~ becomes /root). Use the absolute path instead."
+                    )
+                elif not p.startswith("/"):
+                    errors.append(
+                        f"{label}: must be an absolute path (got: {p!r})"
+                    )
+
     if errors:
         for e in errors:
             print(f"error: {e}", file=sys.stderr)
@@ -136,6 +278,8 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
+    if cmd == "get-dev-patches-json":
+        return cmd_get_dev_patches_json(cfg)
     if cmd == "validate":
         return cmd_validate(cfg)
     print(f"error: unknown subcommand: {cmd}", file=sys.stderr)

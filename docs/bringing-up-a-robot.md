@@ -281,6 +281,49 @@ sudo bash scripts/bootstrap-robot.sh \
 
 The last invocation runs only the image-overrides phase.
 
+### Dev-mode hostPath mounts (developer machines only)
+
+If you're running on a dev laptop or workstation and want to mount your
+local source tree into the `positronic-control` pod (so code changes
+are visible without rebuilding the image), add a `devMode:` block to
+`/etc/phantomos/host-config.yaml`:
+
+```yaml
+devMode:
+  positronic-control:
+    source: /home/yourname/development/foundation/positronic_control
+    mounts:
+      - {host: /data,                          container: /data}
+      - {host: /data2,                         container: /data2}
+      - {host: /home/yourname/recordings,      container: /recordings}
+      - {host: /home/yourname/trainground,     container: /trainground}
+      - {host: /home/yourname/.cache/torch/hub, container: /root/.cache/torch/hub}
+    privileged: true
+```
+
+Then re-run bootstrap:
+
+```bash
+sudo bash scripts/bootstrap-robot.sh
+```
+
+Phase 6.8 (`dev mounts`) injects a strategic-merge patch into the
+live ArgoCD Application. The patch adds the volumes + volumeMounts and
+(optionally) sets the container privileged. ArgoCD will not revert it.
+
+**Rules / warnings:**
+
+- All paths must be **absolute**. `~` is rejected — bootstrap runs as
+  root, where `~` resolves to `/root` instead of your home.
+- `privileged: true` grants the container `/dev` passthrough and full
+  host access. Bootstrap warns loudly when you enable it. Use only on
+  dev hardware you control.
+- The single `source:` path is mounted at `/src` inside the container.
+  Use the `mounts:` list for everything else.
+- Removing the `devMode:` block from host-config and re-running
+  bootstrap clears any previously injected dev mounts — the pod
+  reverts to its production spec.
+
 ### Wiping a robot to start over
 
 ```bash

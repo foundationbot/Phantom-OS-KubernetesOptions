@@ -62,6 +62,10 @@
 #   --skip-image-overrides
 #                      skip phase 6.7 (kustomize.images injection into
 #                      the live Application)
+#   --skip-dev-mounts  skip phase 6.8 (dev hostPath patches injection
+#                      into the live Application). Use to suppress
+#                      dev-mode mounts on production hosts that share
+#                      a host-config.yaml with a dev block.
 #   --skip-argocd-admin
 #                      skip phase 6.5 (install argocd CLI + reset admin
 #                      password to 1984)
@@ -161,6 +165,7 @@ SKIP_SEED_PULL_SECRETS=0
 SKIP_PAIRING=0
 SKIP_GITOPS=0
 SKIP_IMAGE_OVERRIDES=0
+SKIP_DEV_MOUNTS=0
 AI_PC_URL=""
 HOST_CONFIG_INPUT=""
 SKIP_ARGOCD_ADMIN=0
@@ -194,6 +199,8 @@ while [ $# -gt 0 ]; do
     --host-config)   HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
     --skip-image-overrides)
                      SKIP_IMAGE_OVERRIDES=1; shift ;;
+    --skip-dev-mounts)
+                     SKIP_DEV_MOUNTS=1; shift ;;
     --skip-gitops)   SKIP_GITOPS=1; shift ;;
     --skip-argocd-admin)
                      SKIP_ARGOCD_ADMIN=1; shift ;;
@@ -1009,6 +1016,93 @@ image_overrides() {
   fi
 }
 
+# ---- phase 6.8: dev hostPath mounts (per-host) --------------------------
+
+# Inject the strategic-merge patch derived from
+# /etc/phantomos/host-config.yaml's `devMode:` block into the live
+# phantomos-<robot> Argo Application's spec.source.kustomize.patches.
+# This is the dev-mode escape hatch — operators on dev machines can
+# bind-mount the host's source tree, /data, /dev, etc. into pods so
+# code changes are visible without rebuilding images.
+#
+# When devMode is unset OR --skip-dev-mounts is passed, the patches
+# array is set to [] explicitly, which CLEARS any previously injected
+# dev mounts. This means re-running bootstrap with devMode removed
+# from host-config.yaml reverts the robot to a clean production
+# topology.
+dev_mounts() {
+  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 6.8: dev mounts  (skipped)"; return; fi
+  phase "phase 6.8: dev mounts (inject kustomize.patches into Application)"
+
+  # Same dry-run/canonical fallback as image_overrides.
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+
+  local patches_json="[]"
+  local stderr_capture
+  if [ -r "$hc" ]; then
+    stderr_capture="$(mktemp)"
+    if ! patches_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-dev-patches-json 2>"$stderr_capture")"; then
+      fail "host-config dev-patches parse error:"
+      cat "$stderr_capture" >&2
+      rm -f "$stderr_capture"
+      return
+    fi
+    # Surface privileged warnings to the operator loud and clear.
+    if [ -s "$stderr_capture" ]; then
+      while IFS= read -r line; do
+        printf '  \033[33m%s\033[0m\n' "$line" >&2
+      done < "$stderr_capture"
+    fi
+    rm -f "$stderr_capture"
+  fi
+
+  if [ "$patches_json" = "[]" ]; then
+    info "no devMode in host-config — clearing any previously injected patches"
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  kubectl -n argocd patch app phantomos-$ROBOT --type=merge"
+    info "DRY-RUN    set spec.source.kustomize.patches = $patches_json"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot patch Application"
+    return
+  fi
+
+  if ! "${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" >/dev/null 2>&1; then
+    fail "Application phantomos-$ROBOT not present — gitops phase must run first"
+    return
+  fi
+
+  local patch
+  patch=$(printf '{"spec":{"source":{"kustomize":{"patches":%s}}}}' "$patches_json")
+
+  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
+       --type=merge -p "$patch" >/dev/null; then
+    if [ "$patches_json" = "[]" ]; then
+      pass "cleared dev-mode patches on phantomos-$ROBOT"
+    else
+      pass "patched phantomos-$ROBOT  kustomize.patches (dev mounts injected)"
+    fi
+  else
+    fail "kubectl patch app phantomos-$ROBOT failed"
+    return
+  fi
+
+  # Trigger a sync so the new Pod spec rolls out immediately.
+  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
+       --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1; then
+    pass "triggered sync of phantomos-$ROBOT"
+  else
+    info "could not trigger sync — argocd will pick up changes on next reconcile"
+  fi
+}
+
 # ---- phase 6.5: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
@@ -1186,8 +1280,8 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin, 6.7-image-overrides$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_pairing=$SKIP_PAIRING skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_image_overrides=$SKIP_IMAGE_OVERRIDES skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin, 6.7-image-overrides, 6.8-dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_pairing=$SKIP_PAIRING skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_image_overrides=$SKIP_IMAGE_OVERRIDES skip_dev_mounts=$SKIP_DEV_MOUNTS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 host-config: $([ -r "$HOST_CONFIG_FILE" ] && echo "$HOST_CONFIG_FILE" || echo "<not present — using flag values, no image overrides>")
 ai_pc_url: ${AI_PC_URL:-<from $PAIRING_FILE>}
 EOF
@@ -1235,6 +1329,7 @@ pairing            ; guard
 gitops             ; guard
 argocd_admin       ; guard
 image_overrides    ; guard
+dev_mounts         ; guard
 setup_positronic   ; guard
 validate
 
