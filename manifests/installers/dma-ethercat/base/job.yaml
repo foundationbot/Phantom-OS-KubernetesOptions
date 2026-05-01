@@ -12,8 +12,13 @@
 # The container's only job is the copy: it overrides the image's
 # default entrypoint (which would run dma_main), copies the .deb to a
 # hostPath at /var/lib/dma-ethercat-installer/, writes a sentinel file,
-# and exits. Pod ends in Completed; ttlSecondsAfterFinished cleans up
-# the Job object after 10 min so successive bootstraps stay tidy.
+# and exits. Pod ends in Completed and is reaped 30s later by the TTL
+# controller — long enough for an operator to `kubectl logs` the pod
+# if something looks off, short enough that successive bootstraps don't
+# leave stale Completed rows in `kubectl get pods`. The .deb on
+# hostPath survives the pod deletion (it's on the host filesystem, not
+# in the pod's writable layer), so the bootstrap's subsequent
+# `dpkg -i` step is unaffected.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -21,7 +26,7 @@ metadata:
   namespace: phantom
 spec:
   backoffLimit: 3
-  ttlSecondsAfterFinished: 600
+  ttlSecondsAfterFinished: 30
   template:
     metadata:
       labels:
