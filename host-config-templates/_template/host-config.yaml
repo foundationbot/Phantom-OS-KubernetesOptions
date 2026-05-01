@@ -19,6 +19,13 @@ aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
 # /etc/phantomos/phantomos-app.yaml at bringup. Default: main.
 targetRevision: main
 
+# Optional. Production mode. When true, ArgoCD auto-reverts manual
+# cluster edits (selfHeal). When false (default), drift is reported
+# but not corrected — useful for dev / debug machines where on-call
+# might `kubectl edit` resources during incidents. The --production
+# CLI flag overrides this for the current bootstrap run.
+production: false
+
 # Per-host kustomize image overrides. Bootstrap injects this list into
 # the live phantomos-<robot> Argo Application's
 # spec.source.kustomize.images. The list overrides anything declared in

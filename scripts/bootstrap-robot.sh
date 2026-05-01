@@ -50,6 +50,13 @@
 #   -y, --yes          skip confirmation prompts
 #   --dry-run          print what each phase would do, change nothing
 #   --keep-going       continue after failures (default: bail at first)
+#   --production       set selfHeal: true on the per-host Application
+#                      (ArgoCD will auto-revert manual cluster edits).
+#                      Overrides host-config.yaml's `production:` field
+#                      for this run. Use on production robots.
+#   --no-production    set selfHeal: false on the per-host Application
+#                      (drift reported but not corrected). Overrides
+#                      host-config.yaml. Use on dev / debug machines.
 #   --reset            Tear down any pre-existing k0s cluster
 #                      (`k0s stop && k0s reset`) and back up
 #                      /root/.kube/config and terraform/terraform.tfstate*
@@ -179,6 +186,9 @@ HOST_CONFIG_INPUT=""
 SETUP_POSITRONIC=0
 POSITRONIC_IMAGE=""
 DOCKERHUB_SECRET_FILE=""
+# Empty = "no flag passed; fall back to host-config.yaml's production
+# field (default false)". Flag values: 0 or 1.
+PRODUCTION=""
 
 # Phase enable/disable. With no --<phase> flag(s) on the command line,
 # every phase runs (full bootstrap). Pass one or more --<phase> flags
@@ -238,6 +248,8 @@ while [ $# -gt 0 ]; do
     --dry-run)           DRY_RUN=1; shift ;;
     --keep-going)        KEEP_GOING=1; shift ;;
     --reset)             RESET=1; shift ;;
+    --production)        PRODUCTION=1; shift ;;
+    --no-production)     PRODUCTION=0; shift ;;
     -h|--help)           usage; exit 0 ;;
     *)                   printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -1008,6 +1020,7 @@ _gitops_migrate_from_root_app() {
 _gitops_render_app() {
   local repo_url="${1:?repo_url required}"
   local target_rev="${2:?target_rev required}"
+  local self_heal="${3:?self_heal required}"
 
   if [ ! -r "$APP_TEMPLATE_FILE" ]; then
     fail "Application CR template not found: $APP_TEMPLATE_FILE"
@@ -1019,6 +1032,7 @@ _gitops_render_app() {
     -e "s#{{ROBOT}}#$ROBOT#g" \
     -e "s#{{REPO_URL}}#$repo_url#g" \
     -e "s#{{TARGET_REVISION}}#$target_rev#g" \
+    -e "s#{{SELF_HEAL}}#$self_heal#g" \
     "$APP_TEMPLATE_FILE" > "$RENDERED_APP_FILE"
   chmod 0644 "$RENDERED_APP_FILE"
 }
@@ -1053,10 +1067,21 @@ gitops() {
     fi
   fi
 
+  # Resolve selfHeal: explicit --production / --no-production wins, else
+  # host-config.yaml's `production:` field, else default false.
+  local self_heal="false"
+  if [ -n "$PRODUCTION" ]; then
+    [ "$PRODUCTION" = 1 ] && self_heal="true"
+  elif [ -r "$hc" ]; then
+    if hc_prod="$(python3 "$HOST_CONFIG_HELPER" "$hc" get production 2>/dev/null)"; then
+      [ "$hc_prod" = "True" ] || [ "$hc_prod" = "true" ] && self_heal="true"
+    fi
+  fi
+
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
     info "DRY-RUN  render $APP_TEMPLATE_FILE -> $RENDERED_APP_FILE"
-    info "DRY-RUN    ROBOT=$ROBOT  REPO_URL=$DEFAULT_REPO_URL  TARGET_REVISION=$target_rev"
+    info "DRY-RUN    ROBOT=$ROBOT  REPO_URL=$DEFAULT_REPO_URL  TARGET_REVISION=$target_rev  SELF_HEAL=$self_heal"
     info "DRY-RUN  kubectl apply -f $RENDERED_APP_FILE"
     info "DRY-RUN  wait for phantomos-$ROBOT  Synced + Healthy"
     return
@@ -1085,10 +1110,10 @@ gitops() {
   _gitops_migrate_from_root_app
 
   # Render and apply the per-host Application CR.
-  if ! _gitops_render_app "$DEFAULT_REPO_URL" "$target_rev"; then
+  if ! _gitops_render_app "$DEFAULT_REPO_URL" "$target_rev" "$self_heal"; then
     return
   fi
-  pass "rendered $RENDERED_APP_FILE  robot=$ROBOT  branch=$target_rev"
+  pass "rendered $RENDERED_APP_FILE  robot=$ROBOT  branch=$target_rev  selfHeal=$self_heal"
 
   if ! "${KUBECTL[@]}" apply -f "$RENDERED_APP_FILE" >/dev/null; then
     fail "kubectl apply -f $RENDERED_APP_FILE"

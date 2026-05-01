@@ -7,6 +7,10 @@
 #   {{REPO_URL}}         git URL of this repo
 #   {{TARGET_REVISION}}  branch/tag/sha to track (from host-config.yaml,
 #                        default: main)
+#   {{SELF_HEAL}}        true|false. true on production hosts; ArgoCD
+#                        will auto-revert manual cluster edits. Driven
+#                        by host-config.yaml's `production:` field
+#                        (default false) or --production CLI flag.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -29,7 +33,7 @@ spec:
   syncPolicy:
     automated:
       prune: true
-      selfHeal: false
+      selfHeal: {{SELF_HEAL}}
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true

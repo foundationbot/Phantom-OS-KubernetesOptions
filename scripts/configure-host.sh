@@ -219,7 +219,7 @@ else
 fi
 
 # Read seed values via the helper. Empty strings if seed has no value.
-seed_robot=""; seed_ai=""; seed_target_rev=""; seed_images_yaml=""
+seed_robot=""; seed_ai=""; seed_target_rev=""; seed_production=""; seed_images_yaml=""
 seed_dev_source=""; seed_dev_privileged="false"
 declare -a seed_dev_mount_hosts
 declare -a seed_dev_mount_containers
@@ -228,6 +228,7 @@ if [ -n "$seed_path" ]; then
   seed_robot="$(python3 "$HELPER" "$seed_path" get robot 2>/dev/null || true)"
   seed_ai="$(python3 "$HELPER" "$seed_path" get aiPcUrl 2>/dev/null || true)"
   seed_target_rev="$(python3 "$HELPER" "$seed_path" get targetRevision 2>/dev/null || true)"
+  seed_production="$(python3 "$HELPER" "$seed_path" get production 2>/dev/null || true)"
   # Pull the images: block out by chopping everything before the
   # first 'images:' line. Crude but adequate — seed files come from
   # this repo or were last written by us.
@@ -358,6 +359,21 @@ example "main, feat/mk09-positronic-0.2.44-production"
 target_default="${seed_target_rev:-main}"
 target_revision="$(ask "targetRevision" "$target_default" "Any valid git ref reachable from the configured repo URL.")"
 ok "targetRevision = $target_revision"
+
+# --- production / selfHeal ---
+heading "production mode (ArgoCD selfHeal)"
+hint "When ON, ArgoCD auto-reverts manual cluster edits to the deployed"
+hint "resources (selfHeal: true). Useful in steady state. PAINFUL during"
+hint "incidents — anything you 'kubectl edit' will be silently undone."
+hint "Recommended: ON for production robots, OFF for dev/debug machines."
+production="false"
+prod_default="n"
+case "$seed_production" in true|True) prod_default="y" ;; esac
+if confirm "Production mode (selfHeal)?" "$prod_default"; then
+  production="true"
+  warn "selfHeal enabled — manual kubectl edits to deployed resources will revert"
+fi
+ok "production = $production"
 
 # --- images ---
 heading "image tag overrides"
@@ -546,6 +562,7 @@ tmp="$(mktemp)"
   printf 'robot: %s\n' "$robot"
   printf 'aiPcUrl: %s\n' "$ai_pc_url"
   printf 'targetRevision: %s\n' "$target_revision"
+  printf 'production: %s\n' "$production"
   if [ "$inject_images" = 1 ]; then
     # Count non-empty tags so we don't emit an empty `images:` header.
     nonempty=0

@@ -231,6 +231,8 @@ often as you want:
 | `configure-host.sh --validate` | Check the file is valid YAML |
 | `bootstrap-robot.sh` | Re-apply config after editing host-config.yaml |
 | `bootstrap-robot.sh --reset` | Wipe the cluster (purge then exit) |
+| `bootstrap-robot.sh --production` | Re-render the Application with `selfHeal: true` (ArgoCD auto-reverts manual cluster edits). Use on production robots. |
+| `bootstrap-robot.sh --no-production` | Same, with `selfHeal: false`. Use on dev/debug machines. |
 | `bootstrap-robot.sh --<phase>` | Run just that one phase. Pass multiple `--<phase>` flags to run several. Available: `--deps --cluster --host --seed-pull-secrets --operator-ui-config --gitops --argocd-admin --image-overrides --dev-mounts --validate`. |
 
 ---

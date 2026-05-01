@@ -214,6 +214,10 @@ def cmd_validate(cfg: dict) -> int:
     target_rev = cfg.get("targetRevision") or ""
     if target_rev and not isinstance(target_rev, str):
         errors.append(f"'targetRevision' must be a string (got: {target_rev!r})")
+    if "production" in cfg and not isinstance(cfg["production"], bool):
+        errors.append(
+            f"'production' must be true or false (got: {cfg['production']!r})"
+        )
     images = cfg.get("images") or []
     if not isinstance(images, list):
         errors.append("'images' must be a list")
