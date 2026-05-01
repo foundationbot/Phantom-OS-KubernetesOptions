@@ -26,9 +26,5 @@ images:
   # `sudo python3 scripts/phantom-models/build.py`.
   - name: localhost:5443/phantom-models
     newTag: 2026-04-29
-patches:
-  #- path: patches/operator-ui-env.yaml
-  #  target:
-  #    kind: Deployment
-  #    name: operator-ui
-  #    namespace: argus
+# AI_PC_URL pairing moved out of the overlay into a per-host
+# ConfigMap. See host-config-templates/ak-007/operator-ui-pairing.yaml.

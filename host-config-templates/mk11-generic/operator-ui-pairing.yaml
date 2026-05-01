@@ -1,0 +1,11 @@
+# mk11-generic operator-ui pairing — derived from the pre-migration
+# manifests/robots/mk11-generic/patches/operator-ui-env.yaml.
+# Copy to /etc/phantomos/operator-ui-pairing.yaml on any mk11-generic
+# robot (the same AI PC was historically used for the whole class).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: operator-ui-pairing
+  namespace: argus
+data:
+  AI_PC_URL: http://100.85.53.56:5000

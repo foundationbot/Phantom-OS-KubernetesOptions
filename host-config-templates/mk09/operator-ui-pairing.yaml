@@ -1,0 +1,10 @@
+# mk09 operator-ui pairing — derived from the pre-migration
+# manifests/robots/mk09/patches/operator-ui-env.yaml.
+# Copy to /etc/phantomos/operator-ui-pairing.yaml on the mk09 robot.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: operator-ui-pairing
+  namespace: argus
+data:
+  AI_PC_URL: http://100.124.202.97:5000

@@ -28,8 +28,16 @@ spec:
               value: /api
             - name: CONTROL_PC_URL
               value: http://172.16.67.100:5000
+            # AI_PC_URL is per-host: the Tailscale IP of the AI PC paired
+            # with this robot. The value lives in the operator-ui-pairing
+            # ConfigMap (argus ns), which bootstrap-robot.sh creates from
+            # /etc/phantomos/operator-ui-pairing.yaml. The CM is NOT in
+            # the GitOps tree, so ArgoCD doesn't reset per-host changes.
             - name: AI_PC_URL
-              value: http://100.71.81.1:5000
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: AI_PC_URL
             - name: RERUN_URL
               value: rerun+http://nitrogen:9876/proxy
           resources:

@@ -1,0 +1,12 @@
+# Generic operator-ui pairing template.
+# Copy to /etc/phantomos/operator-ui-pairing.yaml and replace
+# AI_PC_URL with the Tailscale IP:port of the AI PC paired with
+# this robot. bootstrap-robot.sh --ai-pc-url <url> will write
+# this file for you.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: operator-ui-pairing
+  namespace: argus
+data:
+  AI_PC_URL: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
