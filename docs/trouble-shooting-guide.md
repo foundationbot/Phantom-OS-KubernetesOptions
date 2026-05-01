@@ -693,13 +693,15 @@ docker login                                              # for private foundati
 sudo bash scripts/prime-registry-cache.sh --from-manifests manifests/
 ```
 
-`bootstrap-robot.sh` orchestrates six phases (preflight, deps, host
-config, cluster + kubeconfig, gitops via terraform, validate) and is
-idempotent — re-running on a bootstrapped host detects existing config
-and prints `SKIP` for what's already done. Useful flags: `--dry-run`
-(print plan, change nothing), `--skip-deps` / `--skip-host` /
-`--skip-cluster` / `--skip-gitops` / `--skip-validate` to slice phases,
-`--skip-nvidia` to override GPU autodetect.
+`bootstrap-robot.sh` orchestrates the bringup phases (preflight, deps,
+cluster, host config, seed-pull-secrets, pairing, gitops, argocd-admin,
+image-overrides, dev-mounts, validate) and is idempotent — re-running
+on a bootstrapped host detects existing config and prints `SKIP` for
+what's already done. Useful flags: `--dry-run` (print plan, change
+nothing), per-phase opt-in flags
+(`--deps`/`--cluster`/`--host`/`--seed-pull-secrets`/`--pairing`/`--gitops`/`--argocd-admin`/`--image-overrides`/`--dev-mounts`/`--validate`)
+to run only the named phases, `--skip-nvidia` to override GPU
+autodetect, `--skip-validate` to skip the final validate pass.
 
 Image priming is the separate step because it needs DockerHub creds.
 

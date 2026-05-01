@@ -19,6 +19,32 @@
 #                      host to a different overlay.
 #
 # Flags:
+# Per-phase opt-in flags. With NONE of these on the command line,
+# every phase runs (full bootstrap). Pass one or more to switch to
+# selected-phases-only mode: only the named phases run, everything
+# else is skipped. Selected-phases mode implies -y.
+#
+#   --deps               apt installs + k0s + terraform binaries
+#   --cluster            k0s install + systemd start
+#   --host               host containerd / nvidia runtime config
+#   --seed-pull-secrets  propagate dockerhub-creds Secret to argus,
+#                        dma-video, nimbus namespaces
+#   --pairing            render+apply the operator-ui-pairing ConfigMap
+#   --gitops             terraform apply (argocd Helm) + render+apply
+#                        the per-host phantomos-<robot> Application
+#   --argocd-admin       install argocd CLI; prompt and set admin
+#                        password (default '1984' on empty input)
+#   --image-overrides    inject host-config.yaml's images list into
+#                        the live Application
+#   --dev-mounts         inject host-config.yaml's devMode patches
+#                        (or clear, if devMode is unset)
+#   --validate           run scripts/validate-local-registry.sh
+#
+# Targeted overrides (compose with both modes):
+#   --skip-nvidia        force-skip nvidia runtime config
+#   --skip-validate      skip the final validate-local-registry.sh run
+#
+# Other flags:
 #   -y, --yes          skip confirmation prompts
 #   --dry-run          print what each phase would do, change nothing
 #   --keep-going       continue after failures (default: bail at first)
@@ -33,45 +59,24 @@
 #                      on-disk hostPath data under /var/lib/k0s-data/,
 #                      /var/lib/registry/, and /var/lib/recordings/ is
 #                      preserved (k0s reset does not touch those paths).
-#   --skip-deps        skip phase 2 (apt installs + k0s/terraform binaries)
-#   --skip-cluster     skip phase 3 (k0s install + systemd start)
-#   --skip-host        skip phase 4 (host containerd/nvidia config)
-#   --skip-seed-pull-secrets
-#                      skip phase 5 (propagate dockerhub-creds Secret to
-#                      argus / dma-video / nimbus namespaces)
-#   --skip-gitops      skip phase 6 (terraform apply)
 #   --ai-pc-url <url>  AI PC URL for the operator-ui pairing (e.g.
 #                      http://100.124.202.97:5000). Required on FIRST
 #                      bringup; on re-runs the value is read from
 #                      /etc/phantomos/operator-ui-pairing.yaml. Pass
 #                      this flag again to re-pair against a different
 #                      AI PC.
-#   --skip-pairing     skip phase 5.5 (operator-ui-pairing ConfigMap)
 #   --host-config <path>
 #                      copy the given file to /etc/phantomos/host-config.yaml.
 #                      The host-config file is the single per-host
 #                      source-of-truth (robot identity, aiPcUrl, image
-#                      tag overrides). Bootstrap derives /etc/phantomos/
-#                      operator-ui-pairing.yaml and the live Argo
-#                      Application's spec.source.kustomize.images from
-#                      it. If --host-config is omitted but the file
-#                      already exists, it's used as-is. If it doesn't
-#                      exist either, the script falls back to
+#                      tag overrides, dev mounts). Bootstrap derives
+#                      /etc/phantomos/operator-ui-pairing.yaml and the
+#                      live Argo Application's spec.source.kustomize.{images,patches}
+#                      from it. If --host-config is omitted but the
+#                      file already exists, it's used as-is. If it
+#                      doesn't exist either, the script falls back to
 #                      individual flags (--robot, --ai-pc-url) and
 #                      skips image overrides.
-#   --skip-image-overrides
-#                      skip phase 6.7 (kustomize.images injection into
-#                      the live Application)
-#   --skip-dev-mounts  skip phase 6.8 (dev hostPath patches injection
-#                      into the live Application). Use to suppress
-#                      dev-mode mounts on production hosts that share
-#                      a host-config.yaml with a dev block.
-#   --skip-argocd-admin
-#                      skip phase 6.5 (install argocd CLI + reset admin
-#                      password to 1984)
-#   --skip-nvidia      force-skip nvidia runtime config (overrides
-#                      hardware autodetect)
-#   --skip-validate    skip the final validate-local-registry.sh run
 #   --setup-positronic after the cluster is up, push a positronic-control
 #                      image and build phantom-models so the pod can start.
 #                      Requires --positronic-image <image> (e.g.
@@ -89,20 +94,14 @@
 #                      inline `auths` (credsStore-only), phase 5 falls
 #                      back to copying an existing `dockerhub-creds`
 #                      Secret from the `phantom` namespace.
-#   --only <phase>     run only the named phase, skip everything else.
-#                      Implies -y. Phase names:
-#                        deps cluster host seed-pull-secrets pairing
-#                        gitops argocd-admin image-overrides dev-mounts
-#                        validate
-#                      Examples:
-#                        bootstrap-robot.sh --only seed-pull-secrets
-#                        bootstrap-robot.sh --only image-overrides
-#                        bootstrap-robot.sh --only argocd-admin
-#                      argocd-admin will prompt interactively for the
-#                      new password; press enter to keep '1984' as the
-#                      default. The seed-pull-secrets and argocd-admin
-#                      phases do not require a robot identity; the
-#                      others do.
+#
+# Examples:
+#   sudo bash scripts/bootstrap-robot.sh                       # full bootstrap
+#   sudo bash scripts/bootstrap-robot.sh --argocd-admin        # rotate password
+#   sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets   # re-seed creds
+#   sudo bash scripts/bootstrap-robot.sh --image-overrides     # push tag changes
+#   sudo bash scripts/bootstrap-robot.sh --pairing --image-overrides
+#
 #   -h, --help         this help
 #
 # Phases:
@@ -172,23 +171,29 @@ YES=0
 DRY_RUN=0
 KEEP_GOING=0
 RESET=0
+AI_PC_URL=""
+HOST_CONFIG_INPUT=""
+SETUP_POSITRONIC=0
+POSITRONIC_IMAGE=""
+DOCKERHUB_SECRET_FILE=""
+
+# Phase enable/disable. With no --<phase> flag(s) on the command line,
+# every phase runs (full bootstrap). Pass one or more --<phase> flags
+# to switch to selected-phases-only mode: only the named phases run,
+# everything else is skipped. The fan-out from SELECTED_PHASES into
+# the SKIP_* variables happens after arg parsing.
 SKIP_DEPS=0
 SKIP_HOST=0
 SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
 SKIP_PAIRING=0
 SKIP_GITOPS=0
+SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
-AI_PC_URL=""
-HOST_CONFIG_INPUT=""
-SKIP_ARGOCD_ADMIN=0
-SKIP_NVIDIA=0
 SKIP_VALIDATE=0
-SETUP_POSITRONIC=0
-POSITRONIC_IMAGE=""
-DOCKERHUB_SECRET_FILE=""
-ONLY_PHASE=""
+SKIP_NVIDIA=0
+SELECTED_PHASES=()
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
@@ -198,37 +203,40 @@ PULL_SECRET_NAME="dockerhub-creds"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --robot)         ROBOT="${2:-}"; shift 2 ;;
-    -y|--yes)        YES=1; shift ;;
-    --dry-run)       DRY_RUN=1; shift ;;
-    --keep-going)    KEEP_GOING=1; shift ;;
-    --reset)         RESET=1; shift ;;
-    --skip-deps)     SKIP_DEPS=1; shift ;;
-    --skip-host)     SKIP_HOST=1; shift ;;
-    --skip-cluster)  SKIP_CLUSTER=1; shift ;;
-    --skip-seed-pull-secrets)
-                     SKIP_SEED_PULL_SECRETS=1; shift ;;
-    --skip-pairing)  SKIP_PAIRING=1; shift ;;
-    --ai-pc-url)     AI_PC_URL="${2:-}"; shift 2 ;;
-    --host-config)   HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
-    --skip-image-overrides)
-                     SKIP_IMAGE_OVERRIDES=1; shift ;;
-    --skip-dev-mounts)
-                     SKIP_DEV_MOUNTS=1; shift ;;
-    --skip-gitops)   SKIP_GITOPS=1; shift ;;
-    --skip-argocd-admin)
-                     SKIP_ARGOCD_ADMIN=1; shift ;;
-    --skip-nvidia)   SKIP_NVIDIA=1; shift ;;
-    --skip-validate) SKIP_VALIDATE=1; shift ;;
-    --setup-positronic)
-                     SETUP_POSITRONIC=1; shift ;;
-    --positronic-image)
-                     POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
+    # Per-phase opt-in flags. Setting any of these switches to
+    # "selected-phases-only" mode: phases NOT in the selected list
+    # are skipped. With no per-phase flag, every phase runs.
+    --deps)              SELECTED_PHASES+=(deps); shift ;;
+    --cluster)           SELECTED_PHASES+=(cluster); shift ;;
+    --host)              SELECTED_PHASES+=(host); shift ;;
+    --seed-pull-secrets) SELECTED_PHASES+=(seed-pull-secrets); shift ;;
+    --pairing)           SELECTED_PHASES+=(pairing); shift ;;
+    --gitops)            SELECTED_PHASES+=(gitops); shift ;;
+    --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
+    --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
+    --dev-mounts)        SELECTED_PHASES+=(dev-mounts); shift ;;
+    --validate)          SELECTED_PHASES+=(validate); shift ;;
+
+    # Targeted overrides that compose with both modes.
+    --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
+    --skip-validate)     SKIP_VALIDATE=1; shift ;;
+
+    # Inputs.
+    --robot)             ROBOT="${2:-}"; shift 2 ;;
+    --ai-pc-url)         AI_PC_URL="${2:-}"; shift 2 ;;
+    --host-config)       HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
     --dockerhub-secret-file)
-                     DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
-    --only)          ONLY_PHASE="${2:-}"; shift 2 ;;
-    -h|--help)       usage; exit 0 ;;
-    *)               printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
+                         DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
+    --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
+    --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
+
+    # Behavior modifiers.
+    -y|--yes)            YES=1; shift ;;
+    --dry-run)           DRY_RUN=1; shift ;;
+    --keep-going)        KEEP_GOING=1; shift ;;
+    --reset)             RESET=1; shift ;;
+    -h|--help)           usage; exit 0 ;;
+    *)                   printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
@@ -311,11 +319,10 @@ if [ -n "$_hc_source" ]; then
 fi
 unset _hc_source
 
-# --only <phase> runs exactly one phase; expand it to a fan-out of
-# SKIP_* flags so the rest of the script doesn't need to know about it.
-# Implies -y (operator clearly wants the action — no confirmation
-# prompt needed for a targeted re-run).
-if [ -n "$ONLY_PHASE" ]; then
+# Selected-phases mode. If any --<phase> flag was passed, switch from
+# "run everything" to "run only the named phases". Implies -y — the
+# operator's intent is explicit, no confirmation prompt needed.
+if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_DEPS=1
   SKIP_CLUSTER=1
   SKIP_HOST=1
@@ -326,30 +333,38 @@ if [ -n "$ONLY_PHASE" ]; then
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
   SKIP_VALIDATE=1
-  case "$ONLY_PHASE" in
-    deps)              SKIP_DEPS=0 ;;
-    cluster)           SKIP_CLUSTER=0 ;;
-    host)              SKIP_HOST=0 ;;
-    seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
-    pairing)           SKIP_PAIRING=0 ;;
-    gitops)            SKIP_GITOPS=0 ;;
-    argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
-    image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
-    dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
-    validate)          SKIP_VALIDATE=0 ;;
-    *) printf 'error: --only: unknown phase %s\n  valid: deps cluster host seed-pull-secrets pairing gitops argocd-admin image-overrides dev-mounts validate\n' "$ONLY_PHASE" >&2; exit 2 ;;
-  esac
+  for _p in "${SELECTED_PHASES[@]}"; do
+    case "$_p" in
+      deps)              SKIP_DEPS=0 ;;
+      cluster)           SKIP_CLUSTER=0 ;;
+      host)              SKIP_HOST=0 ;;
+      seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
+      pairing)           SKIP_PAIRING=0 ;;
+      gitops)            SKIP_GITOPS=0 ;;
+      argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
+      image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
+      dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
+      validate)          SKIP_VALIDATE=0 ;;
+    esac
+  done
+  unset _p
   YES=1
 fi
 
-# --reset is a host-level purge that exits before any robot work. Some
-# --only modes (seed-pull-secrets, argocd-admin) operate at the cluster
-# level without a robot. Everything else needs to know which overlay
-# to target: prefer --robot, then /etc/phantomos/robot, then hostname.
+# --reset is a host-level purge that exits before any robot work.
+# Robot identity is needed unless every selected phase is one that
+# operates at the cluster level only.
 _needs_robot=1
-case "$ONLY_PHASE" in
-  seed-pull-secrets|argocd-admin) _needs_robot=0 ;;
-esac
+if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
+  _needs_robot=0
+  for _p in "${SELECTED_PHASES[@]}"; do
+    case "$_p" in
+      deps|seed-pull-secrets|argocd-admin|validate) ;;
+      *) _needs_robot=1; break ;;
+    esac
+  done
+  unset _p
+fi
 if [ "$RESET" = 0 ] && [ "$_needs_robot" = 1 ]; then
   if ! ROBOT="$(resolve_robot "$ROBOT")"; then
     exit 2
@@ -735,7 +750,7 @@ seed_pull_secrets() {
   phase "phase 5: seed pull secrets"
 
   # Resolve KUBECTL — needed when invoked standalone via
-  # --only seed-pull-secrets on a host where /usr/local/bin/kubectl was
+  # --seed-pull-secrets on a host where /usr/local/bin/kubectl was
   # never installed (k0s ships its own).
   if [ "${#KUBECTL[@]}" -eq 0 ]; then
     if command -v kubectl >/dev/null 2>&1; then
@@ -884,7 +899,7 @@ pairing() {
   fi
 
   # Ensure the argus namespace exists. seed_pull_secrets normally created
-  # it already; create here defensively for --skip-seed-pull-secrets paths.
+  # it already; create defensively when seed-pull-secrets wasn't selected.
   if ! "${KUBECTL[@]}" get ns "$PAIRING_NS" >/dev/null 2>&1; then
     if ! "${KUBECTL[@]}" create ns "$PAIRING_NS" >/dev/null; then
       fail "could not create ns/$PAIRING_NS"
@@ -1173,11 +1188,10 @@ image_overrides() {
 # bind-mount the host's source tree, /data, /dev, etc. into pods so
 # code changes are visible without rebuilding images.
 #
-# When devMode is unset OR --skip-dev-mounts is passed, the patches
-# array is set to [] explicitly, which CLEARS any previously injected
-# dev mounts. This means re-running bootstrap with devMode removed
-# from host-config.yaml reverts the robot to a clean production
-# topology.
+# When devMode is unset in host-config.yaml, the patches array is set
+# to [] explicitly, which CLEARS any previously injected dev mounts.
+# This means re-running bootstrap with devMode removed from
+# host-config.yaml reverts the robot to a clean production topology.
 dev_mounts() {
   if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 6.8: dev mounts  (skipped)"; return; fi
   phase "phase 6.8: dev mounts (inject kustomize.patches into Application)"
@@ -1264,7 +1278,7 @@ dev_mounts() {
 #   2. Non-interactive (no TTY, e.g. CI / piped) → use "1984".
 #
 # Deliberately no env-var override: typing a secret on the command line
-# leaks it to shell history and ps listings. `--only argocd-admin`
+# leaks it to shell history and ps listings. `--argocd-admin`
 # inherits a TTY, so password rotation prompts as expected.
 _argocd_default_password="1984"
 
@@ -1379,7 +1393,7 @@ argocd_admin() {
     apt-get install -y apache2-utils >/dev/null 2>&1 || true
   fi
   if ! command -v htpasswd >/dev/null 2>&1; then
-    fail "htpasswd unavailable — install apache2-utils manually and re-run --only argocd-admin"
+    fail "htpasswd unavailable — install apache2-utils manually and re-run --argocd-admin"
     return
   fi
 
@@ -1480,14 +1494,23 @@ validate() {
 
 # ---- main ---------------------------------------------------------------
 
+if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
+  _phase_summary="selected: ${SELECTED_PHASES[*]}"
+elif [ "$RESET" = 1 ]; then
+  _phase_summary="RESET (purge then exit)"
+else
+  _phase_summary="full bootstrap (preflight, deps, cluster, host, seed-pull-secrets, pairing, gitops, argocd-admin, image-overrides, dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", setup-positronic"), validate)"
+fi
+
 cat <<EOF
-bootstrap-robot.sh — robot=${ROBOT:-<not required for --only $ONLY_PHASE>} $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
+bootstrap-robot.sh — robot=${ROBOT:-<not required for selected phases>} $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || ([ -n "$ONLY_PHASE" ] && echo "ONLY $ONLY_PHASE") || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin, 6.7-image-overrides, 6.8-dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_pairing=$SKIP_PAIRING skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_image_overrides=$SKIP_IMAGE_OVERRIDES skip_dev_mounts=$SKIP_DEV_MOUNTS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $_phase_summary
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 host-config: $([ -r "$HOST_CONFIG_FILE" ] && echo "$HOST_CONFIG_FILE" || echo "<not present — using flag values, no image overrides>")
 ai_pc_url: ${AI_PC_URL:-<from $PAIRING_FILE>}
 EOF
+unset _phase_summary
 
 # When --reset is set, it has its own confirmation prompt with a
 # detailed warning. Skip the generic confirmation.
@@ -1514,7 +1537,7 @@ preflight          ; guard
 
 # Persist the resolved robot identity to /etc/phantomos/robot so future
 # script runs on this host don't need --robot. Skipped in dry-run, and
-# when --only ran a phase that doesn't require a robot.
+# when the selected phases don't require a robot.
 if [ "$DRY_RUN" = 0 ] && [ -n "${ROBOT:-}" ]; then
   if persist_robot "$ROBOT"; then
     pass "robot identity persisted: $ROBOT_ID_FILE -> $ROBOT"

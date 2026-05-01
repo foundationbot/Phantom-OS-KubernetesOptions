@@ -231,7 +231,7 @@ often as you want:
 | `configure-host.sh --validate` | Check the file is valid YAML |
 | `bootstrap-robot.sh` | Re-apply config after editing host-config.yaml |
 | `bootstrap-robot.sh --reset` | Wipe the cluster (purge then exit) |
-| `bootstrap-robot.sh --only <phase>` | Re-run just one phase. Phases: `deps cluster host seed-pull-secrets pairing gitops argocd-admin image-overrides dev-mounts validate`. |
+| `bootstrap-robot.sh --<phase>` | Run just that one phase. Pass multiple `--<phase>` flags to run several. Available: `--deps --cluster --host --seed-pull-secrets --pairing --gitops --argocd-admin --image-overrides --dev-mounts --validate`. |
 
 ---
 
@@ -285,7 +285,7 @@ the new value takes effect.
 sudo bash scripts/configure-host.sh   # press enter through robot
                                       # and aiPcUrl to keep them,
                                       # type new tags
-sudo bash scripts/bootstrap-robot.sh --only image-overrides
+sudo bash scripts/bootstrap-robot.sh --image-overrides
 ```
 
 ### Dev-mode hostPath mounts (developer machines only)
@@ -379,7 +379,7 @@ The DockerHub credentials weren't seeded into the right namespaces.
 Re-run only that phase:
 
 ```bash
-sudo bash scripts/bootstrap-robot.sh --only seed-pull-secrets
+sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets
 ```
 
 If you don't have `~/.docker/config.json` on the robot, copy a working
