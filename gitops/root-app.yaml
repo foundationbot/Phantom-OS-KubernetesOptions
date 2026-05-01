@@ -31,3 +31,13 @@ spec:
       selfHeal: false
     syncOptions:
       - ApplyOutOfSyncOnly=true
+  # Per-host bootstrap injects image-tag overrides into each child
+  # Application's spec.source.kustomize.images at bringup
+  # (see scripts/bootstrap-robot.sh + /etc/phantomos/host-config.yaml).
+  # The git tree carries no image overrides, so without this entry the
+  # root would clobber the host-injected list on every reconcile.
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      jsonPointers:
+        - /spec/source/kustomize/images

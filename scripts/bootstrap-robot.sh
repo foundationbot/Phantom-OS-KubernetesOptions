@@ -47,6 +47,21 @@
 #                      this flag again to re-pair against a different
 #                      AI PC.
 #   --skip-pairing     skip phase 5.5 (operator-ui-pairing ConfigMap)
+#   --host-config <path>
+#                      copy the given file to /etc/phantomos/host-config.yaml.
+#                      The host-config file is the single per-host
+#                      source-of-truth (robot identity, aiPcUrl, image
+#                      tag overrides). Bootstrap derives /etc/phantomos/
+#                      operator-ui-pairing.yaml and the live Argo
+#                      Application's spec.source.kustomize.images from
+#                      it. If --host-config is omitted but the file
+#                      already exists, it's used as-is. If it doesn't
+#                      exist either, the script falls back to
+#                      individual flags (--robot, --ai-pc-url) and
+#                      skips image overrides.
+#   --skip-image-overrides
+#                      skip phase 6.7 (kustomize.images injection into
+#                      the live Application)
 #   --skip-argocd-admin
 #                      skip phase 6.5 (install argocd CLI + reset admin
 #                      password to 1984)
@@ -145,7 +160,9 @@ SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
 SKIP_PAIRING=0
 SKIP_GITOPS=0
+SKIP_IMAGE_OVERRIDES=0
 AI_PC_URL=""
+HOST_CONFIG_INPUT=""
 SKIP_ARGOCD_ADMIN=0
 SKIP_NVIDIA=0
 SKIP_VALIDATE=0
@@ -174,6 +191,9 @@ while [ $# -gt 0 ]; do
                      SKIP_SEED_PULL_SECRETS=1; shift ;;
     --skip-pairing)  SKIP_PAIRING=1; shift ;;
     --ai-pc-url)     AI_PC_URL="${2:-}"; shift 2 ;;
+    --host-config)   HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
+    --skip-image-overrides)
+                     SKIP_IMAGE_OVERRIDES=1; shift ;;
     --skip-gitops)   SKIP_GITOPS=1; shift ;;
     --skip-argocd-admin)
                      SKIP_ARGOCD_ADMIN=1; shift ;;
@@ -219,6 +239,57 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # persist_robot. ROBOT_ID_FILE defaults to /etc/phantomos/robot.
 # shellcheck source=scripts/lib/robot-id.sh
 . "$SCRIPT_DIR/lib/robot-id.sh"
+
+# host-config.yaml — single per-host source-of-truth. If --host-config
+# was passed, copy it to the canonical location so subsequent runs use
+# the same file. Then, if the file exists, harvest defaults for fields
+# the operator didn't pass explicitly via flags.
+HOST_CONFIG_FILE="${HOST_CONFIG_FILE:-/etc/phantomos/host-config.yaml}"
+HOST_CONFIG_HELPER="$SCRIPT_DIR/lib/host-config.py"
+
+if [ -n "$HOST_CONFIG_INPUT" ]; then
+  if [ ! -r "$HOST_CONFIG_INPUT" ]; then
+    die "--host-config: $HOST_CONFIG_INPUT not readable"
+  fi
+  if [ "$DRY_RUN" = 0 ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+      die "--host-config requires root (writes $HOST_CONFIG_FILE)"
+    fi
+    mkdir -p "$(dirname "$HOST_CONFIG_FILE")"
+    install -m 0644 "$HOST_CONFIG_INPUT" "$HOST_CONFIG_FILE"
+    printf '  installed host-config: %s -> %s\n' "$HOST_CONFIG_INPUT" "$HOST_CONFIG_FILE"
+  else
+    printf '  DRY-RUN  install -m 0644 %s %s\n' "$HOST_CONFIG_INPUT" "$HOST_CONFIG_FILE"
+  fi
+fi
+
+# Source for host-config harvest. In dry-run we can't have written the
+# canonical /etc/phantomos/host-config.yaml yet, so read straight from
+# the input path the operator gave us. Otherwise prefer the canonical
+# location.
+if [ "$DRY_RUN" = 1 ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+  _hc_source="$HOST_CONFIG_INPUT"
+elif [ -r "$HOST_CONFIG_FILE" ]; then
+  _hc_source="$HOST_CONFIG_FILE"
+else
+  _hc_source=""
+fi
+
+# If a host-config is available, fill in flag defaults. Explicit
+# flags still win.
+if [ -n "$_hc_source" ]; then
+  if [ -z "${ROBOT:-}" ]; then
+    if hc_robot="$(python3 "$HOST_CONFIG_HELPER" "$_hc_source" get robot 2>/dev/null)"; then
+      ROBOT="$hc_robot"
+    fi
+  fi
+  if [ -z "$AI_PC_URL" ]; then
+    if hc_ai="$(python3 "$HOST_CONFIG_HELPER" "$_hc_source" get aiPcUrl 2>/dev/null)"; then
+      AI_PC_URL="$hc_ai"
+    fi
+  fi
+fi
+unset _hc_source
 
 # --seed-pull-secrets-only is namespace-level work — no robot context
 # needed. --reset is a host-level purge that exits before any robot
@@ -866,6 +937,78 @@ gitops() {
   fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
 }
 
+# ---- phase 6.7: kustomize image overrides (per-host) --------------------
+
+# Inject the `images:` list from /etc/phantomos/host-config.yaml into the
+# live phantomos-<robot> Argo Application's spec.source.kustomize.images.
+# This is how per-host image tag overrides flow without polluting the
+# git tree. The root app-of-apps has ignoreDifferences on this same path
+# so the patch survives root reconciliation.
+image_overrides() {
+  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 6.7: image overrides  (skipped)"; return; fi
+  phase "phase 6.7: image overrides (inject kustomize.images into Application)"
+
+  # In dry-run before --host-config has actually been installed, fall
+  # back to the input path the operator passed.
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    skip "$HOST_CONFIG_FILE missing — no per-host image overrides to inject (overlay defaults apply)"
+    return
+  fi
+
+  local images_json
+  if ! images_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-images-json 2>&1)"; then
+    fail "host-config images parse error: $images_json"
+    return
+  fi
+  if [ "$images_json" = "[]" ]; then
+    skip "host-config has no images: block — nothing to inject"
+    return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  kubectl -n argocd patch app phantomos-$ROBOT --type=merge"
+    info "DRY-RUN    set spec.source.kustomize.images = $images_json"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot patch Application"
+    return
+  fi
+
+  if ! "${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" >/dev/null 2>&1; then
+    fail "Application phantomos-$ROBOT not present — gitops phase must run first"
+    return
+  fi
+
+  # Argo Application's spec.source.kustomize is optional and may not
+  # exist yet. JSON merge patch creates the parent objects on the fly.
+  local patch
+  patch=$(printf '{"spec":{"source":{"kustomize":{"images":%s}}}}' "$images_json")
+
+  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
+       --type=merge -p "$patch" >/dev/null; then
+    pass "patched phantomos-$ROBOT  kustomize.images: $images_json"
+  else
+    fail "kubectl patch app phantomos-$ROBOT failed"
+    return
+  fi
+
+  # Force a sync so the new tags take effect immediately. selfHeal is
+  # off by default on these Apps, so without this the operator has to
+  # click sync in the UI or wait for the polling interval.
+  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
+       --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1; then
+    pass "triggered sync of phantomos-$ROBOT"
+  else
+    info "could not trigger sync — argocd will pick up changes on next reconcile"
+  fi
+}
+
 # ---- phase 6.5: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
@@ -1043,8 +1186,9 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_pairing=$SKIP_PAIRING skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin, 6.7-image-overrides$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_pairing=$SKIP_PAIRING skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_image_overrides=$SKIP_IMAGE_OVERRIDES skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+host-config: $([ -r "$HOST_CONFIG_FILE" ] && echo "$HOST_CONFIG_FILE" || echo "<not present — using flag values, no image overrides>")
 ai_pc_url: ${AI_PC_URL:-<from $PAIRING_FILE>}
 EOF
 
@@ -1090,6 +1234,7 @@ seed_pull_secrets  ; guard
 pairing            ; guard
 gitops             ; guard
 argocd_admin       ; guard
+image_overrides    ; guard
 setup_positronic   ; guard
 validate
 

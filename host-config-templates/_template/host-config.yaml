@@ -1,0 +1,30 @@
+# Generic per-host configuration template.
+#
+# Copy to /etc/phantomos/host-config.yaml (or pass to bootstrap with
+# `--host-config`) and replace placeholder values. This is the single
+# source-of-truth for per-host config — bootstrap derives everything
+# else (operator-ui-pairing ConfigMap, Argo Application image overrides,
+# /etc/phantomos/robot) from this file.
+
+# Robot identity. Must match a directory under manifests/robots/ in
+# the deployed branch.
+robot: REPLACE-WITH-ROBOT-NAME
+
+# Tailscale URL of the AI PC paired with this robot. Bootstrap renders
+# /etc/phantomos/operator-ui-pairing.yaml from this value.
+aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
+
+# Per-host kustomize image overrides. Bootstrap injects this list into
+# the live phantomos-<robot> Argo Application's
+# spec.source.kustomize.images. The list overrides anything declared in
+# manifests/robots/<robot>/kustomization.yaml's images block.
+#
+# `name` is the image reference declared in the Deployment manifest;
+# `newTag` is the tag this robot should pull. `newName` is optional.
+images:
+  - name: localhost:5443/positronic-control
+    newTag: REPLACE-WITH-LOCAL-BUILD-TAG
+  - name: localhost:5443/phantom-models
+    newTag: REPLACE-WITH-MODEL-BUILD-DATE
+  - name: foundationbot/argus.operator-ui
+    newTag: REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
