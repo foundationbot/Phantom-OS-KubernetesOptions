@@ -165,7 +165,7 @@ It'll:
 5. Seed Docker Hub pull credentials so private images can be pulled.
 6. Apply the operator-ui pairing ConfigMap from your host-config.
 7. Install ArgoCD via Terraform and apply the GitOps app-of-apps.
-8. Set the ArgoCD admin password to `1984`.
+8. Set the ArgoCD admin password (prompts you; default `1984`).
 9. Inject the per-host image overrides into the live ArgoCD
    Application.
 10. Run a final validation pass against the local image registry.
@@ -214,7 +214,7 @@ default; port-forward to access):
 sudo k0s kubectl -n argocd port-forward svc/argocd-server 8080:443 &
 # then open https://localhost:8080
 # username: admin
-# password: 1984
+# password: 1984 (or whatever you set during bootstrap)
 ```
 
 ---
@@ -231,7 +231,7 @@ often as you want:
 | `configure-host.sh --validate` | Check the file is valid YAML |
 | `bootstrap-robot.sh` | Re-apply config after editing host-config.yaml |
 | `bootstrap-robot.sh --reset` | Wipe the cluster (purge then exit) |
-| `bootstrap-robot.sh --skip-deps --skip-cluster --skip-host` | Re-run just the cluster-side phases (seed creds, pairing, gitops, image overrides, validate) |
+| `bootstrap-robot.sh --only <phase>` | Re-run just one phase. Phases: `deps cluster host seed-pull-secrets pairing gitops argocd-admin image-overrides dev-mounts validate`. |
 
 ---
 
@@ -285,13 +285,8 @@ the new value takes effect.
 sudo bash scripts/configure-host.sh   # press enter through robot
                                       # and aiPcUrl to keep them,
                                       # type new tags
-sudo bash scripts/bootstrap-robot.sh \
-  --skip-deps --skip-cluster --skip-host \
-  --skip-seed-pull-secrets --skip-pairing \
-  --skip-gitops --skip-argocd-admin --skip-validate
+sudo bash scripts/bootstrap-robot.sh --only image-overrides
 ```
-
-The last invocation runs only the image-overrides phase.
 
 ### Dev-mode hostPath mounts (developer machines only)
 
@@ -384,7 +379,7 @@ The DockerHub credentials weren't seeded into the right namespaces.
 Re-run only that phase:
 
 ```bash
-sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets-only
+sudo bash scripts/bootstrap-robot.sh --only seed-pull-secrets
 ```
 
 If you don't have `~/.docker/config.json` on the robot, copy a working

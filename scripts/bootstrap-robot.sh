@@ -89,13 +89,20 @@
 #                      inline `auths` (credsStore-only), phase 5 falls
 #                      back to copying an existing `dockerhub-creds`
 #                      Secret from the `phantom` namespace.
-#   --seed-pull-secrets-only
-#                      run ONLY phase 5 (seed pull secrets) on an already-
-#                      bootstrapped cluster, then exit. Useful when a robot
-#                      came up before the operator had the credential, or
-#                      to recover from `ImagePullBackOff` after rotating
-#                      the foundationbot PAT. Skips preflight/deps/host
-#                      config/cluster/gitops/validate.
+#   --only <phase>     run only the named phase, skip everything else.
+#                      Implies -y. Phase names:
+#                        deps cluster host seed-pull-secrets pairing
+#                        gitops argocd-admin image-overrides dev-mounts
+#                        validate
+#                      Examples:
+#                        bootstrap-robot.sh --only seed-pull-secrets
+#                        bootstrap-robot.sh --only image-overrides
+#                        bootstrap-robot.sh --only argocd-admin
+#                      argocd-admin will prompt interactively for the
+#                      new password; press enter to keep '1984' as the
+#                      default. The seed-pull-secrets and argocd-admin
+#                      phases do not require a robot identity; the
+#                      others do.
 #   -h, --help         this help
 #
 # Phases:
@@ -181,7 +188,7 @@ SKIP_VALIDATE=0
 SETUP_POSITRONIC=0
 POSITRONIC_IMAGE=""
 DOCKERHUB_SECRET_FILE=""
-SEED_PULL_SECRETS_ONLY=0
+ONLY_PHASE=""
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
@@ -219,8 +226,7 @@ while [ $# -gt 0 ]; do
                      POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
     --dockerhub-secret-file)
                      DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
-    --seed-pull-secrets-only)
-                     SEED_PULL_SECRETS_ONLY=1; shift ;;
+    --only)          ONLY_PHASE="${2:-}"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     *)               printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -305,15 +311,51 @@ if [ -n "$_hc_source" ]; then
 fi
 unset _hc_source
 
-# --seed-pull-secrets-only is namespace-level work — no robot context
-# needed. --reset is a host-level purge that exits before any robot
-# work. Otherwise we need to know which overlay to apply: prefer
-# --robot, then /etc/phantomos/robot, then hostname.
-if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ "$RESET" = 0 ]; then
+# --only <phase> runs exactly one phase; expand it to a fan-out of
+# SKIP_* flags so the rest of the script doesn't need to know about it.
+# Implies -y (operator clearly wants the action — no confirmation
+# prompt needed for a targeted re-run).
+if [ -n "$ONLY_PHASE" ]; then
+  SKIP_DEPS=1
+  SKIP_CLUSTER=1
+  SKIP_HOST=1
+  SKIP_SEED_PULL_SECRETS=1
+  SKIP_PAIRING=1
+  SKIP_GITOPS=1
+  SKIP_ARGOCD_ADMIN=1
+  SKIP_IMAGE_OVERRIDES=1
+  SKIP_DEV_MOUNTS=1
+  SKIP_VALIDATE=1
+  case "$ONLY_PHASE" in
+    deps)              SKIP_DEPS=0 ;;
+    cluster)           SKIP_CLUSTER=0 ;;
+    host)              SKIP_HOST=0 ;;
+    seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
+    pairing)           SKIP_PAIRING=0 ;;
+    gitops)            SKIP_GITOPS=0 ;;
+    argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
+    image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
+    dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
+    validate)          SKIP_VALIDATE=0 ;;
+    *) printf 'error: --only: unknown phase %s\n  valid: deps cluster host seed-pull-secrets pairing gitops argocd-admin image-overrides dev-mounts validate\n' "$ONLY_PHASE" >&2; exit 2 ;;
+  esac
+  YES=1
+fi
+
+# --reset is a host-level purge that exits before any robot work. Some
+# --only modes (seed-pull-secrets, argocd-admin) operate at the cluster
+# level without a robot. Everything else needs to know which overlay
+# to target: prefer --robot, then /etc/phantomos/robot, then hostname.
+_needs_robot=1
+case "$ONLY_PHASE" in
+  seed-pull-secrets|argocd-admin) _needs_robot=0 ;;
+esac
+if [ "$RESET" = 0 ] && [ "$_needs_robot" = 1 ]; then
   if ! ROBOT="$(resolve_robot "$ROBOT")"; then
     exit 2
   fi
 fi
+unset _needs_robot
 
 if [ "$DRY_RUN" = 0 ] && [ "$(id -u)" -ne 0 ]; then
   die "must run as root (try: sudo bash $0 --robot ${ROBOT:-<name>} ...)"
@@ -693,7 +735,7 @@ seed_pull_secrets() {
   phase "phase 5: seed pull secrets"
 
   # Resolve KUBECTL — needed when invoked standalone via
-  # --seed-pull-secrets-only on a host where /usr/local/bin/kubectl was
+  # --only seed-pull-secrets on a host where /usr/local/bin/kubectl was
   # never installed (k0s ships its own).
   if [ "${#KUBECTL[@]}" -eq 0 ]; then
     if command -v kubectl >/dev/null 2>&1; then
@@ -1212,10 +1254,19 @@ dev_mounts() {
 # ---- phase 6.5: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
-# the admin password to "1984" by writing a bcrypt hash into
-# argocd-secret. Done as a script step rather than via `argocd account
-# update-password` so we don't need a port-forward + login round-trip.
-ARGOCD_ADMIN_PASSWORD="${ARGOCD_ADMIN_PASSWORD:-1984}"
+# the admin password by writing a bcrypt hash into argocd-secret. Done
+# as a script step rather than via `argocd account update-password` so
+# we don't need a port-forward + login round-trip.
+#
+# Password source:
+#   1. Interactive TTY → prompt twice (echo off), default to "1984" on
+#      empty input (first bringup convenience).
+#   2. Non-interactive (no TTY, e.g. CI / piped) → use "1984".
+#
+# Deliberately no env-var override: typing a secret on the command line
+# leaks it to shell history and ps listings. `--only argocd-admin`
+# inherits a TTY, so password rotation prompts as expected.
+_argocd_default_password="1984"
 
 argocd_admin() {
   if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 6.5: argocd admin  (skipped)"; return; fi
@@ -1273,12 +1324,44 @@ argocd_admin() {
     fi
   fi
 
-  # 2) reset admin password by patching argocd-secret
+  # 2) acquire the password (prompt if interactive, default otherwise)
+  local pw=""
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  patch argocd-secret with bcrypt(admin password '$ARGOCD_ADMIN_PASSWORD')"
+    pw="$_argocd_default_password"
+    info "DRY-RUN  prompt for admin password (would default to '$pw' on empty input)"
+    info "DRY-RUN  patch argocd-secret with bcrypt(\$pw)"
     return
   fi
 
+  if [ -t 0 ] && [ -t 2 ]; then
+    local pw_a pw_b
+    while :; do
+      printf '  argocd admin password [%s]: ' "$_argocd_default_password" >&2
+      stty -echo 2>/dev/null || true
+      IFS= read -r pw_a || pw_a=""
+      stty echo 2>/dev/null || true
+      printf '\n' >&2
+      pw_a="${pw_a:-$_argocd_default_password}"
+
+      printf '  confirm: ' >&2
+      stty -echo 2>/dev/null || true
+      IFS= read -r pw_b || pw_b=""
+      stty echo 2>/dev/null || true
+      printf '\n' >&2
+      pw_b="${pw_b:-$_argocd_default_password}"
+
+      if [ "$pw_a" = "$pw_b" ]; then
+        pw="$pw_a"
+        break
+      fi
+      printf '  passwords do not match — try again\n' >&2
+    done
+  else
+    pw="$_argocd_default_password"
+    info "non-interactive shell — using default admin password"
+  fi
+
+  # 3) reset admin password by patching argocd-secret
   if [ ${#KUBECTL[@]} -eq 0 ]; then
     fail "no kubectl/k0s available — cannot patch argocd-secret"
     return
@@ -1296,17 +1379,17 @@ argocd_admin() {
     apt-get install -y apache2-utils >/dev/null 2>&1 || true
   fi
   if ! command -v htpasswd >/dev/null 2>&1; then
-    fail "htpasswd unavailable — install apache2-utils manually and re-run with --skip-* flags up to phase 6.5"
+    fail "htpasswd unavailable — install apache2-utils manually and re-run --only argocd-admin"
     return
   fi
 
   local hash mtime
-  hash=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
+  hash=$(htpasswd -nbBC 10 "" "$pw" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
   mtime=$(date +%FT%T%Z)
 
   if "${KUBECTL[@]}" -n argocd patch secret argocd-secret --type merge \
        -p "{\"stringData\":{\"admin.password\":\"$hash\",\"admin.passwordMtime\":\"$mtime\"}}" >/dev/null; then
-    pass "argocd admin password set to '$ARGOCD_ADMIN_PASSWORD'"
+    pass "argocd admin password updated"
     # initial-admin-secret is no longer authoritative once admin.password
     # is rotated. Drop it so future operators don't try to use it.
     "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret --ignore-not-found >/dev/null 2>&1 || true
@@ -1397,24 +1480,10 @@ validate() {
 
 # ---- main ---------------------------------------------------------------
 
-# Standalone mode: only seed pull secrets, then exit. Used to fix an
-# already-running cluster whose pods are stuck in ImagePullBackOff.
-if [ "$SEED_PULL_SECRETS_ONLY" = 1 ]; then
-  cat <<EOF
-bootstrap-robot.sh — seed-pull-secrets-only $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
-repo: $REPO_ROOT
-namespaces: ${PULL_SECRET_NAMESPACES[*]}
-source:    $([ -n "$DOCKERHUB_SECRET_FILE" ] && echo "$DOCKERHUB_SECRET_FILE" || echo "~/.docker/config.json (default), then phantom/$PULL_SECRET_NAME")
-EOF
-  seed_pull_secrets
-  summary
-  exit "$FAIL"
-fi
-
 cat <<EOF
-bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
+bootstrap-robot.sh — robot=${ROBOT:-<not required for --only $ONLY_PHASE>} $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin, 6.7-image-overrides, 6.8-dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
+phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || ([ -n "$ONLY_PHASE" ] && echo "ONLY $ONLY_PHASE") || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 5.5-pairing, 6-gitops, 6.5-argocd-admin, 6.7-image-overrides, 6.8-dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
 flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_pairing=$SKIP_PAIRING skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_image_overrides=$SKIP_IMAGE_OVERRIDES skip_dev_mounts=$SKIP_DEV_MOUNTS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 host-config: $([ -r "$HOST_CONFIG_FILE" ] && echo "$HOST_CONFIG_FILE" || echo "<not present — using flag values, no image overrides>")
 ai_pc_url: ${AI_PC_URL:-<from $PAIRING_FILE>}
@@ -1444,9 +1513,9 @@ fi
 preflight          ; guard
 
 # Persist the resolved robot identity to /etc/phantomos/robot so future
-# script runs on this host don't need --robot. Skipped in dry-run and
-# in --seed-pull-secrets-only mode (no robot context).
-if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ "$DRY_RUN" = 0 ] && [ -n "${ROBOT:-}" ]; then
+# script runs on this host don't need --robot. Skipped in dry-run, and
+# when --only ran a phase that doesn't require a robot.
+if [ "$DRY_RUN" = 0 ] && [ -n "${ROBOT:-}" ]; then
   if persist_robot "$ROBOT"; then
     pass "robot identity persisted: $ROBOT_ID_FILE -> $ROBOT"
   else
