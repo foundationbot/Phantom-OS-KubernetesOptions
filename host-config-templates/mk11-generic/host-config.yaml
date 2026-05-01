@@ -2,6 +2,7 @@
 # in manifests/robots/mk11-generic/kustomization.yaml + operator-ui-env.
 robot: mk11-generic
 aiPcUrl: http://100.85.53.56:5000
+targetRevision: main
 images:
   - name: localhost:5443/positronic-control
     newTag: 0.2.44-cu130

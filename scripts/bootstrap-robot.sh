@@ -131,9 +131,16 @@
 #                   the existing local file. Rolls out operator-ui if
 #                   the value changed.
 #   6. gitops       cd terraform && terraform init && terraform apply
-#                   (installs ArgoCD via the official Helm chart and
-#                   applies gitops/root-app.yaml — the canonical path).
-#                   Wait for phantomos-<robot> to reach Synced + Healthy.
+#                   (installs ArgoCD via the official Helm chart). Then
+#                   render the per-host Application CR from
+#                   host-config-templates/_template/phantomos-app.yaml.tpl
+#                   into /etc/phantomos/phantomos-app.yaml using the
+#                   resolved robot identity, repo URL, and
+#                   targetRevision (from host-config.yaml, default
+#                   'main'), and kubectl-apply it. Migrates away from
+#                   any pre-existing root-app + child-app topology
+#                   without pruning workload state. The repo carries no
+#                   per-robot Application files; that data is per-host.
 #   6.5 argocd admin install argocd CLI (latest release) under
 #                   /usr/local/bin/argocd and reset the admin password
 #                   to "1984" by patching argocd-secret with a bcrypt
@@ -883,14 +890,82 @@ pairing() {
 
 # ---- phase 6: gitops ----------------------------------------------------
 
+# Phase 6 has two pieces:
+#   6a. terraform install of argocd Helm chart
+#   6b. render the per-host Application CR from
+#       host-config-templates/_template/phantomos-app.yaml.tpl using
+#       robot id + repoURL + targetRevision (from host-config or
+#       default 'main'), apply it to the cluster.
+#
+# The repo carries no per-robot Application files. The Application CR
+# is per-host state, generated and applied by this phase. Migration
+# from the old root-app + child-app design is handled inline (see
+# _gitops_migrate_from_root_app).
+APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_template/phantomos-app.yaml.tpl}"
+RENDERED_APP_FILE="${RENDERED_APP_FILE:-/etc/phantomos/phantomos-app.yaml}"
+DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
+DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
+
+# Old design (now replaced): a `root` Application reconciled
+# gitops/apps/<robot>/phantomos-<robot>.yaml files. On clusters that
+# still have that structure live, we tear it down before applying the
+# new direct Application — but without pruning workload resources.
+_gitops_migrate_from_root_app() {
+  local nsdone=0
+  if "${KUBECTL[@]}" -n argocd get app root >/dev/null 2>&1; then
+    info "found legacy 'root' Application — migrating away from app-of-apps"
+    # Remove the finalizer so deleting root doesn't cascade-prune
+    # children + their workloads. We will apply a fresh phantomos-$ROBOT
+    # Application immediately afterwards, so workloads stay continuous.
+    "${KUBECTL[@]}" -n argocd patch app root \
+      --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+    "${KUBECTL[@]}" -n argocd delete app root --wait=false >/dev/null 2>&1 || true
+    nsdone=1
+  fi
+  # Drop any phantomos-<other-robot> Applications left from the
+  # app-of-apps era. Keep the one matching this host.
+  local apps app
+  apps=$("${KUBECTL[@]}" -n argocd get app -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  while IFS= read -r app; do
+    [ -z "$app" ] && continue
+    case "$app" in
+      "phantomos-$ROBOT") continue ;;
+      phantomos-*)
+        info "removing stale legacy Application: $app"
+        "${KUBECTL[@]}" -n argocd patch app "$app" \
+          --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+        "${KUBECTL[@]}" -n argocd delete app "$app" --wait=false >/dev/null 2>&1 || true
+        nsdone=1
+        ;;
+    esac
+  done <<< "$apps"
+  [ "$nsdone" = 1 ] && pass "legacy app-of-apps cleanup complete"
+}
+
+# Render the Application CR template into RENDERED_APP_FILE for this
+# host. Substitutions are simple sed because the template values are
+# repo-controlled (no shell injection surface from operator input).
+_gitops_render_app() {
+  local repo_url="${1:?repo_url required}"
+  local target_rev="${2:?target_rev required}"
+
+  if [ ! -r "$APP_TEMPLATE_FILE" ]; then
+    fail "Application CR template not found: $APP_TEMPLATE_FILE"
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$RENDERED_APP_FILE")"
+  sed \
+    -e "s#{{ROBOT}}#$ROBOT#g" \
+    -e "s#{{REPO_URL}}#$repo_url#g" \
+    -e "s#{{TARGET_REVISION}}#$target_rev#g" \
+    "$APP_TEMPLATE_FILE" > "$RENDERED_APP_FILE"
+  chmod 0644 "$RENDERED_APP_FILE"
+}
+
 gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 6: gitops  (skipped)"; return; fi
-  phase "phase 6: gitops (terraform)"
-
-  if [ ! -f "$REPO_ROOT/gitops/apps/$ROBOT/phantomos-$ROBOT.yaml" ]; then
-    fail "gitops/apps/$ROBOT/phantomos-$ROBOT.yaml not in repo — create it before re-running"
-    return
-  fi
+  phase "phase 6: gitops (install argocd + apply per-host Application)"
 
   if [ ! -d "$REPO_ROOT/terraform" ]; then
     fail "terraform/ not found at $REPO_ROOT/terraform"; return
@@ -905,8 +980,24 @@ gitops() {
     fail "$kc not readable — phase 3 (cluster) should have written it"; return
   fi
 
+  # Resolve targetRevision: --host-config wins, then explicit override
+  # via DEFAULT_TARGET_REVISION env, then 'main'.
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  local target_rev="$DEFAULT_TARGET_REVISION"
+  if [ -r "$hc" ]; then
+    if hc_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null)"; then
+      target_rev="$hc_rev"
+    fi
+  fi
+
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
+    info "DRY-RUN  render $APP_TEMPLATE_FILE -> $RENDERED_APP_FILE"
+    info "DRY-RUN    ROBOT=$ROBOT  REPO_URL=$DEFAULT_REPO_URL  TARGET_REVISION=$target_rev"
+    info "DRY-RUN  kubectl apply -f $RENDERED_APP_FILE"
     info "DRY-RUN  wait for phantomos-$ROBOT  Synced + Healthy"
     return
   fi
@@ -928,7 +1019,22 @@ gitops() {
     cd "$REPO_ROOT/terraform" || exit 2
     terraform apply -input=false -auto-approve -var="kubeconfig=$kc"
   ) || { fail "terraform apply"; return; }
-  pass "terraform apply"
+  pass "terraform apply (argocd Helm install)"
+
+  # Migrate from the old root-app + child-app topology if present.
+  _gitops_migrate_from_root_app
+
+  # Render and apply the per-host Application CR.
+  if ! _gitops_render_app "$DEFAULT_REPO_URL" "$target_rev"; then
+    return
+  fi
+  pass "rendered $RENDERED_APP_FILE  robot=$ROBOT  branch=$target_rev"
+
+  if ! "${KUBECTL[@]}" apply -f "$RENDERED_APP_FILE" >/dev/null; then
+    fail "kubectl apply -f $RENDERED_APP_FILE"
+    return
+  fi
+  pass "phantomos-$ROBOT applied"
 
   info "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
   local sync health

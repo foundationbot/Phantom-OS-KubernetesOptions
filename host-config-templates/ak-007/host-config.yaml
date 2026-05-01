@@ -2,6 +2,7 @@
 # manifests/robots/ak-007/kustomization.yaml + operator-ui-env.yaml patch.
 robot: ak-007
 aiPcUrl: http://100.85.53.56:5000
+targetRevision: main
 images:
   - name: localhost:5443/positronic-control
     newTag: 0.2.44-production-cu130

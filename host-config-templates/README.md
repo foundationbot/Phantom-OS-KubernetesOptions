@@ -5,24 +5,35 @@
 > file is reference material for the templates themselves.
 
 Per-host configuration that ArgoCD intentionally does **not** manage.
-Files in this tree are templates — they are not deployed by the
-`gitops/` app-of-apps and not referenced by any `kustomization.yaml`.
+Files in this tree are templates — they are not deployed by ArgoCD and
+not referenced by any `kustomization.yaml`.
 
 The bootstrap script (`scripts/bootstrap-robot.sh`) reads from and writes
 to `/etc/phantomos/` on the host. These templates are the canonical
 "copy-this-to-/etc/phantomos/" defaults for each known robot, plus a
 generic `_template/` for new robots.
 
+> The per-robot directories in this folder are a **stepping stone**.
+> The long-term plan is a fleet control plane that holds per-device config
+> indexed by robot serial — see [`../docs/rfcs/0001-fleet-control-plane.md`](../docs/rfcs/0001-fleet-control-plane.md).
+> Once that lands the per-robot directories here disappear; only
+> `_template/` remains as the schema reference.
+
 ## Single source of truth: `host-config.yaml`
 
 Each robot's directory contains a `host-config.yaml` describing its
-identity, AI PC pairing, and image tag overrides. Bootstrap reads this
-file and:
+identity, AI PC pairing, image tag overrides, and (optionally) dev
+mounts. Bootstrap reads this file and:
 
 - writes `robot:` to `/etc/phantomos/robot`
 - renders `/etc/phantomos/operator-ui-pairing.yaml` from `aiPcUrl:`
+- renders `/etc/phantomos/phantomos-app.yaml` (the ArgoCD Application
+  CR for this host) from `_template/phantomos-app.yaml.tpl` using
+  `robot:` + `targetRevision:`
 - patches the live `phantomos-<robot>` Argo Application's
   `spec.source.kustomize.images` from the `images:` list
+- (if `devMode:` is present) injects the strategic-merge patch into
+  `spec.source.kustomize.patches`
 
 The matching `operator-ui-pairing.yaml` template is kept as a fallback
 for partial migrations (Stage A only).

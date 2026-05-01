@@ -5,6 +5,7 @@
 # to bootstrap-robot.sh via `--host-config`.
 robot: mk09
 aiPcUrl: http://100.124.202.97:5000
+targetRevision: feat/mk09-positronic-0.2.44-production
 images:
   - name: localhost:5443/positronic-control
     newTag: 0.2.44-production-cu130

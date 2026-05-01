@@ -211,6 +211,9 @@ def cmd_validate(cfg: dict) -> int:
     ai_pc = cfg.get("aiPcUrl") or ""
     if ai_pc and not (ai_pc.startswith("http://") or ai_pc.startswith("https://")):
         errors.append(f"'aiPcUrl' must start with http:// or https:// (got: {ai_pc!r})")
+    target_rev = cfg.get("targetRevision") or ""
+    if target_rev and not isinstance(target_rev, str):
+        errors.append(f"'targetRevision' must be a string (got: {target_rev!r})")
     images = cfg.get("images") or []
     if not isinstance(images, list):
         errors.append("'images' must be a list")

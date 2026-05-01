@@ -14,6 +14,11 @@ robot: REPLACE-WITH-ROBOT-NAME
 # /etc/phantomos/operator-ui-pairing.yaml from this value.
 aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
 
+# Optional. Branch / tag / SHA the per-host ArgoCD Application should
+# track. Bootstrap substitutes this into
+# /etc/phantomos/phantomos-app.yaml at bringup. Default: main.
+targetRevision: main
+
 # Per-host kustomize image overrides. Bootstrap injects this list into
 # the live phantomos-<robot> Argo Application's
 # spec.source.kustomize.images. The list overrides anything declared in

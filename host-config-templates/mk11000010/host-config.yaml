@@ -3,6 +3,7 @@
 # point.
 robot: mk11000010
 aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
+targetRevision: feat/per-host-pairing-and-robot-id
 images:
   - name: localhost:5443/positronic-control
     newTag: 0.2.44-production-cu130

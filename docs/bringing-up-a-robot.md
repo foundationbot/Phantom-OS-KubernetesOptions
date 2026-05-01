@@ -437,15 +437,19 @@ For a deeper troubleshooting tour, see [`trouble-shooting-guide.md`](./trouble-s
 
 | Path | What it is |
 |---|---|
-| `/etc/phantomos/host-config.yaml` | Single per-host config file (robot id, AI PC URL, image tags). The thing you edit. |
+| `/etc/phantomos/host-config.yaml` | Single per-host config file (robot id, AI PC URL, image tags, target branch, dev mode). The thing you edit. |
 | `/etc/phantomos/robot` | One-line file with the robot name. Auto-written by bootstrap. |
 | `/etc/phantomos/operator-ui-pairing.yaml` | ConfigMap manifest derived from `aiPcUrl`. Auto-written. |
+| `/etc/phantomos/phantomos-app.yaml` | ArgoCD Application CR for THIS robot, rendered from `host-config-templates/_template/phantomos-app.yaml.tpl`. Auto-written. |
 | `/var/lib/k0s-data/` | Database hostPath volumes (mongodb, redis, postgres). Survives `--reset`. |
 | `/var/lib/registry/` | Local Docker registry storage. Survives `--reset`. |
-| `host-config-templates/<robot>/host-config.yaml` | In-repo templates with each known robot's values. |
+| `host-config-templates/<robot>/host-config.yaml` | In-repo templates with each known robot's values (used to seed the wizard). |
+| `host-config-templates/_template/phantomos-app.yaml.tpl` | Application CR template — bootstrap fills in robot/repo/branch and applies. |
 | `scripts/configure-host.sh` | Interactive wizard for the host-config file. |
 | `scripts/bootstrap-robot.sh` | Cluster bringup + apply config. |
 | `manifests/robots/<robot>/` | Per-robot Kustomize overlay. Owned by the team, not by you. |
+
+> The repo no longer carries `gitops/apps/<robot>/phantomos-<robot>.yaml` files. The Application CR is per-host (lives only on the cluster, never in git). See [`rfcs/0001-fleet-control-plane.md`](rfcs/0001-fleet-control-plane.md) for the longer-term direction.
 
 ---
 
