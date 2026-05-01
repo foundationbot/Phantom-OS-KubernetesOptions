@@ -4,6 +4,20 @@ Kubernetes manifests that run the three PhantomOS stacks — **dma-video**, **ar
 
 This repo is the source of truth for ArgoCD: if it's in `manifests/`, it should be running on the robot.
 
+## Bringing up a robot
+
+If you just want to bring a robot online, the layman walkthrough is in
+[`docs/bringing-up-a-robot.md`](docs/bringing-up-a-robot.md). Two
+commands:
+
+```bash
+sudo bash scripts/configure-host.sh    # interactive wizard
+sudo bash scripts/bootstrap-robot.sh   # cluster + GitOps + apply config
+```
+
+The rest of this README is reference material on the manifests, k0s
+choices, and registry setup.
+
 ---
 
 ## What you're looking at

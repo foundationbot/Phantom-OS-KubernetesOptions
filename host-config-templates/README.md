@@ -1,5 +1,9 @@
 # Host config templates
 
+> **New here?** Start with the layman walkthrough at
+> [`docs/bringing-up-a-robot.md`](../docs/bringing-up-a-robot.md). This
+> file is reference material for the templates themselves.
+
 Per-host configuration that ArgoCD intentionally does **not** manage.
 Files in this tree are templates — they are not deployed by the
 `gitops/` app-of-apps and not referenced by any `kustomization.yaml`.
