@@ -22,19 +22,10 @@ NAMESPACE="${NAMESPACE:-positronic}"
 APP_LABEL="${APP_LABEL:-app=positronic-control}"
 REGISTRY="${REGISTRY:-localhost:5443}"
 
-# Resolve robot identity via the shared helper (honors --robot, then
-# /etc/phantomos/robot, then hostname). Only used if OVERLAY is unset.
-if [ -z "${OVERLAY:-}" ]; then
-  REPO_ROOT="$REPO"
-  # shellcheck source=lib/robot-id.sh
-  . "$(dirname "$0")/lib/robot-id.sh"
-  if _robot="$(resolve_robot "${ROBOT:-}")"; then
-    OVERLAY="${REPO}/manifests/robots/${_robot}"
-  else
-    echo "error: could not resolve robot — set OVERLAY or ROBOT explicitly" >&2
-    exit 2
-  fi
-fi
+# positronic-control lives in the `core` stack. The OVERLAY env var
+# can override (e.g. point at a custom kustomize tree) but the default
+# is no longer per-robot.
+OVERLAY="${OVERLAY:-${REPO}/manifests/stacks/core}"
 
 # kubectl resolution — robot has only `k0s kubectl`, laptops may have either.
 KUBECTL=""
@@ -151,8 +142,9 @@ if [ "$placeholder_in_render" = true ]; then
   echo "  to:"
   echo "      reference: localhost:5443/phantom-models:<your-tag>"
   echo
-  echo "  Then in manifests/robots/mk09/kustomization.yaml, drop the"
-  echo "  positronic-models-image patch entry and delete the patch file."
+  echo "  Image tag overrides now come from /etc/phantomos/host-config.yaml's"
+  echo "  images: list — bump the tag there and run:"
+  echo "      sudo bash scripts/bootstrap-robot.sh --image-overrides"
 fi
 
 if [ "${#problems[@]}" -eq 0 ]; then

@@ -7,16 +7,18 @@
 #   sudo bash scripts/bootstrap-robot.sh --robot <name> [flags]
 #
 # Required (first bringup only):
-#   --robot <name>     Robot identifier; must match a directory under
-#                      manifests/robots/ (e.g. ak-007, mk09). Also the
-#                      Application name expected at
-#                      gitops/apps/<name>/phantomos-<name>.yaml.
+#   --robot <name>     Robot identifier. Must be DNS-1123 (lowercase
+#                      alphanumeric + hyphens, 1..63 chars, bookended
+#                      by alphanumeric) — it flows into Argo
+#                      Application metadata.name (phantomos-<robot>-core,
+#                      phantomos-<robot>-operator, ...). No filesystem
+#                      check; operators choose names.
 #                      On first bringup the value is persisted to
 #                      /etc/phantomos/robot; subsequent runs (and other
 #                      scripts like positronic.sh) read that file and
 #                      no longer require --robot. The flag still wins
-#                      when supplied — pass it again to retarget the
-#                      host to a different overlay.
+#                      when supplied — pass it again to retarget this
+#                      host to a different identity.
 #
 # Flags:
 # Per-phase opt-in flags. With NONE of these on the command line,

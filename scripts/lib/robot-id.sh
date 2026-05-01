@@ -9,15 +9,21 @@
 # Resolution order (first hit wins):
 #   1. explicit name passed in by the caller (their --robot flag value)
 #   2. /etc/phantomos/robot                  — written by bootstrap
-#   3. $(hostname) if it matches manifests/robots/<name>/
+#   3. /etc/phantomos/host-config.yaml's `robot:` field
+#   4. $(hostname) if it looks like a valid robot name
 #
-# If none resolve and the caller is not running interactively, callers
-# should fail with the message produced by resolve_robot.
+# A "valid robot name" is DNS-1123: lowercase alphanumeric + hyphens,
+# 1..63 chars, starting and ending with alphanumeric. The name flows
+# into Argo Application metadata.name (e.g. phantomos-mk09-core), which
+# Kubernetes requires to be DNS-1123. There is NO filesystem check —
+# robot identity is no longer tied to a manifests/robots/<name>/ tree.
+# Operators choose names; no central registry beyond the host file.
 #
 # Required globals before sourcing:
 #   REPO_ROOT   absolute path to the Phantom-OS-KubernetesOptions repo
 # Optional:
-#   ROBOT_ID_FILE   override the default /etc/phantomos/robot path
+#   ROBOT_ID_FILE       override the default /etc/phantomos/robot path
+#   HOST_CONFIG_FILE    override the default /etc/phantomos/host-config.yaml path
 
 ROBOT_ID_FILE="${ROBOT_ID_FILE:-/etc/phantomos/robot}"
 
@@ -26,6 +32,15 @@ ROBOT_ID_FILE="${ROBOT_ID_FILE:-/etc/phantomos/robot}"
 # Echoes the resolved robot name to stdout. Returns 0 on success, 1 on
 # failure (no name resolved or overlay dir missing). On failure, prints
 # a diagnostic to stderr — caller should exit.
+HOST_CONFIG_FILE_DEFAULT="${HOST_CONFIG_FILE:-/etc/phantomos/host-config.yaml}"
+
+# DNS-1123: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
+_robot_name_valid() {
+  local v="$1"
+  [ -z "$v" ] && return 1
+  printf '%s' "$v" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+}
+
 resolve_robot() {
   local flag="${1:-}"
   local name=""
@@ -34,33 +49,34 @@ resolve_robot() {
     name="$flag"
   elif [ -r "$ROBOT_ID_FILE" ]; then
     name="$(head -n1 "$ROBOT_ID_FILE" | tr -d '[:space:]')"
-  else
-    local hn
-    hn="$(hostname 2>/dev/null || true)"
-    if [ -n "$hn" ] && [ -d "${REPO_ROOT:?REPO_ROOT must be set}/manifests/robots/$hn" ]; then
-      name="$hn"
-    fi
+  elif [ -r "$HOST_CONFIG_FILE_DEFAULT" ] \
+       && command -v python3 >/dev/null 2>&1 \
+       && [ -f "${REPO_ROOT:?REPO_ROOT must be set}/scripts/lib/host-config.py" ]; then
+    name="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
+              "$HOST_CONFIG_FILE_DEFAULT" get robot 2>/dev/null || true)"
   fi
 
-  # Robot overlay directories are lowercase by convention. Normalize
-  # so --robot MK11000010 and --robot mk11000010 both work.
+  if [ -z "$name" ]; then
+    local hn
+    hn="$(hostname 2>/dev/null || true)"
+    if [ -n "$hn" ]; then name="$hn"; fi
+  fi
+
+  # Robot names are lowercase by convention. Normalize so --robot
+  # MK11000010 and --robot mk11000010 both work.
   name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
 
   if [ -z "$name" ]; then
-    local available
-    available="$(ls -1 "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
     printf 'error: could not determine robot identity.\n' >&2
-    printf '  no --robot flag, %s missing, hostname does not match an overlay.\n' "$ROBOT_ID_FILE" >&2
-    printf '  available overlays: %s\n' "${available:-<none>}" >&2
+    printf '  no --robot flag, %s missing, host-config.yaml empty, hostname empty.\n' "$ROBOT_ID_FILE" >&2
     printf '  first bringup: re-run with --robot <name> to persist.\n' >&2
     return 1
   fi
 
-  if [ ! -d "$REPO_ROOT/manifests/robots/$name" ]; then
-    local available
-    available="$(ls -1 "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
-    printf 'error: manifests/robots/%s/ not found — typo? available: %s\n' \
-      "$name" "${available:-<none>}" >&2
+  if ! _robot_name_valid "$name"; then
+    printf 'error: robot name %q is not DNS-1123.\n' "$name" >&2
+    printf '  rules: lowercase alphanumeric and hyphens; 1..63 chars;\n' >&2
+    printf '  must start and end with alphanumeric.\n' >&2
     return 1
   fi
 

@@ -73,7 +73,7 @@ sudo bash scripts/bootstrap-robot.sh
 See `_template/host-config.yaml` for the annotated reference. In short:
 
 ```yaml
-robot: <name>                      # required, must match manifests/robots/<name>
+robot: <name>                      # required, DNS-1123 (lowercase alnum + hyphens)
 aiPcUrl: http://<host>:<port>      # required for operator-ui pairing
 targetRevision: main               # optional, ArgoCD branch/tag/SHA to track
 

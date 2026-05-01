@@ -2,34 +2,52 @@
 #
 # Copy to /etc/phantomos/host-config.yaml (or pass to bootstrap with
 # `--host-config`) and replace placeholder values. This is the single
-# source-of-truth for per-host config — bootstrap derives everything
-# else (operator-ui-pairing ConfigMap, Argo Application image overrides,
-# /etc/phantomos/robot) from this file.
+# source-of-truth for per-host config — bootstrap derives the rendered
+# Argo Application CRs (one per stack), the operator-ui-pairing
+# ConfigMap, and the persisted robot-id file from this single file.
 
-# Robot identity. Must match a directory under manifests/robots/ in
-# the deployed branch.
+# Robot identity. DNS-1123: lowercase alphanumeric + hyphens, 1..63
+# chars, bookended by alphanumeric. Used in Argo Application names
+# (phantomos-<robot>-core, phantomos-<robot>-operator, ...).
 robot: REPLACE-WITH-ROBOT-NAME
 
 # Tailscale URL of the AI PC paired with this robot. Bootstrap renders
 # /etc/phantomos/operator-ui-pairing.yaml from this value.
 aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
 
-# Optional. Branch / tag / SHA the per-host ArgoCD Application should
-# track. Bootstrap substitutes this into
-# /etc/phantomos/phantomos-app.yaml at bringup. Default: main.
+# Optional. Branch / tag / SHA the per-host ArgoCD Applications should
+# track. Bootstrap substitutes this into every rendered Application CR
+# at bringup. Default: main.
 targetRevision: main
 
-# Optional. Production mode. When true, ArgoCD auto-reverts manual
-# cluster edits (selfHeal). When false (default), drift is reported
-# but not corrected — useful for dev / debug machines where on-call
-# might `kubectl edit` resources during incidents. The --production
-# CLI flag overrides this for the current bootstrap run.
+# Optional. Global production mode. When true, ArgoCD auto-reverts
+# manual cluster edits (selfHeal: true) on every stack that doesn't
+# override it under stacks.<name>.selfHeal. When false (default), drift
+# is reported but not corrected — useful for dev/debug machines where
+# on-call might `kubectl edit` resources during incidents.
+# CLI override: --production / --no-production.
 production: false
 
-# Per-host kustomize image overrides. Bootstrap injects this list into
-# the live phantomos-<robot> Argo Application's
-# spec.source.kustomize.images. The list overrides anything declared in
-# manifests/robots/<robot>/kustomization.yaml's images block.
+# Stack toggles + per-stack selfHeal overrides.
+#
+#   stacks.core      always required; cannot be disabled.
+#   stacks.operator  argus + nimbus (operator UI, episode storage).
+#                    Toggle the whole group with enabled: false.
+#
+# Each stack's selfHeal: field is optional. When set, it overrides the
+# top-level production: flag for that stack only — useful when you want
+# the robot in production mode but the operator UI tolerant of manual
+# debugging, or vice-versa.
+stacks:
+  core:
+    # selfHeal: true        # uncomment to override production:
+  operator:
+    enabled: true
+    # selfHeal: false       # uncomment to leave drift alone
+
+# Per-host kustomize image overrides. Bootstrap injects each entry
+# into the live Argo Application that owns the matching image. The
+# list overrides anything declared in manifests/stacks/<stack>/.
 #
 # `name` is the image reference declared in the Deployment manifest;
 # `newTag` is the tag this robot should pull. `newName` is optional.
@@ -43,9 +61,9 @@ images:
 
 # Optional: dev-mode hostPath mounts. Only set this on developer
 # machines. Bootstrap injects a strategic-merge patch into the live
-# Argo Application; ArgoCD will not revert it. Leaving the block out
-# (or commenting it) reverts the robot to a clean production topology
-# the next time bootstrap runs.
+# core stack's Argo Application; ArgoCD will not revert it. Leaving
+# the block out (or commenting it) reverts the robot to a clean
+# production topology the next time bootstrap runs.
 #
 # Rules:
 #   - Paths must be ABSOLUTE. '~' is rejected (bootstrap runs as root).

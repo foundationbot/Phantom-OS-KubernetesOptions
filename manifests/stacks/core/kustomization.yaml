@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Core stack — workloads required for the robot to function.
+# Touches local hardware (cameras, GPU, registry mirror) so this set
+# always runs on the robot. The `core` entry under stacks: in
+# /etc/phantomos/host-config.yaml is non-optional; bootstrap rejects
+# attempts to disable it.
+#
+# Image tag and dev-mount overrides come from the host's
+# /etc/phantomos/host-config.yaml at bringup; bootstrap injects them
+# into the live phantomos-<robot>-core Argo Application's
+# spec.source.kustomize.{images,patches}. Nothing per-host lives here.
+commonLabels:
+  app.kubernetes.io/part-of: phantomos
+  phantomos.foundation.bot/stack: core
+resources:
+  - ../../base/runtime-classes
+  - ../../base/registry
+  - ../../base/dma-video
+  - ../../base/positronic
+  - ../../base/phantomos-api-server
+  - ../../base/yovariable-server

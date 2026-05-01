@@ -52,8 +52,10 @@ if [ -z "${OVERLAY:-}" ] || [ -z "${ARGOCD_APP:-}" ]; then
   # shellcheck source=lib/robot-id.sh
   . "$(dirname "$0")/lib/robot-id.sh"
   if _robot="$(resolve_robot "${ROBOT:-}")"; then
-    OVERLAY="${OVERLAY:-${REPO}/manifests/robots/${_robot}}"
-    ARGOCD_APP="${ARGOCD_APP:-phantomos-${_robot}}"
+    # positronic-control lives in the `core` stack post-restructure.
+    OVERLAY="${OVERLAY:-${REPO}/manifests/stacks/core}"
+    # positronic-control lives in the per-robot core stack.
+    ARGOCD_APP="${ARGOCD_APP:-phantomos-${_robot}-core}"
   else
     echo "error: could not resolve robot — set OVERLAY and ARGOCD_APP, or ROBOT" >&2
     exit 2

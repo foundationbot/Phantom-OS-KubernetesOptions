@@ -158,7 +158,7 @@ echo "==> done."
 echo "Next steps:"
 echo "  1. Wait ~30s for k0s to come back up."
 echo "  2. Apply the RuntimeClass + updated positronic-control:"
-echo "     k0s kubectl apply -k manifests/robots/<robot>/"
+echo "     k0s kubectl apply -k manifests/stacks/core/"
 echo "  3. APPLY=1 bash scripts/diagnose-positronic.sh"
 echo
 echo "If a pod still says 'NVIDIA Driver was not detected', check:"

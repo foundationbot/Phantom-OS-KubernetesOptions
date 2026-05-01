@@ -60,7 +60,8 @@ _resolve_robot() {
   ROBOT="$resolved"
 
   # Derived paths (still env-overridable).
-  OVERLAY="${OVERLAY:-${REPO}/manifests/robots/${ROBOT}}"
+  # positronic-control lives in the `core` stack post-restructure.
+  OVERLAY="${OVERLAY:-${REPO}/manifests/stacks/core}"
   TRACK_APP_FILE="${TRACK_APP_FILE:-${REPO}/gitops/apps/${ROBOT}/phantomos-${ROBOT}.yaml}"
   ARGO_APP="${ARGO_APP:-phantomos-${ROBOT}}"
 }
@@ -207,7 +208,7 @@ ${C_BOLD}Subcommands:${C_RESET}
 
 ${C_BOLD}Global flags:${C_RESET}
   --robot <name>               Robot identifier (matches a directory under
-                               manifests/robots/). Auto-detected from
+                               metadata.name suffix. Auto-detected from
                                hostname when omitted; prompts if ambiguous.
   --dry-run                    Print kubectl commands instead of running
                                them. Useful for review.
@@ -216,7 +217,7 @@ ${C_BOLD}Env overrides:${C_RESET}
   ROBOT            (default: auto-detected from hostname)
   NAMESPACE        (default: $NAMESPACE)
   APP_LABEL        (default: $APP_LABEL)
-  OVERLAY          (default: \$REPO/manifests/robots/\$ROBOT)
+  OVERLAY          (default: \$REPO/manifests/stacks/core)
   CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
   IMAGE_NAME       (default: $IMAGE_NAME)
   TRACK_APP_FILE   (default: \$REPO/gitops/apps/\$ROBOT/phantomos-\$ROBOT.yaml)

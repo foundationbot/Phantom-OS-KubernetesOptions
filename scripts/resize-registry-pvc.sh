@@ -31,7 +31,7 @@
 #   PVC_NAME      default: k0s-registry-pvc
 #   PV_NAME       default: k0s-registry-pv
 #   HOST_PATH     default: /var/lib/registry
-#   OVERLAY_DIR   default: <repo>/manifests/robots/mk09
+#   OVERLAY_DIR   default: <repo>/manifests/stacks/core
 #   REGISTRY_HOST default: localhost:5443
 #
 # Idempotent: if the PVC already reports the target size, the script
@@ -56,7 +56,7 @@ if [ -z "${OVERLAY_DIR:-}" ]; then
   # shellcheck source=lib/robot-id.sh
   . "$(dirname "$0")/lib/robot-id.sh"
   if _robot="$(resolve_robot "${ROBOT:-}")"; then
-    OVERLAY_DIR="${REPO}/manifests/robots/${_robot}"
+    OVERLAY_DIR="${REPO}/manifests/stacks/core"
   else
     echo "error: could not resolve robot — set OVERLAY_DIR or ROBOT" >&2
     exit 2
@@ -106,7 +106,7 @@ Environment-variable overrides:
   PVC_NAME          (default ${PVC_NAME})
   PV_NAME           (default ${PV_NAME})
   HOST_PATH         (default ${HOST_PATH})
-  OVERLAY_DIR       (default <repo>/manifests/robots/mk09)
+  OVERLAY_DIR       (default <repo>/manifests/stacks/core)
   REGISTRY_HOST     (default ${REGISTRY_HOST})
 
 Examples:

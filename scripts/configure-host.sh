@@ -274,10 +274,13 @@ validate_robot() {
   local lower
   lower="$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
   if [ -z "$v" ]; then err "robot name required"; return 1; fi
-  if [ ! -d "$REPO_ROOT/manifests/robots/$lower" ]; then
-    local available
-    available="$(ls -1 "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
-    err "no overlay manifests/robots/$lower/ — available: ${available:-<none>}"
+  # DNS-1123: lowercase alphanumeric + hyphens, 1..63 chars,
+  # bookended by alphanumeric. The name flows into Argo Application
+  # metadata.name (e.g. phantomos-mk09-core), which Kubernetes
+  # requires to be DNS-1123. There is no filesystem check —
+  # robots are no longer tied to a manifests/robots/<name>/ tree.
+  if ! printf '%s' "$lower" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'; then
+    err "robot name $v is not DNS-1123 (lowercase alnum + hyphens, 1..63 chars, bookended by alnum)"
     return 1
   fi
   return 0
@@ -328,17 +331,19 @@ fi
 
 # --- robot ---
 heading "robot identity"
-hint "Must match a directory under manifests/robots/ on the deployed branch."
-hint "Available: $(ls -1 "$REPO_ROOT/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
+hint "DNS-1123 label: lowercase alphanumeric + hyphens, 1..63 chars."
+hint "Used in Argo Application names (phantomos-<robot>-core, ...)."
 example "mk09, ak-007, mk11000010"
 robot_default="$seed_robot"
 if [ -z "$robot_default" ]; then
   hn="$(hostname 2>/dev/null || true)"
-  if [ -n "$hn" ] && [ -d "$REPO_ROOT/manifests/robots/$(printf '%s' "$hn" | tr '[:upper:]' '[:lower:]')" ]; then
-    robot_default="$hn"
+  hn_lower="$(printf '%s' "${hn:-}" | tr '[:upper:]' '[:lower:]')"
+  if [ -n "$hn_lower" ] && printf '%s' "$hn_lower" \
+       | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'; then
+    robot_default="$hn_lower"
   fi
 fi
-robot="$(ask "robot" "$robot_default" "Identifier matching manifests/robots/<name>/. Lowercase preferred." validate_robot)"
+robot="$(ask "robot" "$robot_default" "DNS-1123: lowercase alnum + hyphens, 1..63 chars, bookended by alnum." validate_robot)"
 robot="$(printf '%s' "$robot" | tr '[:upper:]' '[:lower:]')"
 ok "robot = $robot"
 
@@ -378,8 +383,8 @@ ok "production = $production"
 # --- images ---
 heading "image tag overrides"
 hint "Per-host kustomize.images entries injected into the live Argo Application."
-hint "These override anything in manifests/robots/<robot>/kustomization.yaml's"
-hint "images: block. Skip this section to leave overlay defaults in effect."
+hint "These override anything in manifests/stacks/<stack>/ image references."
+hint "Skip this section to leave overlay defaults in effect."
 
 inject_images=1
 if [ -z "$seed_images_yaml" ]; then

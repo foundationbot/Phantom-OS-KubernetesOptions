@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Operator stack — UI + episode storage. Per-robot but non-essential:
+# turning this off does not stop the robot from running, only removes
+# the operator-facing surface (operator-ui, gateway, mongodb, redis,
+# eg-server, postgres). Toggle with stacks.operator.enabled in
+# /etc/phantomos/host-config.yaml.
+#
+# Image tag and dev-mount overrides come from the host's
+# /etc/phantomos/host-config.yaml at bringup; bootstrap injects them
+# into the live phantomos-<robot>-operator Argo Application's
+# spec.source.kustomize.{images,patches}. Nothing per-host lives here.
+commonLabels:
+  app.kubernetes.io/part-of: phantomos
+  phantomos.foundation.bot/stack: operator
+resources:
+  - ../../base/argus
+  - ../../base/nimbus
