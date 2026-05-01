@@ -307,6 +307,82 @@ cmd_status() {
   else
     printf '    %s\n' "$pid1"
   fi
+
+  # Live hostPath mounts — what the running pod actually has bind-mounted.
+  # Joined by volume name so the output is host -> container.
+  bold "hostPath mounts (live pod spec)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    info "(python3 unavailable — cannot pretty-print mounts)"
+  else
+    local mounts_out
+    mounts_out="$($KUBECTL -n "$NAMESPACE" get pod "$pod" -o json 2>/dev/null \
+      | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+volumes = {v["name"]: v["hostPath"]["path"]
+           for v in p.get("spec", {}).get("volumes", [])
+           if v.get("hostPath")}
+container = next((c for c in p["spec"].get("containers", [])
+                  if c.get("name") == "'"$CONTAINER_NAME"'"), None)
+if not container:
+    sys.exit(0)
+mounts = [(volumes[m["name"]], m["mountPath"], m.get("readOnly", False))
+          for m in container.get("volumeMounts", []) if m["name"] in volumes]
+if not mounts:
+    print("(none)")
+else:
+    width = max(len(h) for h, _, _ in mounts)
+    for host, ctr, ro in mounts:
+        ro_tag = "  (ro)" if ro else ""
+        print(f"{host:<{width}}  ->  {ctr}{ro_tag}")
+' 2>/dev/null || true)"
+    if [ -z "$mounts_out" ]; then
+      info "(could not parse pod spec)"
+    else
+      printf '%s\n' "$mounts_out" | sed 's/^/    /'
+    fi
+  fi
+
+  # devMode intent from /etc/phantomos/host-config.yaml. Tells the operator
+  # what the host expects, independent of what's currently running. A
+  # disagreement between the two means bootstrap hasn't been re-run since
+  # the host-config changed.
+  bold "devMode (intent, /etc/phantomos/host-config.yaml)"
+  local hc=/etc/phantomos/host-config.yaml
+  if [ ! -r "$hc" ]; then
+    info "(no host-config.yaml — devMode not configured)"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    info "(python3 unavailable)"
+  else
+    local dev_out
+    dev_out="$(python3 - "$hc" <<'PY' 2>/dev/null
+import sys, json
+try:
+    import yaml
+except ImportError:
+    print("(PyYAML missing — install python3-yaml)")
+    sys.exit(0)
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception as exc:
+    print(f"(error reading host-config: {exc})")
+    sys.exit(0)
+dev = (cfg.get("devMode") or {}).get("positronic-control")
+if not dev:
+    print("(devMode not set — production topology)")
+    sys.exit(0)
+print(f"source:     {dev.get('source', '<unset>')}")
+print(f"privileged: {dev.get('privileged', False)}")
+mnts = dev.get("mounts") or []
+print(f"mounts:     {len(mnts)} configured")
+for i, m in enumerate(mnts):
+    if isinstance(m, dict) and m.get("host") and m.get("container"):
+        print(f"  [{i}] {m['host']}  ->  {m['container']}")
+PY
+)"
+    printf '%s\n' "$dev_out" | sed 's/^/    /'
+  fi
 }
 
 # ---------- subcommand: logs ----------------------------------------------
