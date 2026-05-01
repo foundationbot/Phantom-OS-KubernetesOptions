@@ -220,12 +220,13 @@ done
 # ---- helpers ------------------------------------------------------------
 
 PASS=0; FAIL=0; SKIP=0
-pass() { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
-skip() { SKIP=$((SKIP + 1)); printf '  \033[33mSKIP\033[0m  %s\n' "$1"; }
-info() { printf '  %s\n' "$1"; }
-phase() { printf '\n==> %s\n' "$1"; }
-die()  { printf 'error: %s\n' "$*" >&2; exit 2; }
+pass()   { PASS=$((PASS + 1)); printf '  \033[32m✓ PASS\033[0m  %s\n' "$1"; }
+fail()   { FAIL=$((FAIL + 1)); printf '  \033[31m✗ FAIL\033[0m  %s\n' "$1"; }
+skip()   { SKIP=$((SKIP + 1)); printf '  \033[33m• SKIP\033[0m  %s\n' "$1"; }
+info()   { printf '  \033[2m·\033[0m %s\n' "$1"; }
+note()   { printf '  \033[36m→\033[0m %s\n' "$1"; }   # action announcement (e.g. "stopping 3 containers...")
+phase()  { printf '\n\033[1;36m──\033[0m \033[1m%s\033[0m\n' "$1"; }
+die()    { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 2; }
 
 # Bail early on FAIL unless --keep-going is set.
 guard() { [ "$FAIL" -gt 0 ] && [ "$KEEP_GOING" = 0 ] && summary && exit "$FAIL"; }
@@ -294,30 +295,35 @@ fi
 # function does not prompt again.
 purge_docker() {
   if [ "$SKIP_DOCKER_STOP" = 1 ]; then
-    phase "pre-phase: stop docker containers  (skipped)"
+    phase "pre-phase: stop docker containers  (skipped — --skip-docker-stop)"
+    return
+  fi
+  phase "pre-phase: stop docker containers"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    skip "docker not installed — nothing to stop"
+    return
+  fi
+  if [ "$DRY_RUN" = 0 ] && ! docker info >/dev/null 2>&1; then
+    skip "docker daemon not reachable — nothing to stop"
     return
   fi
 
-  # Silent no-ops on hosts that don't have docker installed or running:
-  # this phase exists for re-bootstraps, not fresh machines.
-  command -v docker >/dev/null 2>&1                || return
-  [ "$DRY_RUN" = 1 ] || docker info >/dev/null 2>&1 || return
+  if [ "$DRY_RUN" = 1 ]; then
+    note "DRY-RUN: docker stop \$(docker ps -q)"
+    return
+  fi
 
   local running n
-  if [ "$DRY_RUN" = 1 ]; then
-    phase "pre-phase: stop docker containers"
-    info "DRY-RUN  docker stop \$(docker ps -q)"
-    return
-  fi
   running=$(docker ps -q 2>/dev/null || true)
   if [ -z "$running" ]; then
+    skip "no running containers to stop"
     return
   fi
-
-  phase "pre-phase: stop docker containers"
   n=$(printf '%s\n' "$running" | wc -l | tr -d ' ')
+  note "stopping $n running container(s)..."
   if docker stop $running >/dev/null 2>&1; then
-    pass "stopped $n running container(s)"
+    pass "stopped $n container(s)"
   else
     fail "docker stop"
   fi
@@ -342,10 +348,13 @@ purge_docker() {
 # stubborn unit than wedge here on a transient systemd hiccup.
 stop_existing_services() {
   if [ "$SKIP_STOP_SERVICES" = 1 ]; then
-    phase "pre-phase: stop existing api-server / dma-ethercat services  (skipped)"
+    phase "pre-phase: stop api-server / dma-ethercat services  (skipped — --skip-stop-services)"
     return
   fi
+  phase "pre-phase: stop api-server / dma-ethercat services"
+
   if ! command -v systemctl >/dev/null 2>&1; then
+    skip "systemctl not present — nothing to do"
     return
   fi
 
@@ -365,37 +374,40 @@ stop_existing_services() {
     || true)
 
   if [ -z "$matches" ]; then
-    return  # silent — no matching units, no need for a phase header
-  fi
-
-  phase "pre-phase: stop existing api-server / dma-ethercat services"
-
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  matched units:"
-    while IFS= read -r unit; do
-      [ -n "$unit" ] && info "  $unit"
-    done <<< "$matches"
-    info "DRY-RUN  would stop (if active) + disable each"
+    skip "no enabled api-server / dma-ethercat services on this host"
     return
   fi
 
+  local count
+  count=$(printf '%s\n' "$matches" | wc -l | tr -d ' ')
+  note "found $count matching service(s):"
+  while IFS= read -r u; do
+    [ -n "$u" ] && info "  - $u"
+  done <<< "$matches"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    note "DRY-RUN: would stop (if active) + disable each"
+    return
+  fi
+
+  note "stopping + disabling each..."
   while IFS= read -r unit; do
     [ -z "$unit" ] && continue
     local active
     active=$(systemctl is-active "$unit" 2>/dev/null || true)
     if [ "$active" = "active" ]; then
       if systemctl stop "$unit" 2>/dev/null; then
-        pass "stopped $unit"
+        pass "stopped  $unit"
       else
-        fail "systemctl stop $unit"
+        fail "stop     $unit"
       fi
     else
-      info "$unit not active (state=${active:-unknown}) — skipping stop"
+      skip "stop     $unit  (state=${active:-unknown}, not active)"
     fi
     if systemctl disable "$unit" 2>/dev/null; then
       pass "disabled $unit"
     else
-      fail "systemctl disable $unit"
+      fail "disable  $unit"
     fi
   done <<< "$matches"
 }
@@ -516,7 +528,7 @@ EOF
 #   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -525,10 +537,11 @@ uninstall_ethercat() {
   local uninstaller=/usr/sbin/dma-ethercat-uninstall
 
   if ! systemctl list-unit-files "$svc" 2>/dev/null | grep -q "^$svc"; then
-    skip "$svc unit file not present — nothing to tear down"
+    skip "$svc unit not installed — nothing to tear down"
     if [ -x "$uninstaller" ]; then
+      note "running $uninstaller anyway (cleanup of stray files)..."
       if [ "$DRY_RUN" = 1 ]; then
-        info "DRY-RUN  $uninstaller"
+        note "DRY-RUN: $uninstaller"
       elif "$uninstaller"; then
         pass "$uninstaller completed"
       else
@@ -539,41 +552,45 @@ uninstall_ethercat() {
   fi
 
   local active enabled
-  active=$(systemctl is-active "$svc" 2>/dev/null || true)
+  active=$(systemctl is-active  "$svc" 2>/dev/null || true)
   enabled=$(systemctl is-enabled "$svc" 2>/dev/null || true)
-  info "$svc state: active=${active:-unknown} enabled=${enabled:-unknown}"
+  note "current state: active=${active:-unknown}  enabled=${enabled:-unknown}"
 
   if [ "$DRY_RUN" = 1 ]; then
-    [ "$active" = "active" ]                 && info "DRY-RUN  systemctl stop $svc"
-    [[ "$enabled" =~ ^enabled ]]             && info "DRY-RUN  systemctl disable $svc"
-    [ -x "$uninstaller" ]                    && info "DRY-RUN  $uninstaller"
+    [ "$active" = "active" ]              && note "DRY-RUN: systemctl stop $svc"
+    [[ "$enabled" =~ ^enabled ]]          && note "DRY-RUN: systemctl disable $svc"
+    [ -x "$uninstaller" ]                 && note "DRY-RUN: $uninstaller"
     return
   fi
 
+  # 1. stop (only if active)
   if [ "$active" = "active" ]; then
+    note "stopping $svc..."
     if systemctl stop "$svc"; then
-      pass "$svc stopped"
+      pass "stopped  $svc"
     else
-      fail "systemctl stop $svc — refusing to disable/uninstall a running service"
+      fail "stop $svc — refusing to disable/uninstall a running service"
       return
     fi
   else
-    skip "$svc not running (active=${active:-unknown})"
+    skip "stop     $svc  (not active)"
   fi
 
+  # 2. disable (only if enabled in some form)
   # `is-enabled` returns 'enabled', 'enabled-runtime', 'alias', etc. when
   # there's something to disable. 'static', 'masked', 'disabled' are no-op.
   if [[ "$enabled" =~ ^(enabled|enabled-runtime|alias)$ ]]; then
     if systemctl disable "$svc" 2>/dev/null; then
-      pass "$svc disabled"
+      pass "disabled $svc"
     else
-      fail "systemctl disable $svc"
+      fail "disable  $svc"
       return
     fi
   else
-    skip "$svc not enabled (enabled=${enabled:-unknown})"
+    skip "disable  $svc  (state=${enabled:-unknown})"
   fi
 
+  # 3. run the uninstaller
   if [ ! -e "$uninstaller" ]; then
     fail "$uninstaller not found — cannot complete uninstall"
     return
@@ -582,6 +599,7 @@ uninstall_ethercat() {
     fail "$uninstaller not executable"
     return
   fi
+  note "running $uninstaller..."
   if "$uninstaller"; then
     pass "$uninstaller completed"
   else
@@ -1031,7 +1049,7 @@ gitops() {
 #   5. dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb
 #   6. systemctl enable --now dma-ethercat.service
 install_dma_ethercat() {
-  if [ "$SKIP_ETHERCAT_INSTALL" = 1 ]; then phase "phase 5.5: install dma-ethercat  (skipped)"; return; fi
+  if [ "$SKIP_ETHERCAT_INSTALL" = 1 ]; then phase "phase 5.5: install dma-ethercat  (skipped — --skip-ethercat-install)"; return; fi
   phase "phase 5.5: install dma-ethercat (gates phase 6)"
 
   local overlay="$REPO_ROOT/manifests/installers/dma-ethercat/robots/$ROBOT"
@@ -1046,17 +1064,20 @@ install_dma_ethercat() {
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  kubectl create ns phantom (if missing)"
-    info "DRY-RUN  kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
-    info "DRY-RUN  kubectl apply -k $overlay"
-    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
-    info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
-    info "DRY-RUN  systemctl enable --now dma-ethercat.service"
+    note "DRY-RUN: kubectl create ns phantom (if missing)"
+    note "DRY-RUN: kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
+    note "DRY-RUN: kubectl apply -k $overlay"
+    note "DRY-RUN: kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
+    note "DRY-RUN: dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    note "DRY-RUN: systemctl enable --now dma-ethercat.service"
     return
   fi
 
   # 1. namespace
-  if ! "${KUBECTL[@]}" get ns phantom >/dev/null 2>&1; then
+  if "${KUBECTL[@]}" get ns phantom >/dev/null 2>&1; then
+    skip "ns/phantom already exists"
+  else
+    note "creating ns/phantom..."
     if "${KUBECTL[@]}" create ns phantom >/dev/null; then
       pass "ns/phantom created"
     else
@@ -1066,26 +1087,33 @@ install_dma_ethercat() {
   fi
 
   # 2. force fresh extract — drop any prior Job (and its pod) before re-applying
-  "${KUBECTL[@]}" -n phantom delete job dma-ethercat-installer --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  if "${KUBECTL[@]}" -n phantom get job dma-ethercat-installer >/dev/null 2>&1; then
+    note "removing prior installer Job (forces fresh extract)..."
+    "${KUBECTL[@]}" -n phantom delete job dma-ethercat-installer --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    pass "prior Job removed"
+  else
+    skip "no prior installer Job to remove"
+  fi
 
   # 3. apply the per-robot kustomization
+  note "applying installer manifest from $overlay..."
   if "${KUBECTL[@]}" apply -k "$overlay" >/dev/null; then
-    pass "kubectl apply -k $overlay"
+    pass "installer Job applied"
   else
     fail "kubectl apply -k $overlay"
     ethercat_die "could not apply installer Job — check kustomize render at $overlay"
   fi
 
   # 4. wait for completion (or surface failure)
-  info "waiting for job/dma-ethercat-installer to complete..."
+  note "waiting up to 5min for installer Job to reach Complete..."
   if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=300s job/dma-ethercat-installer >/dev/null 2>&1; then
-    pass "job/dma-ethercat-installer Complete"
+    pass "installer Job Complete"
   else
     local jstat
     jstat=$("${KUBECTL[@]}" -n phantom get job dma-ethercat-installer -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}' 2>/dev/null || true)
-    fail "job/dma-ethercat-installer did not Complete in 5min (status: ${jstat:-unknown})"
-    info "  pod logs:"
-    "${KUBECTL[@]}" -n phantom logs -l app=dma-ethercat-installer --tail=50 2>&1 | sed 's/^/    /' || true
+    fail "installer Job did not Complete in 5min (status: ${jstat:-unknown})"
+    info "pod logs:"
+    "${KUBECTL[@]}" -n phantom logs -l app=dma-ethercat-installer --tail=50 2>&1 | sed 's/^/      /' || true
     ethercat_die "installer Job never reached Complete — likely image pull (check dockerhub-creds in phantom ns) or the .deb path inside the image"
   fi
 
@@ -1097,8 +1125,9 @@ install_dma_ethercat() {
     fail "no dma-ethercat-*.deb at /var/lib/dma-ethercat-installer/"
     ethercat_die "Job ran but did not write the .deb to the host volume — check the Job's pod logs"
   fi
-  info "deb: $deb"
+  note "found .deb on host: $(basename "$deb")"
 
+  note "running dpkg -i..."
   if dpkg -i "$deb"; then
     pass "dpkg -i $(basename "$deb")"
   else
@@ -1108,12 +1137,13 @@ install_dma_ethercat() {
 
   # 6. enable + start. Per the user's spec, "rest of the pods" only run
   #    after this succeeds — so a failed start halts the bootstrap.
+  note "enabling + starting dma-ethercat.service..."
   if systemctl enable --now dma-ethercat.service; then
     pass "dma-ethercat.service enabled and started"
   else
     fail "systemctl enable --now dma-ethercat.service"
-    info "  unit status:"
-    systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/    /' || true
+    info "unit status:"
+    systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/      /' || true
     ethercat_die "service did not start — check systemctl status / journalctl -u dma-ethercat for the underlying cause"
   fi
 }
