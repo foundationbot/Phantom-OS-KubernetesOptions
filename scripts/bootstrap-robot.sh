@@ -16,6 +16,27 @@
 #   -y, --yes          skip confirmation prompts
 #   --dry-run          print what each phase would do, change nothing
 #   --keep-going       continue after failures (default: bail at first)
+#   --skip-docker-stop
+#                      Skip the docker pre-phase. By DEFAULT the script
+#                      sends `docker stop` to every running container on
+#                      the host so they release ports / device handles /
+#                      mounts before the next phase. This is non-
+#                      destructive (containers and images stay; they can
+#                      be `docker start`-ed again). Already a no-op if
+#                      docker is not installed or no containers are
+#                      running, so this flag is mainly for when you have
+#                      docker workloads on the host that must keep
+#                      running through the bootstrap.
+#   --skip-ethercat-uninstall
+#                      Skip the dma-ethercat teardown pre-phase. By
+#                      DEFAULT, after the docker stop / reset pre-phases
+#                      (so pods are gone first), the script checks for
+#                      `dma-ethercat.service`: if active it stops it, if
+#                      enabled it disables it, then runs
+#                      `/usr/sbin/dma-ethercat-uninstall`. Each step is a
+#                      no-op when already in the desired state. Use this
+#                      flag on a routine re-bootstrap of a healthy robot
+#                      where you want to leave the realtime stack alone.
 #   --reset            BEFORE phase 1, tear down any pre-existing k0s
 #                      cluster (`k0s stop && k0s reset`) and back up
 #                      /root/.kube/config and terraform/terraform.tfstate*
@@ -102,6 +123,8 @@ ROBOT=""
 YES=0
 DRY_RUN=0
 KEEP_GOING=0
+SKIP_DOCKER_STOP=0
+SKIP_ETHERCAT_UNINSTALL=0
 RESET=0
 SKIP_DEPS=0
 SKIP_HOST=0
@@ -127,6 +150,10 @@ while [ $# -gt 0 ]; do
     -y|--yes)        YES=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     --keep-going)    KEEP_GOING=1; shift ;;
+    --skip-docker-stop)
+                     SKIP_DOCKER_STOP=1; shift ;;
+    --skip-ethercat-uninstall)
+                     SKIP_ETHERCAT_UNINSTALL=1; shift ;;
     --reset)         RESET=1; shift ;;
     --skip-deps)     SKIP_DEPS=1; shift ;;
     --skip-host)     SKIP_HOST=1; shift ;;
@@ -198,6 +225,45 @@ elif command -v k0s >/dev/null 2>&1; then
 else
   KUBECTL=()
 fi
+
+# ---- pre-phase: stop docker containers (default; --skip-docker-stop) ---
+
+# Send `docker stop` to every running container so they release ports,
+# device handles, and bind mounts before the rest of bootstrap proceeds.
+# Non-destructive: containers and images are left in place and can be
+# `docker start`-ed again afterward. Runs by default; --skip-docker-stop
+# opts out. Top-level "Proceed?" prompt already gates execution, so this
+# function does not prompt again.
+purge_docker() {
+  if [ "$SKIP_DOCKER_STOP" = 1 ]; then
+    phase "pre-phase: stop docker containers  (skipped)"
+    return
+  fi
+
+  # Silent no-ops on hosts that don't have docker installed or running:
+  # this phase exists for re-bootstraps, not fresh machines.
+  command -v docker >/dev/null 2>&1                || return
+  [ "$DRY_RUN" = 1 ] || docker info >/dev/null 2>&1 || return
+
+  local running n
+  if [ "$DRY_RUN" = 1 ]; then
+    phase "pre-phase: stop docker containers"
+    info "DRY-RUN  docker stop \$(docker ps -q)"
+    return
+  fi
+  running=$(docker ps -q 2>/dev/null || true)
+  if [ -z "$running" ]; then
+    return
+  fi
+
+  phase "pre-phase: stop docker containers"
+  n=$(printf '%s\n' "$running" | wc -l | tr -d ' ')
+  if docker stop $running >/dev/null 2>&1; then
+    pass "stopped $n running container(s)"
+  else
+    fail "docker stop"
+  fi
+}
 
 # ---- pre-phase: reset (only if --reset) --------------------------------
 
@@ -292,6 +358,100 @@ EOF
   # 5. Reset cached KUBECTL — k0s is gone, anything we cached at startup
   #    is no longer valid until phase 4 reinstalls it.
   KUBECTL=()
+}
+
+# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall)
+
+# Tear down the dma-ethercat realtime control service. Runs by default;
+# --skip-ethercat-uninstall opts out (use it for routine re-bootstraps
+# where the realtime stack should stay in place). Designed to run AFTER
+# purge_docker and reset_cluster so the pods that talk to ethercat are
+# already gone — stopping the service while pods are still pinging its
+# socket can leave the kernel module in a wedged state.
+#
+# Sequence (each step independent + idempotent):
+#   1. if no unit file installed                  -> skip whole phase
+#   2. if active                                  -> systemctl stop
+#   3. if stop failed                             -> bail (do NOT disable
+#                                                   or run uninstaller —
+#                                                   leaving the service
+#                                                   half-torn-down is
+#                                                   worse than no-op)
+#   4. if enabled / enabled-runtime / alias       -> systemctl disable
+#   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
+uninstall_ethercat() {
+  if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
+    phase "pre-phase: uninstall dma-ethercat  (skipped)"
+    return
+  fi
+  phase "pre-phase: uninstall dma-ethercat"
+
+  local svc=dma-ethercat.service
+  local uninstaller=/usr/sbin/dma-ethercat-uninstall
+
+  if ! systemctl list-unit-files "$svc" 2>/dev/null | grep -q "^$svc"; then
+    skip "$svc unit file not present — nothing to tear down"
+    if [ -x "$uninstaller" ]; then
+      if [ "$DRY_RUN" = 1 ]; then
+        info "DRY-RUN  $uninstaller"
+      elif "$uninstaller"; then
+        pass "$uninstaller completed"
+      else
+        fail "$uninstaller exited non-zero"
+      fi
+    fi
+    return
+  fi
+
+  local active enabled
+  active=$(systemctl is-active "$svc" 2>/dev/null || true)
+  enabled=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+  info "$svc state: active=${active:-unknown} enabled=${enabled:-unknown}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    [ "$active" = "active" ]                 && info "DRY-RUN  systemctl stop $svc"
+    [[ "$enabled" =~ ^enabled ]]             && info "DRY-RUN  systemctl disable $svc"
+    [ -x "$uninstaller" ]                    && info "DRY-RUN  $uninstaller"
+    return
+  fi
+
+  if [ "$active" = "active" ]; then
+    if systemctl stop "$svc"; then
+      pass "$svc stopped"
+    else
+      fail "systemctl stop $svc — refusing to disable/uninstall a running service"
+      return
+    fi
+  else
+    skip "$svc not running (active=${active:-unknown})"
+  fi
+
+  # `is-enabled` returns 'enabled', 'enabled-runtime', 'alias', etc. when
+  # there's something to disable. 'static', 'masked', 'disabled' are no-op.
+  if [[ "$enabled" =~ ^(enabled|enabled-runtime|alias)$ ]]; then
+    if systemctl disable "$svc" 2>/dev/null; then
+      pass "$svc disabled"
+    else
+      fail "systemctl disable $svc"
+      return
+    fi
+  else
+    skip "$svc not enabled (enabled=${enabled:-unknown})"
+  fi
+
+  if [ ! -e "$uninstaller" ]; then
+    fail "$uninstaller not found — cannot complete uninstall"
+    return
+  fi
+  if [ ! -x "$uninstaller" ]; then
+    fail "$uninstaller not executable"
+    return
+  fi
+  if "$uninstaller"; then
+    pass "$uninstaller completed"
+  else
+    fail "$uninstaller exited non-zero"
+  fi
 }
 
 # ---- phase 1: preflight -------------------------------------------------
@@ -809,8 +969,8 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$SKIP_DOCKER_STOP" = 0 ] && echo "STOP-DOCKER, ")$([ "$RESET" = 1 ] && echo "RESET, ")$([ "$SKIP_ETHERCAT_UNINSTALL" = 0 ] && echo "UNINSTALL-ETHERCAT, ")1-preflight, 2-deps, 3-host-config, 4-cluster, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING skip_docker_stop=$SKIP_DOCKER_STOP skip_ethercat_uninstall=$SKIP_ETHERCAT_UNINSTALL reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
 # When --reset is set, it has its own confirmation prompt with a
@@ -821,7 +981,9 @@ if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
   [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
 fi
 
+purge_docker       ; guard
 reset_cluster      ; guard
+uninstall_ethercat ; guard
 preflight          ; guard
 deps               ; guard
 host_config        ; guard
