@@ -12,6 +12,8 @@ Usage:
   host-config.py <path> get aiPcUrl
   host-config.py <path> get-images-json
   host-config.py <path> get-dev-patches-json
+  host-config.py <path> get-enabled-stacks            # one stack name per line
+  host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
   host-config.py <path> validate
 
 Exit codes:
@@ -35,6 +37,41 @@ except ModuleNotFoundError:
         file=sys.stderr,
     )
     sys.exit(2)
+
+
+# Stack registry. Order is significant — bootstrap renders+applies in
+# this order so `core` (registry, positronic, dma-video, ...) comes up
+# before `operator` (which doesn't depend on core but reads better when
+# core is already healthy).
+KNOWN_STACKS: tuple[str, ...] = ("core", "operator")
+# Stacks that cannot be disabled — robot is non-functional without them.
+REQUIRED_STACKS: frozenset[str] = frozenset({"core"})
+
+
+def _stack_spec(cfg: dict, name: str) -> dict:
+    """Return the stacks.<name> mapping from cfg, or {} if absent.
+    Always returns a dict (caller doesn't have to type-check)."""
+    spec = (cfg.get("stacks") or {}).get(name)
+    return spec if isinstance(spec, dict) else {}
+
+
+def _stack_enabled(cfg: dict, name: str) -> bool:
+    """A stack is enabled when it's required (core) OR its enabled
+    field is missing (default true) OR its enabled field is true."""
+    if name in REQUIRED_STACKS:
+        return True
+    spec = _stack_spec(cfg, name)
+    if "enabled" not in spec:
+        return True  # default
+    return bool(spec["enabled"])
+
+
+def _stack_selfheal(cfg: dict, name: str) -> bool:
+    """Per-stack selfHeal override > top-level production: > false."""
+    spec = _stack_spec(cfg, name)
+    if "selfHeal" in spec:
+        return bool(spec["selfHeal"])
+    return bool(cfg.get("production"))
 
 
 def load(path: str) -> dict:
@@ -204,6 +241,24 @@ def cmd_get_dev_patches_json(cfg: dict) -> int:
     return 0
 
 
+def cmd_get_enabled_stacks(cfg: dict) -> int:
+    """Print one enabled stack name per line, in canonical order."""
+    for name in KNOWN_STACKS:
+        if _stack_enabled(cfg, name):
+            print(name)
+    return 0
+
+
+def cmd_get_stack_selfheal(cfg: dict, stack: str) -> int:
+    """Print 'true' or 'false' for the resolved selfHeal value."""
+    if stack not in KNOWN_STACKS:
+        print(f"error: unknown stack {stack!r} (known: {', '.join(KNOWN_STACKS)})",
+              file=sys.stderr)
+        return 2
+    print("true" if _stack_selfheal(cfg, stack) else "false")
+    return 0
+
+
 def cmd_validate(cfg: dict) -> int:
     errors: list[str] = []
     if not cfg.get("robot"):
@@ -218,6 +273,37 @@ def cmd_validate(cfg: dict) -> int:
         errors.append(
             f"'production' must be true or false (got: {cfg['production']!r})"
         )
+
+    # stacks: must be a mapping; only known stack names; required
+    # stacks cannot be disabled; per-stack fields type-checked.
+    stacks = cfg.get("stacks")
+    if stacks is not None:
+        if not isinstance(stacks, dict):
+            errors.append("'stacks' must be a mapping of stack names to settings")
+        else:
+            for name, spec in stacks.items():
+                if name not in KNOWN_STACKS:
+                    errors.append(
+                        f"stacks.{name}: unknown stack (known: {', '.join(KNOWN_STACKS)})"
+                    )
+                    continue
+                if spec is None:
+                    continue  # empty mapping = use defaults
+                if not isinstance(spec, dict):
+                    errors.append(f"stacks.{name}: must be a mapping")
+                    continue
+                if "enabled" in spec:
+                    if not isinstance(spec["enabled"], bool):
+                        errors.append(
+                            f"stacks.{name}.enabled: must be true or false"
+                        )
+                    elif name in REQUIRED_STACKS and spec["enabled"] is False:
+                        errors.append(
+                            f"stacks.{name}.enabled: '{name}' is required and "
+                            f"cannot be disabled — remove the field or set true"
+                        )
+                if "selfHeal" in spec and not isinstance(spec["selfHeal"], bool):
+                    errors.append(f"stacks.{name}.selfHeal: must be true or false")
     images = cfg.get("images") or []
     if not isinstance(images, list):
         errors.append("'images' must be a list")
@@ -287,6 +373,13 @@ def main() -> int:
         return cmd_get_images_json(cfg)
     if cmd == "get-dev-patches-json":
         return cmd_get_dev_patches_json(cfg)
+    if cmd == "get-enabled-stacks":
+        return cmd_get_enabled_stacks(cfg)
+    if cmd == "get-stack-selfheal":
+        if len(sys.argv) != 4:
+            print("usage: host-config.py <path> get-stack-selfheal <stack>", file=sys.stderr)
+            return 2
+        return cmd_get_stack_selfheal(cfg, sys.argv[3])
     if cmd == "validate":
         return cmd_validate(cfg)
     print(f"error: unknown subcommand: {cmd}", file=sys.stderr)

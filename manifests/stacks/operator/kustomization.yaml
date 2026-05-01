@@ -10,9 +10,15 @@ kind: Kustomization
 # /etc/phantomos/host-config.yaml at bringup; bootstrap injects them
 # into the live phantomos-<robot>-operator Argo Application's
 # spec.source.kustomize.{images,patches}. Nothing per-host lives here.
-commonLabels:
-  app.kubernetes.io/part-of: phantomos
-  phantomos.foundation.bot/stack: operator
+# Labels go onto every resource's metadata, but NOT into selectors.
+# Selectors on existing Deployments / StatefulSets are immutable; using
+# `commonLabels` (or labels with includeSelectors: true) would block the
+# umbrella -> per-stack migration.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: phantomos
+      phantomos.foundation.bot/stack: operator
+    includeSelectors: false
 resources:
   - ../../base/argus
   - ../../base/nimbus

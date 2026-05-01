@@ -976,67 +976,97 @@ operator_ui_config() {
 # from the old root-app + child-app design is handled inline (see
 # _gitops_migrate_from_root_app).
 APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_template/phantomos-app.yaml.tpl}"
-RENDERED_APP_FILE="${RENDERED_APP_FILE:-/etc/phantomos/phantomos-app.yaml}"
+# One rendered Application per enabled stack:
+#   /etc/phantomos/phantomos-app-core.yaml
+#   /etc/phantomos/phantomos-app-operator.yaml
+RENDERED_APP_DIR="${RENDERED_APP_DIR:-/etc/phantomos}"
 DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
 DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
 
-# Old design (now replaced): a `root` Application reconciled
-# gitops/apps/<robot>/phantomos-<robot>.yaml files. On clusters that
-# still have that structure live, we tear it down before applying the
-# new direct Application — but without pruning workload resources.
-_gitops_migrate_from_root_app() {
+_rendered_app_path() {
+  local stack="${1:?stack required}"
+  printf '%s/phantomos-app-%s.yaml' "$RENDERED_APP_DIR" "$stack"
+}
+
+# Strip a single Application from the cluster WITHOUT cascade-pruning
+# its workloads. Used during migration so the new Application can claim
+# the existing resources without taking them down first.
+_gitops_orphan_delete_app() {
+  local app="${1:?app required}"
+  if ! "${KUBECTL[@]}" -n argocd get app "$app" >/dev/null 2>&1; then
+    return 0
+  fi
+  "${KUBECTL[@]}" -n argocd patch app "$app" \
+    --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" -n argocd delete app "$app" --wait=false >/dev/null 2>&1 || true
+  info "removed legacy Application: $app"
+}
+
+# Two migration steps roll into one helper:
+#   1. Old app-of-apps era: a `root` Application + per-robot
+#      phantomos-<robot>* children. Drop root + any non-matching
+#      phantomos-* without cascade.
+#   2. Stage D era: a single umbrella `phantomos-<robot>` (no -<stack>
+#      suffix) per cluster. With per-stack Applications, we replace it
+#      with phantomos-<robot>-core / phantomos-<robot>-operator.
+_gitops_migrate_legacy_apps() {
   local nsdone=0
   if "${KUBECTL[@]}" -n argocd get app root >/dev/null 2>&1; then
     info "found legacy 'root' Application — migrating away from app-of-apps"
-    # Remove the finalizer so deleting root doesn't cascade-prune
-    # children + their workloads. We will apply a fresh phantomos-$ROBOT
-    # Application immediately afterwards, so workloads stay continuous.
-    "${KUBECTL[@]}" -n argocd patch app root \
-      --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
-    "${KUBECTL[@]}" -n argocd delete app root --wait=false >/dev/null 2>&1 || true
+    _gitops_orphan_delete_app root
     nsdone=1
   fi
-  # Drop any phantomos-<other-robot> Applications left from the
-  # app-of-apps era. Keep the one matching this host.
+
+  # The Stage D umbrella: name == "phantomos-<robot>" exactly.
+  if "${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" >/dev/null 2>&1; then
+    info "found umbrella 'phantomos-$ROBOT' Application — migrating to per-stack"
+    _gitops_orphan_delete_app "phantomos-$ROBOT"
+    nsdone=1
+  fi
+
+  # Anything else named phantomos-* that doesn't match this robot's
+  # current per-stack naming gets cleaned up too.
   local apps app
   apps=$("${KUBECTL[@]}" -n argocd get app -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
   while IFS= read -r app; do
     [ -z "$app" ] && continue
     case "$app" in
-      "phantomos-$ROBOT") continue ;;
+      phantomos-$ROBOT-core|phantomos-$ROBOT-operator) continue ;;
       phantomos-*)
-        info "removing stale legacy Application: $app"
-        "${KUBECTL[@]}" -n argocd patch app "$app" \
-          --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
-        "${KUBECTL[@]}" -n argocd delete app "$app" --wait=false >/dev/null 2>&1 || true
+        _gitops_orphan_delete_app "$app"
         nsdone=1
         ;;
     esac
   done <<< "$apps"
-  [ "$nsdone" = 1 ] && pass "legacy app-of-apps cleanup complete"
+
+  [ "$nsdone" = 1 ] && pass "legacy Application cleanup complete"
 }
 
-# Render the Application CR template into RENDERED_APP_FILE for this
-# host. Substitutions are simple sed because the template values are
+# Render the Application CR template into RENDERED_APP_DIR for one
+# stack. Substitutions are simple sed because the template values are
 # repo-controlled (no shell injection surface from operator input).
 _gitops_render_app() {
-  local repo_url="${1:?repo_url required}"
-  local target_rev="${2:?target_rev required}"
-  local self_heal="${3:?self_heal required}"
+  local stack="${1:?stack required}"
+  local repo_url="${2:?repo_url required}"
+  local target_rev="${3:?target_rev required}"
+  local self_heal="${4:?self_heal required}"
+  local out
+  out="$(_rendered_app_path "$stack")"
 
   if [ ! -r "$APP_TEMPLATE_FILE" ]; then
     fail "Application CR template not found: $APP_TEMPLATE_FILE"
     return 1
   fi
 
-  mkdir -p "$(dirname "$RENDERED_APP_FILE")"
+  mkdir -p "$(dirname "$out")"
   sed \
     -e "s#{{ROBOT}}#$ROBOT#g" \
+    -e "s#{{STACK}}#$stack#g" \
     -e "s#{{REPO_URL}}#$repo_url#g" \
     -e "s#{{TARGET_REVISION}}#$target_rev#g" \
     -e "s#{{SELF_HEAL}}#$self_heal#g" \
-    "$APP_TEMPLATE_FILE" > "$RENDERED_APP_FILE"
-  chmod 0644 "$RENDERED_APP_FILE"
+    "$APP_TEMPLATE_FILE" > "$out"
+  chmod 0644 "$out"
 }
 
 gitops() {
@@ -1069,23 +1099,58 @@ gitops() {
     fi
   fi
 
-  # Resolve selfHeal: explicit --production / --no-production wins, else
-  # host-config.yaml's `production:` field, else default false.
-  local self_heal="false"
-  if [ -n "$PRODUCTION" ]; then
-    [ "$PRODUCTION" = 1 ] && self_heal="true"
-  elif [ -r "$hc" ]; then
-    if hc_prod="$(python3 "$HOST_CONFIG_HELPER" "$hc" get production 2>/dev/null)"; then
-      [ "$hc_prod" = "True" ] || [ "$hc_prod" = "true" ] && self_heal="true"
-    fi
+  # Enabled stacks (one per line); per-stack selfHeal (resolved against
+  # production: + --production override).
+  local enabled_stacks=""
+  if [ -r "$hc" ]; then
+    enabled_stacks="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-enabled-stacks 2>/dev/null || true)"
   fi
+  if [ -z "$enabled_stacks" ]; then
+    # No host-config — fall back to the 'all stacks default' (matches
+    # cmd_get_enabled_stacks's behavior when stacks: is omitted).
+    enabled_stacks=$'core\noperator'
+  fi
+
+  # selfHeal resolution per stack: stacks.<name>.selfHeal (when set) >
+  # --production CLI flag > production: in host-config > false.
+  _resolve_selfheal_for_stack() {
+    local stack="$1"
+    if [ -r "$hc" ]; then
+      if v="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-stack-selfheal "$stack" 2>/dev/null)"; then
+        # If host-config has an explicit per-stack value, helper returns it.
+        # Otherwise it returns the production: fallback. CLI --production
+        # overrides only when the stack didn't set its own.
+        local stack_explicit
+        stack_explicit="$(python3 - "$hc" "$stack" <<'PY' 2>/dev/null
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1])) or {}
+spec = (cfg.get("stacks") or {}).get(sys.argv[2]) or {}
+if isinstance(spec, dict) and "selfHeal" in spec:
+    print("yes")
+PY
+)"
+        if [ "$stack_explicit" != "yes" ] && [ -n "$PRODUCTION" ]; then
+          [ "$PRODUCTION" = 1 ] && printf 'true\n' || printf 'false\n'
+          return
+        fi
+        printf '%s\n' "$v"
+        return
+      fi
+    fi
+    [ "$PRODUCTION" = 1 ] && printf 'true\n' || printf 'false\n'
+  }
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
-    info "DRY-RUN  render $APP_TEMPLATE_FILE -> $RENDERED_APP_FILE"
-    info "DRY-RUN    ROBOT=$ROBOT  REPO_URL=$DEFAULT_REPO_URL  TARGET_REVISION=$target_rev  SELF_HEAL=$self_heal"
-    info "DRY-RUN  kubectl apply -f $RENDERED_APP_FILE"
-    info "DRY-RUN  wait for phantomos-$ROBOT  Synced + Healthy"
+    info "DRY-RUN  enabled stacks: $(printf '%s' "$enabled_stacks" | tr '\n' ' ')"
+    while IFS= read -r stack; do
+      [ -z "$stack" ] && continue
+      local sh
+      sh="$(_resolve_selfheal_for_stack "$stack")"
+      info "DRY-RUN    render template for stack=$stack  selfHeal=$sh"
+      info "DRY-RUN    kubectl apply -f $(_rendered_app_path "$stack")"
+    done <<< "$enabled_stacks"
+    info "DRY-RUN  wait for each phantomos-$ROBOT-<stack> Synced + Healthy"
     return
   fi
 
@@ -1108,45 +1173,172 @@ gitops() {
   ) || { fail "terraform apply"; return; }
   pass "terraform apply (argocd Helm install)"
 
-  # Migrate from the old root-app + child-app topology if present.
-  _gitops_migrate_from_root_app
+  # Migrate from any pre-existing root-app or umbrella Application.
+  _gitops_migrate_legacy_apps
 
-  # Render and apply the per-host Application CR.
-  if ! _gitops_render_app "$DEFAULT_REPO_URL" "$target_rev" "$self_heal"; then
-    return
-  fi
-  pass "rendered $RENDERED_APP_FILE  robot=$ROBOT  branch=$target_rev  selfHeal=$self_heal"
+  # Drop Applications for stacks that USED to be enabled but aren't
+  # anymore — e.g. operator was true, operator: enabled: false now.
+  # Cascade-prune is fine here: the operator workloads SHOULD come down.
+  local rendered_stacks=""
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    rendered_stacks="${rendered_stacks} $stack"
+  done <<< "$enabled_stacks"
 
-  if ! "${KUBECTL[@]}" apply -f "$RENDERED_APP_FILE" >/dev/null; then
-    fail "kubectl apply -f $RENDERED_APP_FILE"
-    return
-  fi
-  pass "phantomos-$ROBOT applied"
+  for known_stack in core operator; do
+    case " $rendered_stacks " in
+      *" $known_stack "*) continue ;;
+    esac
+    if "${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT-$known_stack" >/dev/null 2>&1; then
+      info "stack $known_stack disabled — removing phantomos-$ROBOT-$known_stack and its workloads"
+      "${KUBECTL[@]}" -n argocd delete app "phantomos-$ROBOT-$known_stack" --wait=false >/dev/null 2>&1 \
+        || fail "could not delete phantomos-$ROBOT-$known_stack"
+      rm -f "$(_rendered_app_path "$known_stack")" 2>/dev/null || true
+    fi
+  done
 
-  info "waiting for phantomos-$ROBOT to reach Synced+Healthy..."
-  local sync health
-  for _ in $(seq 1 120); do
-    sync=$("${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
-    health=$("${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-    if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
-      pass "phantomos-$ROBOT  Synced + Healthy"
+  # Render and apply each enabled stack's Application.
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local sh
+    sh="$(_resolve_selfheal_for_stack "$stack")"
+    if ! _gitops_render_app "$stack" "$DEFAULT_REPO_URL" "$target_rev" "$sh"; then
       return
     fi
-    sleep 5
-  done
-  fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
+    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  branch=$target_rev  selfHeal=$sh"
+
+    if ! "${KUBECTL[@]}" apply -f "$(_rendered_app_path "$stack")" >/dev/null; then
+      fail "kubectl apply -f $(_rendered_app_path "$stack")"
+      return
+    fi
+    pass "phantomos-$ROBOT-$stack applied"
+  done <<< "$enabled_stacks"
+
+  # Wait for all enabled stacks to reach Synced + Healthy.
+  info "waiting for each enabled stack to reach Synced+Healthy..."
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local app="phantomos-$ROBOT-$stack"
+    local sync health
+    local ok=0
+    for _ in $(seq 1 120); do
+      sync=$("${KUBECTL[@]}" -n argocd get app "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+      health=$("${KUBECTL[@]}" -n argocd get app "$app" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
+      if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+        pass "$app  Synced + Healthy"
+        ok=1
+        break
+      fi
+      sleep 5
+    done
+    if [ "$ok" = 0 ]; then
+      fail "$app did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
+    fi
+  done <<< "$enabled_stacks"
 }
 
-# ---- phase 6.7: kustomize image overrides (per-host) --------------------
+# ---- phase 6.7: kustomize image overrides (per-host, per-stack) ---------
 
-# Inject the `images:` list from /etc/phantomos/host-config.yaml into the
-# live phantomos-<robot> Argo Application's spec.source.kustomize.images.
-# This is how per-host image tag overrides flow without polluting the
-# git tree. The root app-of-apps has ignoreDifferences on this same path
-# so the patch survives root reconciliation.
+# Each entry in host-config's images: list belongs to exactly one stack.
+# Bootstrap discovers the mapping by running kustomize on each enabled
+# stack and indexing image references in the rendered output. Then it
+# patches each stack's Application with only the images it owns.
+#
+# The image-to-stack map is computed once and cached for use by both
+# image_overrides and dev_mounts (the latter currently only targets
+# positronic-control which is hardcoded to `core`, but the same
+# mechanism is general-purpose).
+_IMAGE_STACK_MAP=""   # newline-separated: "<image>\t<stack>"
+
+_kustomize_cmd() {
+  if command -v kustomize >/dev/null 2>&1; then
+    printf 'kustomize\n'
+  elif command -v kubectl >/dev/null 2>&1 && kubectl kustomize --help >/dev/null 2>&1; then
+    printf 'kubectl kustomize\n'
+  elif command -v k0s >/dev/null 2>&1; then
+    printf 'k0s kubectl kustomize\n'
+  else
+    printf '\n'
+  fi
+}
+
+# Build the image -> stack mapping for the given enabled stacks. Cached
+# in $_IMAGE_STACK_MAP. Idempotent within a single bootstrap run.
+_build_image_stack_map() {
+  [ -n "$_IMAGE_STACK_MAP" ] && return 0
+  local stacks="${1:?stacks required}"
+  local kk
+  kk="$(_kustomize_cmd)"
+  if [ -z "$kk" ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  no kustomize tooling on this host — skipping image-to-stack scan; real run will resolve via 'k0s kubectl kustomize'"
+      _IMAGE_STACK_MAP="<dry-run-no-scan>"
+      return 1
+    fi
+    fail "neither kustomize, kubectl, nor k0s available — cannot scan stacks"
+    return 1
+  fi
+  local map=""
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local rendered
+    if ! rendered="$($kk "$REPO_ROOT/manifests/stacks/$stack" 2>/dev/null)"; then
+      fail "kustomize build failed for manifests/stacks/$stack"
+      return 1
+    fi
+    local images
+    images="$(printf '%s' "$rendered" | python3 -c '
+import sys, yaml
+seen = set()
+for doc in yaml.safe_load_all(sys.stdin):
+    if not isinstance(doc, dict):
+        continue
+    pod = (doc.get("spec", {}).get("template", {}).get("spec", {})
+           if doc.get("kind") in ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
+           else doc.get("spec", {}) if doc.get("kind") == "Pod" else {})
+    for c in (pod.get("containers", []) or []) + (pod.get("initContainers", []) or []):
+        img = c.get("image", "")
+        if not img:
+            continue
+        # Strip tag/digest, keep "name" portion (registry/path/repo).
+        if "@" in img:
+            img = img.split("@", 1)[0]
+        if img.count(":") >= 1 and not img.startswith("localhost:") \
+           and ":" in img.rsplit("/", 1)[-1]:
+            img = img.rsplit(":", 1)[0]
+        elif img.startswith("localhost:") and img.count(":") >= 2:
+            img = img.rsplit(":", 1)[0]
+        seen.add(img)
+for n in sorted(seen):
+    print(n)
+')"
+    while IFS= read -r img; do
+      [ -z "$img" ] && continue
+      map="$map$img"$'\t'"$stack"$'\n'
+    done <<< "$images"
+  done <<< "$stacks"
+  _IMAGE_STACK_MAP="$map"
+  return 0
+}
+
+# Echo the stack name that owns the given image reference, or empty
+# if no enabled stack contains it. Image refs match by full registry/path
+# (e.g. "localhost:5443/positronic-control" or
+# "foundationbot/argus.operator-ui").
+_stack_for_image() {
+  local needle="${1:?image required}"
+  while IFS=$'\t' read -r img stack; do
+    if [ "$img" = "$needle" ]; then
+      printf '%s\n' "$stack"
+      return 0
+    fi
+  done <<< "$_IMAGE_STACK_MAP"
+  return 1
+}
+
 image_overrides() {
   if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 6.7: image overrides  (skipped)"; return; fi
-  phase "phase 6.7: image overrides (inject kustomize.images into Application)"
+  phase "phase 6.7: image overrides (inject kustomize.images per stack)"
 
   # In dry-run before --host-config has actually been installed, fall
   # back to the input path the operator passed.
@@ -1159,6 +1351,9 @@ image_overrides() {
     return
   fi
 
+  # Get host-config's flat images list. Each item is a string of the
+  # form "name:newTag" (or "name=newName:newTag"). We split off the
+  # name to look up the stack, then route the entire entry there.
   local images_json
   if ! images_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-images-json 2>&1)"; then
     fail "host-config images parse error: $images_json"
@@ -1169,9 +1364,80 @@ image_overrides() {
     return
   fi
 
+  # Enabled stacks for this host-config.
+  local enabled_stacks
+  enabled_stacks="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-enabled-stacks 2>/dev/null || true)"
+  if [ -z "$enabled_stacks" ]; then
+    enabled_stacks=$'core\noperator'
+  fi
+
+  # Build image -> stack map (kustomize-scan; cached). In dry-run on a
+  # host without kustomize tooling, the helper soft-fails — show a
+  # placeholder routing table and continue.
+  if ! _build_image_stack_map "$enabled_stacks"; then
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  (routing table not computed; on a real run each image"
+      info "DRY-RUN   would be matched to its owning stack via kustomize scan)"
+      printf '%s' "$images_json" | python3 -c '
+import json, sys
+imgs = json.load(sys.stdin)
+print(f"  DRY-RUN  {len(imgs)} image(s) to route across enabled stacks")
+'
+      return
+    fi
+    return
+  fi
+
+  # Group images by owning stack (Python — easier than nested bash).
+  local routing_json
+  routing_json="$(python3 - "$_IMAGE_STACK_MAP" "$images_json" <<'PY' 2>&1
+import json, sys
+mapping_raw, images_json = sys.argv[1], sys.argv[2]
+img_to_stack = {}
+for line in mapping_raw.splitlines():
+    if "\t" in line:
+        img, stack = line.split("\t", 1)
+        img_to_stack[img] = stack
+
+per_stack: dict[str, list[str]] = {}
+unrouted: list[str] = []
+for entry in json.loads(images_json):
+    # entry is "name:newTag" or "name=newName:newTag"
+    name = entry.split("=", 1)[0] if "=" in entry else entry.rsplit(":", 1)[0]
+    stack = img_to_stack.get(name)
+    if stack:
+        per_stack.setdefault(stack, []).append(entry)
+    else:
+        unrouted.append(entry)
+
+print(json.dumps({"per_stack": per_stack, "unrouted": unrouted}))
+PY
+)"
+  if ! printf '%s' "$routing_json" | grep -q '"per_stack"'; then
+    fail "image routing failed: $routing_json"
+    return
+  fi
+
+  # Surface unrouted entries (image not found in any enabled stack).
+  local unrouted_count
+  unrouted_count="$(printf '%s' "$routing_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["unrouted"]))')"
+  if [ "$unrouted_count" -gt 0 ]; then
+    info "warning: $unrouted_count image(s) in host-config not found in any enabled stack:"
+    printf '%s' "$routing_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for entry in d["unrouted"]:
+    print(f"    {entry}")
+'
+  fi
+
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  kubectl -n argocd patch app phantomos-$ROBOT --type=merge"
-    info "DRY-RUN    set spec.source.kustomize.images = $images_json"
+    printf '%s' "$routing_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for stack, imgs in d["per_stack"].items():
+    print(f"  DRY-RUN  patch phantomos-'"$ROBOT"'-{stack} kustomize.images = {imgs}")
+'
     return
   fi
 
@@ -1180,51 +1446,67 @@ image_overrides() {
     return
   fi
 
-  if ! "${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" >/dev/null 2>&1; then
-    fail "Application phantomos-$ROBOT not present — gitops phase must run first"
-    return
-  fi
-
-  # Argo Application's spec.source.kustomize is optional and may not
-  # exist yet. JSON merge patch creates the parent objects on the fly.
-  local patch
-  patch=$(printf '{"spec":{"source":{"kustomize":{"images":%s}}}}' "$images_json")
-
-  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
-       --type=merge -p "$patch" >/dev/null; then
-    pass "patched phantomos-$ROBOT  kustomize.images: $images_json"
-  else
-    fail "kubectl patch app phantomos-$ROBOT failed"
-    return
-  fi
-
-  # Force a sync so the new tags take effect immediately. selfHeal is
-  # off by default on these Apps, so without this the operator has to
-  # click sync in the UI or wait for the polling interval.
-  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
-       --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1; then
-    pass "triggered sync of phantomos-$ROBOT"
-  else
-    info "could not trigger sync — argocd will pick up changes on next reconcile"
-  fi
+  # For each stack that has routed images, patch its Application.
+  local stacks_with_overrides
+  stacks_with_overrides="$(printf '%s' "$routing_json" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["per_stack"].keys()))')"
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local app="phantomos-$ROBOT-$stack"
+    if ! "${KUBECTL[@]}" -n argocd get app "$app" >/dev/null 2>&1; then
+      fail "Application $app not present — gitops phase must run first"
+      continue
+    fi
+    local stack_imgs_json
+    stack_imgs_json="$(printf '%s' "$routing_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(json.dumps(d["per_stack"]["'"$stack"'"]))
+')"
+    local patch
+    patch=$(printf '{"spec":{"source":{"kustomize":{"images":%s}}}}' "$stack_imgs_json")
+    if "${KUBECTL[@]}" -n argocd patch app "$app" --type=merge -p "$patch" >/dev/null; then
+      pass "patched $app  kustomize.images: $stack_imgs_json"
+    else
+      fail "kubectl patch app $app failed"
+      continue
+    fi
+    "${KUBECTL[@]}" -n argocd patch app "$app" \
+      --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 \
+      && pass "triggered sync of $app"
+  done <<< "$stacks_with_overrides"
 }
 
 # ---- phase 6.8: dev hostPath mounts (per-host) --------------------------
 
 # Inject the strategic-merge patch derived from
 # /etc/phantomos/host-config.yaml's `devMode:` block into the live
-# phantomos-<robot> Argo Application's spec.source.kustomize.patches.
-# This is the dev-mode escape hatch — operators on dev machines can
-# bind-mount the host's source tree, /data, /dev, etc. into pods so
-# code changes are visible without rebuilding images.
+# phantomos-<robot>-core Argo Application's spec.source.kustomize.patches.
+# (Currently the only known dev-mode target is positronic-control which
+# lives in `core`. The routing function below makes the target stack
+# explicit so adding more dev-mode keys later is a one-line change.)
 #
 # When devMode is unset in host-config.yaml, the patches array is set
 # to [] explicitly, which CLEARS any previously injected dev mounts.
 # This means re-running bootstrap with devMode removed from
 # host-config.yaml reverts the robot to a clean production topology.
+
+# Map a devMode subkey to the stack that owns its target Deployment.
+_dev_mount_target_stack() {
+  case "${1:?key required}" in
+    positronic-control) printf 'core\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 dev_mounts() {
   if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 6.8: dev mounts  (skipped)"; return; fi
   phase "phase 6.8: dev mounts (inject kustomize.patches into Application)"
+
+  # Currently only positronic-control has a devMode target. Hardcode
+  # the stack here; revisit when more devMode targets exist.
+  local target_stack
+  target_stack="$(_dev_mount_target_stack positronic-control)"
+  local target_app="phantomos-$ROBOT-$target_stack"
 
   # Same dry-run/canonical fallback as image_overrides.
   local hc="$HOST_CONFIG_FILE"
@@ -1252,11 +1534,11 @@ dev_mounts() {
   fi
 
   if [ "$patches_json" = "[]" ]; then
-    info "no devMode in host-config — clearing any previously injected patches"
+    info "no devMode in host-config — clearing any previously injected patches on $target_app"
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  kubectl -n argocd patch app phantomos-$ROBOT --type=merge"
+    info "DRY-RUN  kubectl -n argocd patch app $target_app --type=merge"
     info "DRY-RUN    set spec.source.kustomize.patches = $patches_json"
     return
   fi
@@ -1266,30 +1548,30 @@ dev_mounts() {
     return
   fi
 
-  if ! "${KUBECTL[@]}" -n argocd get app "phantomos-$ROBOT" >/dev/null 2>&1; then
-    fail "Application phantomos-$ROBOT not present — gitops phase must run first"
+  if ! "${KUBECTL[@]}" -n argocd get app "$target_app" >/dev/null 2>&1; then
+    fail "Application $target_app not present — gitops phase must run first"
     return
   fi
 
   local patch
   patch=$(printf '{"spec":{"source":{"kustomize":{"patches":%s}}}}' "$patches_json")
 
-  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
+  if "${KUBECTL[@]}" -n argocd patch app "$target_app" \
        --type=merge -p "$patch" >/dev/null; then
     if [ "$patches_json" = "[]" ]; then
-      pass "cleared dev-mode patches on phantomos-$ROBOT"
+      pass "cleared dev-mode patches on $target_app"
     else
-      pass "patched phantomos-$ROBOT  kustomize.patches (dev mounts injected)"
+      pass "patched $target_app  kustomize.patches (dev mounts injected)"
     fi
   else
-    fail "kubectl patch app phantomos-$ROBOT failed"
+    fail "kubectl patch app $target_app failed"
     return
   fi
 
   # Trigger a sync so the new Pod spec rolls out immediately.
-  if "${KUBECTL[@]}" -n argocd patch app "phantomos-$ROBOT" \
+  if "${KUBECTL[@]}" -n argocd patch app "$target_app" \
        --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1; then
-    pass "triggered sync of phantomos-$ROBOT"
+    pass "triggered sync of $target_app"
   else
     info "could not trigger sync — argocd will pick up changes on next reconcile"
   fi

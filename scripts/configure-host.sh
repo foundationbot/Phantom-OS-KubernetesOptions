@@ -87,7 +87,7 @@ C_RESET=$'\033[0m'
 [ -t 1 ] || { C_BOLD=""; C_DIM=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_RED=""; C_RESET=""; }
 
 heading() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$1" "$C_RESET"; }
-hint()    { printf '%s  %s%s\n' "$C_DIM" "$1" "$C_RESET"; }
+hint()    { printf '%s  %s%s\n' "$C_DIM" "${1:-}" "$C_RESET"; }
 example() { printf '%s    e.g. %s%s\n' "$C_DIM" "$1" "$C_RESET"; }
 ok()      { printf '%s  ✓ %s%s\n' "$C_GREEN" "$1" "$C_RESET"; }
 warn()    { printf '%s  ! %s%s\n' "$C_YELLOW" "$1" "$C_RESET"; }
@@ -221,6 +221,10 @@ fi
 # Read seed values via the helper. Empty strings if seed has no value.
 seed_robot=""; seed_ai=""; seed_target_rev=""; seed_production=""; seed_images_yaml=""
 seed_dev_source=""; seed_dev_privileged="false"
+# Per-stack seed values. Empty string = "not set in seed" (use default).
+seed_core_selfheal=""
+seed_operator_enabled=""
+seed_operator_selfheal=""
 declare -a seed_dev_mount_hosts
 declare -a seed_dev_mount_containers
 
@@ -229,6 +233,31 @@ if [ -n "$seed_path" ]; then
   seed_ai="$(python3 "$HELPER" "$seed_path" get aiPcUrl 2>/dev/null || true)"
   seed_target_rev="$(python3 "$HELPER" "$seed_path" get targetRevision 2>/dev/null || true)"
   seed_production="$(python3 "$HELPER" "$seed_path" get production 2>/dev/null || true)"
+
+  # Per-stack seed values (any of these may be empty).
+  while IFS=$'\t' read -r kind name field val; do
+    case "$kind:$name:$field" in
+      stack:core:selfHeal)         seed_core_selfheal="$val" ;;
+      stack:operator:enabled)      seed_operator_enabled="$val" ;;
+      stack:operator:selfHeal)     seed_operator_selfheal="$val" ;;
+    esac
+  done < <(python3 - "$seed_path" <<'PY' 2>/dev/null
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(0)
+stacks = (cfg.get("stacks") or {}) if isinstance(cfg, dict) else {}
+for name in ("core", "operator"):
+    spec = stacks.get(name)
+    if not isinstance(spec, dict):
+        continue
+    if "enabled" in spec:
+        print(f"stack\t{name}\tenabled\t{'true' if spec['enabled'] else 'false'}")
+    if "selfHeal" in spec:
+        print(f"stack\t{name}\tselfHeal\t{'true' if spec['selfHeal'] else 'false'}")
+PY
+)
   # Pull the images: block out by chopping everything before the
   # first 'images:' line. Crude but adequate — seed files come from
   # this repo or were last written by us.
@@ -379,6 +408,75 @@ if confirm "Production mode (selfHeal)?" "$prod_default"; then
   warn "selfHeal enabled — manual kubectl edits to deployed resources will revert"
 fi
 ok "production = $production"
+
+# --- stacks ---
+heading "stack toggles"
+hint "Each stack is a group of related Applications:"
+hint "  core      registry, dma-video, positronic, phantomos-api-server,"
+hint "            yovariable-server. ALWAYS ON — robot won't function without it."
+hint "  operator  argus + nimbus (operator-ui, eg-server, mongodb, redis,"
+hint "            postgres). Toggle off to remove the operator-facing surface."
+hint
+hint "Per-stack selfHeal is optional and overrides the global production"
+hint "flag for that stack only. Most operators leave both unset."
+
+# core: cannot be disabled. Optional selfHeal override.
+core_selfheal="<unset>"
+case "$seed_core_selfheal" in
+  true)  core_selfheal="true" ;;
+  false) core_selfheal="false" ;;
+esac
+hint
+hint "core stack selfHeal:"
+hint "  unset  -> follow global production: setting (currently $production)"
+hint "  true   -> always selfHeal even if production is false"
+hint "  false  -> never selfHeal even if production is true"
+core_sh_default="$core_selfheal"
+[ "$core_sh_default" = "<unset>" ] && core_sh_default=""
+core_sh_input="$(ask "core.selfHeal (true|false|empty)" "$core_sh_default" "Empty = follow global production: flag.")"
+case "$core_sh_input" in
+  true|True)   core_selfheal="true" ;;
+  false|False) core_selfheal="false" ;;
+  "")          core_selfheal="<unset>" ;;
+  *)
+    err "core.selfHeal must be 'true', 'false', or empty — leaving unset"
+    core_selfheal="<unset>"
+    ;;
+esac
+ok "core.selfHeal = $core_selfheal"
+
+# operator: enabled (default true), optional selfHeal override.
+operator_enabled="true"
+op_default="y"
+case "$seed_operator_enabled" in false|False) op_default="n" ;; esac
+if ! confirm "Enable operator stack (argus + nimbus)?" "$op_default"; then
+  operator_enabled="false"
+  info "operator stack will be removed from the cluster on next bootstrap"
+fi
+ok "operator.enabled = $operator_enabled"
+
+operator_selfheal="<unset>"
+if [ "$operator_enabled" = "true" ]; then
+  case "$seed_operator_selfheal" in
+    true)  operator_selfheal="true" ;;
+    false) operator_selfheal="false" ;;
+  esac
+  hint
+  hint "operator stack selfHeal: same semantics as core.selfHeal."
+  op_sh_default="$operator_selfheal"
+  [ "$op_sh_default" = "<unset>" ] && op_sh_default=""
+  op_sh_input="$(ask "operator.selfHeal (true|false|empty)" "$op_sh_default" "Empty = follow global production: flag.")"
+  case "$op_sh_input" in
+    true|True)   operator_selfheal="true" ;;
+    false|False) operator_selfheal="false" ;;
+    "")          operator_selfheal="<unset>" ;;
+    *)
+      err "operator.selfHeal must be 'true', 'false', or empty — leaving unset"
+      operator_selfheal="<unset>"
+      ;;
+  esac
+  ok "operator.selfHeal = $operator_selfheal"
+fi
 
 # --- images ---
 heading "image tag overrides"
@@ -568,6 +666,28 @@ tmp="$(mktemp)"
   printf 'aiPcUrl: %s\n' "$ai_pc_url"
   printf 'targetRevision: %s\n' "$target_revision"
   printf 'production: %s\n' "$production"
+
+  # Stacks block — emit only fields the operator explicitly set, so
+  # the file stays close to the schema defaults and changes diff well.
+  emit_stacks=0
+  if [ "$core_selfheal" != "<unset>" ] \
+     || [ "$operator_enabled" != "true" ] \
+     || [ "$operator_selfheal" != "<unset>" ]; then
+    emit_stacks=1
+  fi
+  if [ "$emit_stacks" = 1 ]; then
+    printf 'stacks:\n'
+    if [ "$core_selfheal" != "<unset>" ]; then
+      printf '  core:\n'
+      printf '    selfHeal: %s\n' "$core_selfheal"
+    fi
+    if [ "$operator_enabled" != "true" ] || [ "$operator_selfheal" != "<unset>" ]; then
+      printf '  operator:\n'
+      [ "$operator_enabled" != "true" ] && printf '    enabled: %s\n' "$operator_enabled"
+      [ "$operator_selfheal" != "<unset>" ] && printf '    selfHeal: %s\n' "$operator_selfheal"
+    fi
+  fi
+
   if [ "$inject_images" = 1 ]; then
     # Count non-empty tags so we don't emit an empty `images:` header.
     nonempty=0
