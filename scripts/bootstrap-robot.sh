@@ -22,15 +22,17 @@
 #   -y, --yes          skip confirmation prompts
 #   --dry-run          print what each phase would do, change nothing
 #   --keep-going       continue after failures (default: bail at first)
-#   --reset            BEFORE phase 1, tear down any pre-existing k0s
-#                      cluster (`k0s stop && k0s reset`) and back up
+#   --reset            Tear down any pre-existing k0s cluster
+#                      (`k0s stop && k0s reset`) and back up
 #                      /root/.kube/config and terraform/terraform.tfstate*
-#                      to .bak.<timestamp>. Then run the rest of the
-#                      bootstrap normally. Cluster workload state is
-#                      destroyed; on-disk hostPath data under
-#                      /var/lib/k0s-data/, /var/lib/registry/, and
-#                      /var/lib/recordings/ is preserved (k0s reset does
-#                      not touch those paths).
+#                      to .bak.<timestamp>, THEN EXIT. Run the script
+#                      again without --reset to bootstrap a fresh
+#                      cluster. Splitting the two passes lets the
+#                      operator inspect/pull/edit between purge and
+#                      rebuild. Cluster workload state is destroyed;
+#                      on-disk hostPath data under /var/lib/k0s-data/,
+#                      /var/lib/registry/, and /var/lib/recordings/ is
+#                      preserved (k0s reset does not touch those paths).
 #   --skip-deps        skip phase 2 (apt installs + k0s/terraform binaries)
 #   --skip-cluster     skip phase 3 (k0s install + systemd start)
 #   --skip-host        skip phase 4 (host containerd/nvidia config)
@@ -200,10 +202,10 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 . "$SCRIPT_DIR/lib/robot-id.sh"
 
 # --seed-pull-secrets-only is namespace-level work — no robot context
-# needed. The other invocations all need to know which robot's overlay
-# they're applying. If --robot wasn't passed, fall back to the persisted
-# /etc/phantomos/robot file or hostname; first bringup must supply --robot.
-if [ "$SEED_PULL_SECRETS_ONLY" = 0 ]; then
+# needed. --reset is a host-level purge that exits before any robot
+# work. Otherwise we need to know which overlay to apply: prefer
+# --robot, then /etc/phantomos/robot, then hostname.
+if [ "$SEED_PULL_SECRETS_ONLY" = 0 ] && [ "$RESET" = 0 ]; then
   if ! ROBOT="$(resolve_robot "$ROBOT")"; then
     exit 2
   fi
@@ -925,7 +927,7 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 6-gitops, 6.5-argocd-admin$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
+phases: $([ "$RESET" = 1 ] && echo "RESET (purge then exit)" || echo "1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 6-gitops, 6.5-argocd-admin$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate")
 flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
@@ -938,6 +940,18 @@ if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
 fi
 
 reset_cluster      ; guard
+
+# --reset is a destructive purge that exits before bootstrapping a fresh
+# cluster. Re-run without --reset to rebuild. Splitting the two passes
+# gives the operator a chance to pull / edit / inspect between the
+# purge and the rebuild, and avoids surprising people who pass --reset
+# expecting "just clean up".
+if [ "$RESET" = 1 ]; then
+  printf '\nreset complete. Re-run without --reset to bootstrap a fresh cluster.\n'
+  summary
+  exit "$FAIL"
+fi
+
 preflight          ; guard
 
 # Persist the resolved robot identity to /etc/phantomos/robot so future
