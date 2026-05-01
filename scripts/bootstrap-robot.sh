@@ -1116,8 +1116,15 @@ argocd_admin() {
   phase "phase 6.5: argocd admin (install CLI + set admin password)"
 
   # 1) install argocd CLI if missing
-  if command -v argocd >/dev/null 2>&1; then
+  #
+  # Verifies the binary actually runs after install — partial downloads
+  # otherwise leave a broken /usr/local/bin/argocd that fails silently
+  # at first use. Up to two attempts before giving up.
+  local argocd_bin=/usr/local/bin/argocd
+  local installed_ok=0
+  if command -v argocd >/dev/null 2>&1 && argocd version --client >/dev/null 2>&1; then
     skip "argocd CLI already in PATH ($(argocd version --client --short 2>/dev/null || echo present))"
+    installed_ok=1
   else
     local argo_arch=""
     case "$(uname -m)" in
@@ -1128,13 +1135,34 @@ argocd_admin() {
     if [ -n "$argo_arch" ]; then
       local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
       if [ "$DRY_RUN" = 1 ]; then
-        info "DRY-RUN  download $url -> /usr/local/bin/argocd"
-      elif curl -fsSL "$url" -o /tmp/argocd \
-           && install -m 0555 /tmp/argocd /usr/local/bin/argocd \
-           && rm -f /tmp/argocd; then
-        pass "argocd CLI installed ($(argocd version --client --short 2>/dev/null || echo ok))"
+        info "DRY-RUN  download $url -> $argocd_bin"
+        installed_ok=1
       else
-        fail "argocd CLI install failed ($url)"
+        local attempt
+        for attempt in 1 2; do
+          rm -f /tmp/argocd
+          if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
+               "$url" -o /tmp/argocd \
+             && [ -s /tmp/argocd ] \
+             && install -m 0555 /tmp/argocd "$argocd_bin" \
+             && "$argocd_bin" version --client >/dev/null 2>&1; then
+            pass "argocd CLI installed ($("$argocd_bin" version --client --short 2>/dev/null || echo ok))"
+            rm -f /tmp/argocd
+            installed_ok=1
+            break
+          fi
+          if [ "$attempt" = 1 ]; then
+            info "argocd download/verify failed; retrying once..."
+            # If a broken binary was placed, get rid of it before retry.
+            [ -f "$argocd_bin" ] && ! "$argocd_bin" version --client >/dev/null 2>&1 \
+              && rm -f "$argocd_bin"
+            sleep 3
+          fi
+        done
+        rm -f /tmp/argocd
+        if [ "$installed_ok" = 0 ]; then
+          fail "argocd CLI install failed after 2 attempts ($url) — manual fix: sudo curl -fsSL -o $argocd_bin $url && sudo chmod +x $argocd_bin"
+        fi
       fi
     fi
   fi
