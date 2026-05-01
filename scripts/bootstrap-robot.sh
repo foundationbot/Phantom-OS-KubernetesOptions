@@ -32,6 +32,9 @@
 #                      skip phase 5 (propagate dockerhub-creds Secret to
 #                      argus / dma-video / nimbus namespaces)
 #   --skip-gitops      skip phase 6 (terraform apply)
+#   --skip-argocd-admin
+#                      skip phase 6.5 (install argocd CLI + reset admin
+#                      password to 1984)
 #   --skip-nvidia      force-skip nvidia runtime config (overrides
 #                      hardware autodetect)
 #   --skip-validate    skip the final validate-local-registry.sh run
@@ -89,6 +92,12 @@
 #                   (installs ArgoCD via the official Helm chart and
 #                   applies gitops/root-app.yaml — the canonical path).
 #                   Wait for phantomos-<robot> to reach Synced + Healthy.
+#   6.5 argocd admin install argocd CLI (latest release) under
+#                   /usr/local/bin/argocd and reset the admin password
+#                   to "1984" by patching argocd-secret with a bcrypt
+#                   hash. Idempotent (always rewrites the hash). Also
+#                   removes argocd-initial-admin-secret since it is no
+#                   longer authoritative.
 #   7. setup-positronic (optional, --setup-positronic)
 #                   Push positronic-control image to local registry,
 #                   build phantom-models, and redeploy the pod.
@@ -112,6 +121,7 @@ SKIP_HOST=0
 SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
 SKIP_GITOPS=0
+SKIP_ARGOCD_ADMIN=0
 SKIP_NVIDIA=0
 SKIP_VALIDATE=0
 SETUP_POSITRONIC=0
@@ -138,6 +148,8 @@ while [ $# -gt 0 ]; do
     --skip-seed-pull-secrets)
                      SKIP_SEED_PULL_SECRETS=1; shift ;;
     --skip-gitops)   SKIP_GITOPS=1; shift ;;
+    --skip-argocd-admin)
+                     SKIP_ARGOCD_ADMIN=1; shift ;;
     --skip-nvidia)   SKIP_NVIDIA=1; shift ;;
     --skip-validate) SKIP_VALIDATE=1; shift ;;
     --setup-positronic)
@@ -729,6 +741,84 @@ gitops() {
   fail "phantomos-$ROBOT did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
 }
 
+# ---- phase 6.5: argocd admin (install CLI + reset password) -------------
+
+# Installs the argocd CLI binary (latest release from GitHub) and resets
+# the admin password to "1984" by writing a bcrypt hash into
+# argocd-secret. Done as a script step rather than via `argocd account
+# update-password` so we don't need a port-forward + login round-trip.
+ARGOCD_ADMIN_PASSWORD="${ARGOCD_ADMIN_PASSWORD:-1984}"
+
+argocd_admin() {
+  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 6.5: argocd admin  (skipped)"; return; fi
+  phase "phase 6.5: argocd admin (install CLI + set admin password)"
+
+  # 1) install argocd CLI if missing
+  if command -v argocd >/dev/null 2>&1; then
+    skip "argocd CLI already in PATH ($(argocd version --client --short 2>/dev/null || echo present))"
+  else
+    local argo_arch=""
+    case "$(uname -m)" in
+      x86_64)  argo_arch=amd64 ;;
+      aarch64) argo_arch=arm64 ;;
+      *)       fail "no argocd CLI binary for arch $(uname -m)" ;;
+    esac
+    if [ -n "$argo_arch" ]; then
+      local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
+      if [ "$DRY_RUN" = 1 ]; then
+        info "DRY-RUN  download $url -> /usr/local/bin/argocd"
+      elif curl -fsSL "$url" -o /tmp/argocd \
+           && install -m 0555 /tmp/argocd /usr/local/bin/argocd \
+           && rm -f /tmp/argocd; then
+        pass "argocd CLI installed ($(argocd version --client --short 2>/dev/null || echo ok))"
+      else
+        fail "argocd CLI install failed ($url)"
+      fi
+    fi
+  fi
+
+  # 2) reset admin password by patching argocd-secret
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  patch argocd-secret with bcrypt(admin password '$ARGOCD_ADMIN_PASSWORD')"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot patch argocd-secret"
+    return
+  fi
+
+  if ! "${KUBECTL[@]}" -n argocd get secret argocd-secret >/dev/null 2>&1; then
+    fail "argocd-secret not found in argocd ns — gitops phase must run first"
+    return
+  fi
+
+  # bcrypt the password. Prefer htpasswd (apache2-utils); install on demand
+  # since phase 2 doesn't pull it in.
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    info "installing apache2-utils (for htpasswd)"
+    apt-get install -y apache2-utils >/dev/null 2>&1 || true
+  fi
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    fail "htpasswd unavailable — install apache2-utils manually and re-run with --skip-* flags up to phase 6.5"
+    return
+  fi
+
+  local hash mtime
+  hash=$(htpasswd -nbBC 10 "" "$ARGOCD_ADMIN_PASSWORD" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
+  mtime=$(date +%FT%T%Z)
+
+  if "${KUBECTL[@]}" -n argocd patch secret argocd-secret --type merge \
+       -p "{\"stringData\":{\"admin.password\":\"$hash\",\"admin.passwordMtime\":\"$mtime\"}}" >/dev/null; then
+    pass "argocd admin password set to '$ARGOCD_ADMIN_PASSWORD'"
+    # initial-admin-secret is no longer authoritative once admin.password
+    # is rotated. Drop it so future operators don't try to use it.
+    "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret --ignore-not-found >/dev/null 2>&1 || true
+  else
+    fail "could not patch argocd-secret"
+  fi
+}
+
 # ---- phase 7: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
@@ -828,8 +918,8 @@ fi
 cat <<EOF
 bootstrap-robot.sh — robot=$ROBOT $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
 repo: $REPO_ROOT
-phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 6-gitops$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
+phases: $([ "$RESET" = 1 ] && echo "RESET, ")1-preflight, 2-deps, 3-cluster, 4-host-config, 5-seed-pull-secrets, 6-gitops, 6.5-argocd-admin$([ "$SETUP_POSITRONIC" = 1 ] && echo ", 7-setup-positronic"), 8-validate
+flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_deps=$SKIP_DEPS skip_host=$SKIP_HOST skip_cluster=$SKIP_CLUSTER skip_seed_pull_secrets=$SKIP_SEED_PULL_SECRETS skip_gitops=$SKIP_GITOPS skip_argocd_admin=$SKIP_ARGOCD_ADMIN skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
 EOF
 
 # When --reset is set, it has its own confirmation prompt with a
@@ -847,6 +937,7 @@ cluster            ; guard
 host_config        ; guard
 seed_pull_secrets  ; guard
 gitops             ; guard
+argocd_admin       ; guard
 setup_positronic   ; guard
 validate
 
