@@ -288,13 +288,13 @@ done
 # ---- helpers ------------------------------------------------------------
 
 PASS=0; FAIL=0; SKIP=0
-pass() { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
-skip() { SKIP=$((SKIP + 1)); printf '  \033[33mSKIP\033[0m  %s\n' "$1"; }
-info() { printf '  %s\n' "$1"; }
+pass() { PASS=$((PASS + 1)); printf '  \033[32m✓ PASS\033[0m  %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); printf '  \033[31m✗ FAIL\033[0m  %s\n' "$1"; }
+skip() { SKIP=$((SKIP + 1)); printf '  \033[33m• SKIP\033[0m  %s\n' "$1"; }
+info() { printf '  \033[2m·\033[0m %s\n' "$1"; }
 note() { printf '  \033[36m→\033[0m %s\n' "$1"; }
-phase() { printf '\n==> %s\n' "$1"; }
-die()  { printf 'error: %s\n' "$*" >&2; exit 2; }
+phase() { printf '\n\033[1;36m──\033[0m \033[1m%s\033[0m\n' "$1"; }
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 2; }
 
 # Hard-stop helper for the dma-ethercat install path. The realtime stack
 # must be healthy before the rest of the gitops-managed pods come up:
@@ -2257,23 +2257,60 @@ validate() {
 
 # ---- main ---------------------------------------------------------------
 
-if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
-  _phase_summary="selected: ${SELECTED_PHASES[*]}"
-elif [ "$RESET" = 1 ]; then
-  _phase_summary="RESET (purge then exit)"
-else
-  _phase_summary="full bootstrap (preflight, deps, cluster, host, seed-pull-secrets, operator-ui-config, gitops, argocd-admin, image-overrides, dev-mounts$([ "$SETUP_POSITRONIC" = 1 ] && echo ", setup-positronic"), validate)"
-fi
+print_plan() {
+  # Each line shows whether a phase is going to run (✓) or be skipped
+  # (─), with a dim "(reason)" when skipped. Aligned by padding the
+  # label column. Adapted from main's print_plan + extended for our
+  # extra phases (operator-ui-config, install-dma-ethercat,
+  # argocd-admin, image-overrides, deployments).
+  _step() {
+    local on=$1 label=$2 why=$3
+    if [ "$on" = "1" ]; then
+      printf '   \033[32m✓\033[0m  %s\n' "$label"
+    elif [ -n "$why" ]; then
+      printf '   \033[2m─  %-44s  %s\033[0m\n' "$label" "($why)"
+    else
+      printf '   \033[2m─  %s\033[0m\n' "$label"
+    fi
+  }
 
-cat <<EOF
-bootstrap-robot.sh — robot=${ROBOT:-<not required for selected phases>} $([ "$DRY_RUN" = 1 ] && echo "(dry-run)")
-repo: $REPO_ROOT
-phases: $_phase_summary
-flags:  yes=$YES dry_run=$DRY_RUN keep_going=$KEEP_GOING reset=$RESET skip_nvidia=$SKIP_NVIDIA skip_validate=$SKIP_VALIDATE
-host-config: $([ -r "$HOST_CONFIG_FILE" ] && echo "$HOST_CONFIG_FILE" || echo "<not present — using flag values, no image overrides>")
-ai_pc_url: ${AI_PC_URL:-<from $PAIRING_FILE>}
-EOF
-unset _phase_summary
+  printf '\n'
+  printf '\033[1;36m──\033[0m \033[1mbootstrap-robot.sh\033[0m  robot=\033[36m%s\033[0m' "${ROBOT:-<not required for selected phases>}"
+  [ "$DRY_RUN" = 1 ] && printf '  \033[33m(dry-run)\033[0m'
+  printf '\n'
+  printf '   \033[2mrepo:\033[0m         %s\n' "$REPO_ROOT"
+  printf '   \033[2mhost-config:\033[0m  %s\n' \
+    "$([ -r "$HOST_CONFIG_FILE" ] && echo "$HOST_CONFIG_FILE" || echo "<missing — wizard will run>")"
+  printf '   \033[2mai_pc_url:\033[0m    %s\n' "${AI_PC_URL:-<from $PAIRING_FILE>}"
+
+  if [ "$RESET" = 1 ]; then
+    printf '\n   \033[1mRESET (purge cluster + exit; re-run without --reset to rebuild)\033[0m\n\n'
+    return
+  fi
+
+  printf '\n   \033[1mplanned phases (in execution order):\033[0m\n'
+
+  _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
+  _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall"
+  _step 1                                                           "phase 1   preflight"                    ""
+  _step 1                                                           "         configure-host (if missing)"   ""
+  _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase 2   deps"                         "--deps not selected"
+  _step $([ "$SKIP_CLUSTER"              = 0 ] && echo 1 || echo 0) "phase 3   cluster"                      "--cluster not selected"
+  _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase 4   host config"                  "--host not selected"
+  _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase 5   seed pull secrets"            "--seed-pull-secrets not selected"
+  _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase 5.5 operator-ui-config"           "--operator-ui-config not selected"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 5.7 install dma-ethercat (gates 6)" "--install-dma-ethercat not selected"
+  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 6   gitops"                       "--gitops not selected"
+  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 6.5 argocd-admin"                 "--argocd-admin not selected"
+  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 6.7 image-overrides"              "--image-overrides not selected"
+  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 6.8 deployments"                  "--deployments not selected"
+  _step "$SETUP_POSITRONIC"                                         "phase 7   setup-positronic"             "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 8   validate"                     "--validate not selected"
+  printf '\n'
+}
+
+print_plan
 
 # When --reset is set, it has its own confirmation prompt with a
 # detailed warning. Skip the generic confirmation.
