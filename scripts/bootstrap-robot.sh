@@ -40,8 +40,10 @@
 #                        password (default '1984' on empty input)
 #   --image-overrides    inject host-config.yaml's images list into
 #                        the live Application
-#   --dev-mounts         inject host-config.yaml's devMode patches
-#                        (or clear, if devMode is unset)
+#   --deployments        inject host-config.yaml's deployments: patches
+#                        per stack (or clear them when absent). The
+#                        deprecated alias --dev-mounts behaves the same
+#                        way for back-compat.
 #   --validate           run scripts/validate-local-registry.sh
 #
 # Targeted overrides (compose with both modes):
@@ -229,7 +231,8 @@ while [ $# -gt 0 ]; do
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
-    --dev-mounts)        SELECTED_PHASES+=(dev-mounts); shift ;;
+    --deployments|--dev-mounts)
+                         SELECTED_PHASES+=(dev-mounts); shift ;;
     --validate)          SELECTED_PHASES+=(validate); shift ;;
 
     # Targeted overrides that compose with both modes.
@@ -1478,35 +1481,21 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
 
 # ---- phase 6.8: dev hostPath mounts (per-host) --------------------------
 
-# Inject the strategic-merge patch derived from
-# /etc/phantomos/host-config.yaml's `devMode:` block into the live
-# phantomos-<robot>-core Argo Application's spec.source.kustomize.patches.
-# (Currently the only known dev-mode target is positronic-control which
-# lives in `core`. The routing function below makes the target stack
-# explicit so adding more dev-mode keys later is a one-line change.)
+# Inject strategic-merge patches derived from
+# /etc/phantomos/host-config.yaml's `deployments:` block into the live
+# Argo Applications. Each deployment under `deployments:` resolves to
+# a target Application based on which stack owns it (positronic-control
+# -> core; phantomos-api-server -> core). All patches for one stack go
+# to that Application's spec.source.kustomize.patches as a single list.
 #
-# When devMode is unset in host-config.yaml, the patches array is set
-# to [] explicitly, which CLEARS any previously injected dev mounts.
-# This means re-running bootstrap with devMode removed from
-# host-config.yaml reverts the robot to a clean production topology.
+# When a stack has no deployments configured (or `deployments:` is
+# absent entirely), its patches array is set to [] explicitly, which
+# CLEARS any previously injected mounts. Re-running bootstrap with
+# fewer mounts in host-config reverts the cluster to that smaller set.
 
-# Map a devMode subkey to the stack that owns its target Deployment.
-_dev_mount_target_stack() {
-  case "${1:?key required}" in
-    positronic-control) printf 'core\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-dev_mounts() {
-  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 6.8: dev mounts  (skipped)"; return; fi
-  phase "phase 6.8: dev mounts (inject kustomize.patches into Application)"
-
-  # Currently only positronic-control has a devMode target. Hardcode
-  # the stack here; revisit when more devMode targets exist.
-  local target_stack
-  target_stack="$(_dev_mount_target_stack positronic-control)"
-  local target_app="phantomos-$ROBOT-$target_stack"
+deployments_phase() {
+  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 6.8: deployments  (skipped)"; return; fi
+  phase "phase 6.8: deployments (inject kustomize.patches per stack)"
 
   # Same dry-run/canonical fallback as image_overrides.
   local hc="$HOST_CONFIG_FILE"
@@ -1514,12 +1503,16 @@ dev_mounts() {
     hc="$HOST_CONFIG_INPUT"
   fi
 
-  local patches_json="[]"
-  local stderr_capture
+  # Get patches grouped by owning stack as JSON, e.g.
+  # [{"stack":"core","patches":[{target,patch},...]}, ...]
+  # The helper always emits an entry per known stack (with empty list
+  # if no deployments target it), so we iterate predictably.
+  local patches_json
   if [ -r "$hc" ]; then
+    local stderr_capture
     stderr_capture="$(mktemp)"
-    if ! patches_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-dev-patches-json 2>"$stderr_capture")"; then
-      fail "host-config dev-patches parse error:"
+    if ! patches_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-deployment-patches-json 2>"$stderr_capture")"; then
+      fail "host-config deployments parse error:"
       cat "$stderr_capture" >&2
       rm -f "$stderr_capture"
       return
@@ -1531,50 +1524,72 @@ dev_mounts() {
       done < "$stderr_capture"
     fi
     rm -f "$stderr_capture"
-  fi
-
-  if [ "$patches_json" = "[]" ]; then
-    info "no devMode in host-config — clearing any previously injected patches on $target_app"
+  else
+    # No host-config — synthesize a clear-all payload for every known stack.
+    patches_json='[{"stack":"core","patches":[]}]'
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  kubectl -n argocd patch app $target_app --type=merge"
-    info "DRY-RUN    set spec.source.kustomize.patches = $patches_json"
+    ROBOT="$ROBOT" python3 - "$patches_json" <<'PY'
+import json, os, sys
+robot = os.environ["ROBOT"]
+data = json.loads(sys.argv[1])
+for entry in data:
+    stack = entry["stack"]
+    app = f"phantomos-{robot}-{stack}"
+    n = len(entry["patches"])
+    if n == 0:
+        print(f"  DRY-RUN  patch {app}: clear kustomize.patches (set to [])")
+    else:
+        targets = ", ".join(p["target"]["name"] for p in entry["patches"])
+        print(f"  DRY-RUN  patch {app}: kustomize.patches = {n} target(s) ({targets})")
+PY
     return
   fi
 
   if [ ${#KUBECTL[@]} -eq 0 ]; then
-    fail "no kubectl/k0s available — cannot patch Application"
+    fail "no kubectl/k0s available — cannot patch Applications"
     return
   fi
 
-  if ! "${KUBECTL[@]}" -n argocd get app "$target_app" >/dev/null 2>&1; then
-    fail "Application $target_app not present — gitops phase must run first"
-    return
-  fi
+  # Iterate stacks; for each, build the {patches: [...]} merge patch
+  # and apply it. Empty list clears prior injections.
+  local entries
+  entries="$(printf '%s' "$patches_json" | python3 -c 'import json,sys; print("\n".join(json.dumps(e) for e in json.load(sys.stdin)))')"
+  while IFS= read -r entry_json; do
+    [ -z "$entry_json" ] && continue
+    local stack
+    stack="$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stack"])')"
+    local target_app="phantomos-$ROBOT-$stack"
 
-  local patch
-  patch=$(printf '{"spec":{"source":{"kustomize":{"patches":%s}}}}' "$patches_json")
-
-  if "${KUBECTL[@]}" -n argocd patch app "$target_app" \
-       --type=merge -p "$patch" >/dev/null; then
-    if [ "$patches_json" = "[]" ]; then
-      pass "cleared dev-mode patches on $target_app"
-    else
-      pass "patched $target_app  kustomize.patches (dev mounts injected)"
+    if ! "${KUBECTL[@]}" -n argocd get app "$target_app" >/dev/null 2>&1; then
+      info "$target_app not present (stack disabled?) — skipping"
+      continue
     fi
-  else
-    fail "kubectl patch app $target_app failed"
-    return
-  fi
 
-  # Trigger a sync so the new Pod spec rolls out immediately.
-  if "${KUBECTL[@]}" -n argocd patch app "$target_app" \
-       --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1; then
-    pass "triggered sync of $target_app"
-  else
-    info "could not trigger sync — argocd will pick up changes on next reconcile"
-  fi
+    local patches_only_json
+    patches_only_json="$(printf '%s' "$entry_json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["patches"]))')"
+    local patch
+    patch=$(printf '{"spec":{"source":{"kustomize":{"patches":%s}}}}' "$patches_only_json")
+
+    if "${KUBECTL[@]}" -n argocd patch app "$target_app" \
+         --type=merge -p "$patch" >/dev/null; then
+      if [ "$patches_only_json" = "[]" ]; then
+        pass "cleared kustomize.patches on $target_app"
+      else
+        local count
+        count="$(printf '%s' "$patches_only_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+        pass "patched $target_app  kustomize.patches ($count target(s) injected)"
+      fi
+    else
+      fail "kubectl patch app $target_app failed"
+      continue
+    fi
+
+    "${KUBECTL[@]}" -n argocd patch app "$target_app" \
+      --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 \
+      && pass "triggered sync of $target_app"
+  done <<< "$entries"
 }
 
 # ---- phase 6.5: argocd admin (install CLI + reset password) -------------
@@ -1867,7 +1882,7 @@ operator_ui_config ; guard
 gitops             ; guard
 argocd_admin       ; guard
 image_overrides    ; guard
-dev_mounts         ; guard
+deployments_phase  ; guard
 setup_positronic   ; guard
 validate
 

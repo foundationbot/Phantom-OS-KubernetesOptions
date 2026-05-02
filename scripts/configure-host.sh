@@ -220,13 +220,19 @@ fi
 
 # Read seed values via the helper. Empty strings if seed has no value.
 seed_robot=""; seed_ai=""; seed_target_rev=""; seed_production=""; seed_images_yaml=""
-seed_dev_source=""; seed_dev_privileged="false"
+# Per-deployment seed values (populated below from either the new
+# `deployments:` block or the legacy `devMode:` block during migration).
+seed_pos_privileged="false"
+declare -a seed_pos_mount_names
+declare -a seed_pos_mount_hosts
+declare -a seed_pos_mount_containers
+declare -a seed_api_mount_names
+declare -a seed_api_mount_hosts
+declare -a seed_api_mount_containers
 # Per-stack seed values. Empty string = "not set in seed" (use default).
 seed_core_selfheal=""
 seed_operator_enabled=""
 seed_operator_selfheal=""
-declare -a seed_dev_mount_hosts
-declare -a seed_dev_mount_containers
 
 if [ -n "$seed_path" ]; then
   seed_robot="$(python3 "$HELPER" "$seed_path" get robot 2>/dev/null || true)"
@@ -270,13 +276,23 @@ PY
     flag               { print }
   ' "$seed_path" || true)"
 
-  # devMode harvest. Inline Python so we don't have to teach the
-  # helper script every accessor.
-  while IFS=$'\t' read -r kind a b; do
-    case "$kind" in
-      source)     seed_dev_source="$a" ;;
-      privileged) seed_dev_privileged="$a" ;;
-      mount)      seed_dev_mount_hosts+=("$a"); seed_dev_mount_containers+=("$b") ;;
+  # deployments harvest. Reads the new schema (`deployments.<name>.mounts`)
+  # and falls back to the old schema (`devMode.<name>.{source,mounts}`)
+  # when the operator hasn't migrated yet. Output is tab-separated:
+  #   pos|api  privileged|mount  <fields...>
+  while IFS=$'\t' read -r tgt kind a b c; do
+    case "$tgt:$kind" in
+      pos:privileged)  seed_pos_privileged="$a" ;;
+      pos:mount)
+        seed_pos_mount_names+=("$a")
+        seed_pos_mount_hosts+=("$b")
+        seed_pos_mount_containers+=("$c")
+        ;;
+      api:mount)
+        seed_api_mount_names+=("$a")
+        seed_api_mount_hosts+=("$b")
+        seed_api_mount_containers+=("$c")
+        ;;
     esac
   done < <(python3 - "$seed_path" <<'PY'
 import sys, yaml
@@ -284,14 +300,38 @@ try:
     cfg = yaml.safe_load(open(sys.argv[1])) or {}
 except Exception:
     sys.exit(0)
-pos = ((cfg.get("devMode") or {}).get("positronic-control") or {})
-src = pos.get("source") or ""
-if src:
-    print(f"source\t{src}\t")
-print(f"privileged\t{'true' if pos.get('privileged') else 'false'}\t")
-for m in pos.get("mounts") or []:
-    if isinstance(m, dict) and m.get("host") and m.get("container"):
-        print(f"mount\t{m['host']}\t{m['container']}")
+if not isinstance(cfg, dict):
+    sys.exit(0)
+
+def emit(target_short, name, host, container):
+    print(f"{target_short}\tmount\t{name}\t{host}\t{container}")
+
+deployments = cfg.get("deployments") or {}
+
+# positronic-control
+pos = deployments.get("positronic-control")
+if isinstance(pos, dict):
+    print(f"pos\tprivileged\t{'true' if pos.get('privileged') else 'false'}")
+    for i, m in enumerate(pos.get("mounts") or []):
+        if isinstance(m, dict) and m.get("host") and m.get("container"):
+            emit("pos", m.get("name") or f"mount-{i}", m["host"], m["container"])
+else:
+    # Migration from legacy `devMode:` schema.
+    legacy = ((cfg.get("devMode") or {}).get("positronic-control") or {})
+    if isinstance(legacy, dict):
+        print(f"pos\tprivileged\t{'true' if legacy.get('privileged') else 'false'}")
+        if legacy.get("source"):
+            emit("pos", "src", legacy["source"], "/src")
+        for i, m in enumerate(legacy.get("mounts") or []):
+            if isinstance(m, dict) and m.get("host") and m.get("container"):
+                emit("pos", m.get("name") or f"legacy-{i}", m["host"], m["container"])
+
+# phantomos-api-server
+api = deployments.get("phantomos-api-server")
+if isinstance(api, dict):
+    for i, m in enumerate(api.get("mounts") or []):
+        if isinstance(m, dict) and m.get("host") and m.get("container"):
+            emit("api", m.get("name") or f"mount-{i}", m["host"], m["container"])
 PY
 )
 fi
@@ -546,112 +586,182 @@ if [ "$inject_images" = 1 ]; then
   done
 fi
 
-# --- devMode (positronic-control hostPath mounts) ---
-heading "dev mode (positronic-control hostPath mounts)"
-hint "Optional. Bind-mounts your local source tree + data dirs into the"
-hint "positronic-control pod so code changes are visible without rebuilding."
-hint "Production robots should leave this OFF."
+# --- deployments: positronic-control mounts ---------------------------
+heading "deployments: positronic-control mounts"
+hint "Per-host hostPath mounts injected into the positronic-control pod."
+hint "The base manifest carries only kernel mounts (/dev, /dev/shm, /tmp);"
+hint "everything else — source checkout, data partitions, recordings,"
+hint "torch cache, training data — comes from this list."
 
-declare -a dev_mount_hosts
-declare -a dev_mount_containers
-dev_enabled=0
-dev_source=""
-dev_privileged="false"
+# Final state:
+declare -a pos_mount_names
+declare -a pos_mount_hosts
+declare -a pos_mount_containers
+pos_privileged="false"
 
-# If the seed already has devMode, default to "yes, edit existing".
-# Otherwise default to "no" so production bringups don't accidentally
-# enable host mounts.
-dev_default_enable="n"
-if [ -n "$seed_dev_source" ] || [ "${#seed_dev_mount_hosts[@]}" -gt 0 ]; then
-  hint "Seed has an existing devMode block — defaulting to keep-and-edit."
-  dev_default_enable="y"
+# Production preset — paths a real production robot needs. Configurable
+# but team-canonical. /data + /data2 = production data partitions;
+# /root/recordings = dma-video write target (matches the recordings PV
+# in nimbus); /data/torch = torch hub cache.
+declare -a preset_prod_names=(data data2 recordings torch-hub)
+declare -a preset_prod_hosts=(/data /data2 /root/recordings /data/torch)
+declare -a preset_prod_containers=(/data /data2 /recordings /root/.cache/torch/hub)
+
+# Dev preset = production + source tree + IHMC config + trainground.
+# These are the additional mounts only a developer's host has.
+_dev_src_default="$invoking_home/development/foundation/positronic_control"
+declare -a preset_dev_names=("${preset_prod_names[@]}"   src                    ihmc-config                                                   trainground)
+declare -a preset_dev_hosts=("${preset_prod_hosts[@]}"   "$_dev_src_default"    "$_dev_src_default/workspace/.ihmc"                           "$invoking_home/trainground")
+declare -a preset_dev_containers=("${preset_prod_containers[@]}" /src           /root/.ihmc                                                   /trainground)
+
+# Decide a default preset based on what the seed has.
+preset_default="production"
+if [ "${#seed_pos_mount_names[@]}" -gt 0 ]; then
+  preset_default="seed"
 fi
 
-if confirm "Enable dev-mode hostPath mounts for positronic-control?" "$dev_default_enable"; then
-  dev_enabled=1
+hint
+hint "Preset:"
+hint "  seed       use the existing mount list from your host-config (if any)"
+hint "  production data, data2, recordings, torch-hub                    (4 mounts)"
+hint "  dev        production + src, ihmc-config, trainground            (7 mounts)"
+hint "  none       no mounts (kernel-only pod)"
+hint "  custom     start empty, add each mount by hand"
+preset_choice="$(ask "preset" "$preset_default" "One of: seed | production | dev | none | custom")"
 
-  # source path — single host dir mounted at /src
-  hint "Single source-tree path (mounted at /src in the pod)."
-  example "$invoking_home/development/foundation/positronic_control"
-  dev_source_default="$seed_dev_source"
-  if [ -z "$dev_source_default" ]; then
-    dev_source_default="$invoking_home/development/foundation/positronic_control"
-  fi
-  dev_source="$(ask "source" "$dev_source_default" "Absolute host path (no '~'). Mounted at /src." validate_abs_path)"
-  ok "source = $dev_source"
-
-  # mounts — start from seed if any, else propose the canonical set
-  if [ "${#seed_dev_mount_hosts[@]}" -gt 0 ]; then
-    for i in "${!seed_dev_mount_hosts[@]}"; do
-      dev_mount_hosts+=("${seed_dev_mount_hosts[$i]}")
-      dev_mount_containers+=("${seed_dev_mount_containers[$i]}")
-    done
-    hint "Editing ${#dev_mount_hosts[@]} mounts from seed. Press enter to keep each, type 'd' to drop."
-  else
-    # canonical fleet dev mount set, mirrors development.docker-compose.yaml
-    dev_mount_hosts+=("/data");                                  dev_mount_containers+=("/data")
-    dev_mount_hosts+=("/data2");                                 dev_mount_containers+=("/data2")
-    dev_mount_hosts+=("$invoking_home/recordings");              dev_mount_containers+=("/recordings")
-    dev_mount_hosts+=("$invoking_home/trainground");             dev_mount_containers+=("/trainground")
-    dev_mount_hosts+=("$invoking_home/.cache/torch/hub");        dev_mount_containers+=("/root/.cache/torch/hub")
-    hint "Proposed standard mount set (matches development.docker-compose.yaml)."
-    hint "Press enter to keep each pair, type 'd' to drop, or type a new path."
-  fi
-
-  declare -a kept_hosts
-  declare -a kept_containers
-  for i in "${!dev_mount_hosts[@]}"; do
-    h="${dev_mount_hosts[$i]}"
-    c="${dev_mount_containers[$i]}"
-    new_host="$(ask "mount $((i+1)) host  -> $c" "$h" "Type 'd' to drop this mount, or press enter to keep.")"
-    if [ "$new_host" = "d" ] || [ "$new_host" = "D" ]; then
-      info "  dropped"
-      continue
+case "$preset_choice" in
+  seed)
+    if [ "${#seed_pos_mount_names[@]}" -eq 0 ]; then
+      warn "seed has no positronic-control mounts; falling back to production preset"
+      pos_mount_names=("${preset_prod_names[@]}")
+      pos_mount_hosts=("${preset_prod_hosts[@]}")
+      pos_mount_containers=("${preset_prod_containers[@]}")
+    else
+      pos_mount_names=("${seed_pos_mount_names[@]}")
+      pos_mount_hosts=("${seed_pos_mount_hosts[@]}")
+      pos_mount_containers=("${seed_pos_mount_containers[@]}")
     fi
-    if ! validate_abs_path "$new_host"; then
-      warn "  skipping invalid path"
-      continue
-    fi
-    new_container="$(ask "mount $((i+1)) container path" "$c" "Where this should appear inside the pod.")"
-    kept_hosts+=("$new_host")
-    kept_containers+=("$new_container")
+    ;;
+  production)
+    pos_mount_names=("${preset_prod_names[@]}")
+    pos_mount_hosts=("${preset_prod_hosts[@]}")
+    pos_mount_containers=("${preset_prod_containers[@]}")
+    ;;
+  dev)
+    pos_mount_names=("${preset_dev_names[@]}")
+    pos_mount_hosts=("${preset_dev_hosts[@]}")
+    pos_mount_containers=("${preset_dev_containers[@]}")
+    ;;
+  none)
+    pos_mount_names=()
+    pos_mount_hosts=()
+    pos_mount_containers=()
+    ;;
+  custom|*)
+    pos_mount_names=()
+    pos_mount_hosts=()
+    pos_mount_containers=()
+    ;;
+esac
+
+# Edit each pre-filled mount in place; allow drop with 'd'.
+declare -a kept_names kept_hosts kept_containers
+for i in "${!pos_mount_names[@]}"; do
+  n="${pos_mount_names[$i]}"
+  h="${pos_mount_hosts[$i]}"
+  c="${pos_mount_containers[$i]}"
+  new_host="$(ask "$(printf 'mount %d  %-13s host  -> %s' "$((i+1))" "[$n]" "$c")" "$h" "Press enter to keep, 'd' to drop, or type a new path.")"
+  if [ "$new_host" = "d" ] || [ "$new_host" = "D" ]; then
+    info "  dropped"
+    continue
+  fi
+  if ! validate_abs_path "$new_host"; then
+    warn "  skipping invalid path"
+    continue
+  fi
+  new_container="$(ask "mount $((i+1)) container path" "$c" "")"
+  kept_names+=("$n")
+  kept_hosts+=("$new_host")
+  kept_containers+=("$new_container")
+done
+while confirm "Add another mount?" "n"; do
+  nn="$(ask "volume name" "" "DNS-1123 short name (e.g. extra-data, dev-config)")"
+  nh="$(ask "host path" "" "Absolute host path." validate_abs_path)"
+  nc="$(ask "container path" "" "Absolute path inside the pod.")"
+  kept_names+=("$nn")
+  kept_hosts+=("$nh")
+  kept_containers+=("$nc")
+done
+pos_mount_names=("${kept_names[@]:-}")
+pos_mount_hosts=("${kept_hosts[@]:-}")
+pos_mount_containers=("${kept_containers[@]:-}")
+# Bash's :- substitution above leaves a single empty element when
+# the source array is empty; strip it.
+if [ "${#pos_mount_names[@]}" -eq 1 ] && [ -z "${pos_mount_names[0]}" ]; then
+  pos_mount_names=(); pos_mount_hosts=(); pos_mount_containers=()
+fi
+ok "${#pos_mount_names[@]} positronic-control mounts kept"
+
+# Privileged toggle.
+hint
+hint "privileged: true grants /dev passthrough and full host access."
+hint "DO NOT enable on production robots."
+priv_default="n"
+[ "$seed_pos_privileged" = "true" ] && priv_default="y"
+if confirm "privileged?" "$priv_default"; then
+  pos_privileged="true"
+  warn "privileged enabled — pod will run with /dev passthrough"
+fi
+ok "positronic-control.privileged = $pos_privileged"
+
+# --- deployments: phantomos-api-server mounts -------------------------
+heading "deployments: phantomos-api-server mounts (optional)"
+hint "phantomos-api-server runs without any extra hostPath mounts by"
+hint "default. Enable this only if you need to expose on-host project"
+hint "trees (operator-ui compose, phantom scripts) into the api pod."
+
+declare -a api_mount_names
+declare -a api_mount_hosts
+declare -a api_mount_containers
+
+api_default="n"
+[ "${#seed_api_mount_names[@]}" -gt 0 ] && api_default="y"
+if confirm "Configure phantomos-api-server mounts?" "$api_default"; then
+  if [ "${#seed_api_mount_names[@]}" -gt 0 ]; then
+    api_mount_names=("${seed_api_mount_names[@]}")
+    api_mount_hosts=("${seed_api_mount_hosts[@]}")
+    api_mount_containers=("${seed_api_mount_containers[@]}")
+    hint "Editing ${#api_mount_names[@]} mounts from seed."
+  fi
+  declare -a api_kept_names api_kept_hosts api_kept_containers
+  for i in "${!api_mount_names[@]}"; do
+    n="${api_mount_names[$i]}"
+    h="${api_mount_hosts[$i]}"
+    c="${api_mount_containers[$i]}"
+    new_host="$(ask "$(printf 'mount %d  %-13s host  -> %s' "$((i+1))" "[$n]" "$c")" "$h" "Press enter to keep, 'd' to drop.")"
+    if [ "$new_host" = "d" ] || [ "$new_host" = "D" ]; then continue; fi
+    if ! validate_abs_path "$new_host"; then warn "  skipping invalid path"; continue; fi
+    new_container="$(ask "mount $((i+1)) container path" "$c" "")"
+    api_kept_names+=("$n")
+    api_kept_hosts+=("$new_host")
+    api_kept_containers+=("$new_container")
   done
-
-  # offer to add more
-  while confirm "Add another mount?" "n"; do
+  while confirm "Add another phantomos-api-server mount?" "n"; do
+    nn="$(ask "volume name" "" "DNS-1123 short name")"
     nh="$(ask "host path" "" "Absolute host path." validate_abs_path)"
-    nc="$(ask "container path" "" "Absolute path inside the pod.")"
-    kept_hosts+=("$nh")
-    kept_containers+=("$nc")
+    nc="$(ask "container path" "" "Absolute path inside the api container.")"
+    api_kept_names+=("$nn")
+    api_kept_hosts+=("$nh")
+    api_kept_containers+=("$nc")
   done
-
-  dev_mount_hosts=()
-  dev_mount_containers=()
-  for i in "${!kept_hosts[@]}"; do
-    dev_mount_hosts+=("${kept_hosts[$i]}")
-    dev_mount_containers+=("${kept_containers[$i]}")
-  done
-  ok "${#dev_mount_hosts[@]} mounts kept"
-
-  # privileged
-  hint "privileged: true grants /dev passthrough and full host access."
-  hint "Required if the pod opens /dev/* (USB, GPIO, /dev/shm with host quirks)."
-  hint "DO NOT enable on production robots."
-  priv_default="$seed_dev_privileged"
-  [ -z "$priv_default" ] && priv_default="false"
-  if [ "$priv_default" = "true" ]; then
-    if confirm "privileged?" "y"; then
-      dev_privileged="true"
-      warn "privileged enabled — pod will run with /dev passthrough"
-    fi
-  else
-    if confirm "privileged?" "n"; then
-      dev_privileged="true"
-      warn "privileged enabled — pod will run with /dev passthrough"
-    fi
+  api_mount_names=("${api_kept_names[@]:-}")
+  api_mount_hosts=("${api_kept_hosts[@]:-}")
+  api_mount_containers=("${api_kept_containers[@]:-}")
+  if [ "${#api_mount_names[@]}" -eq 1 ] && [ -z "${api_mount_names[0]}" ]; then
+    api_mount_names=(); api_mount_hosts=(); api_mount_containers=()
   fi
-  ok "privileged = $dev_privileged"
 fi
+ok "${#api_mount_names[@]} phantomos-api-server mounts kept"
 
 # ---- render -------------------------------------------------------------
 
@@ -703,18 +813,30 @@ tmp="$(mktemp)"
       done
     fi
   fi
-  if [ "$dev_enabled" = 1 ]; then
-    printf 'devMode:\n'
-    printf '  positronic-control:\n'
-    [ -n "$dev_source" ] && printf '    source: %s\n' "$dev_source"
-    if [ "${#dev_mount_hosts[@]}" -gt 0 ]; then
+  # deployments block: emit only entries the operator explicitly
+  # configured. Empty list = no patch injection for that deployment.
+  if [ "${#pos_mount_names[@]}" -gt 0 ] || [ "$pos_privileged" = "true" ] \
+     || [ "${#api_mount_names[@]}" -gt 0 ]; then
+    printf 'deployments:\n'
+    if [ "${#pos_mount_names[@]}" -gt 0 ] || [ "$pos_privileged" = "true" ]; then
+      printf '  positronic-control:\n'
+      [ "$pos_privileged" = "true" ] && printf '    privileged: true\n'
+      if [ "${#pos_mount_names[@]}" -gt 0 ]; then
+        printf '    mounts:\n'
+        for i in "${!pos_mount_names[@]}"; do
+          printf '      - {name: %s, host: %s, container: %s}\n' \
+            "${pos_mount_names[$i]}" "${pos_mount_hosts[$i]}" "${pos_mount_containers[$i]}"
+        done
+      fi
+    fi
+    if [ "${#api_mount_names[@]}" -gt 0 ]; then
+      printf '  phantomos-api-server:\n'
       printf '    mounts:\n'
-      for i in "${!dev_mount_hosts[@]}"; do
-        printf '      - {host: %s, container: %s}\n' \
-          "${dev_mount_hosts[$i]}" "${dev_mount_containers[$i]}"
+      for i in "${!api_mount_names[@]}"; do
+        printf '      - {name: %s, host: %s, container: %s}\n' \
+          "${api_mount_names[$i]}" "${api_mount_hosts[$i]}" "${api_mount_containers[$i]}"
       done
     fi
-    printf '    privileged: %s\n' "$dev_privileged"
   fi
 } > "$tmp"
 

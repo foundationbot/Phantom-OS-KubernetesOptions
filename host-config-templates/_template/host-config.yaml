@@ -59,25 +59,43 @@ images:
   - name: foundationbot/argus.operator-ui
     newTag: REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
 
-# Optional: dev-mode hostPath mounts. Only set this on developer
-# machines. Bootstrap injects a strategic-merge patch into the live
-# core stack's Argo Application; ArgoCD will not revert it. Leaving
-# the block out (or commenting it) reverts the robot to a clean
-# production topology the next time bootstrap runs.
+# Per-host hostPath mounts injected into specific Deployments at
+# bootstrap time. The base manifests in this repo carry only universal
+# kernel/runtime mounts (/dev, /dev/shm, /tmp); EVERY OTHER host path
+# (data partitions, source checkout, recordings, torch cache) lives
+# here. Bootstrap renders these as strategic-merge patches on the
+# matching stack's Argo Application via spec.source.kustomize.patches;
+# ArgoCD will not revert them. Leaving a key out reverts the
+# corresponding Deployment to its bare base on the next bootstrap.
 #
 # Rules:
 #   - Paths must be ABSOLUTE. '~' is rejected (bootstrap runs as root).
 #   - privileged: true grants /dev passthrough — only enable on dev
 #     machines you control. Bootstrap warns loudly when you do.
-#   - Single source path is mounted into the container at /src.
 #
-# devMode:
+# Known deployment keys (others are rejected):
+#   positronic-control     core stack, container 'positronic-control'
+#   phantomos-api-server   core stack, container 'api'
+#
+# deployments:
 #   positronic-control:
-#     source: /home/<user>/development/foundation/positronic_control
+#     privileged: false
 #     mounts:
-#       - {host: /data,                       container: /data}
-#       - {host: /data2,                      container: /data2}
-#       - {host: /home/<user>/recordings,     container: /recordings}
-#       - {host: /home/<user>/trainground,    container: /trainground}
-#       - {host: /home/<user>/.cache/torch/hub, container: /root/.cache/torch/hub}
-#     privileged: true
+#       # Production-canonical paths (every robot)
+#       - {name: data,        host: /data,                container: /data}
+#       - {name: data2,       host: /data2,               container: /data2}
+#       - {name: recordings,  host: /root/recordings,     container: /recordings}
+#       - {name: torch-hub,   host: /data/torch,          container: /root/.cache/torch/hub}
+#       # Developer-only (uncomment on dev hosts)
+#       - {name: src,         host: /home/<user>/development/foundation/positronic_control,
+#                             container: /src}
+#       - {name: ihmc-config, host: /home/<user>/development/foundation/positronic_control/workspace/.ihmc,
+#                             container: /root/.ihmc}
+#       - {name: trainground, host: /home/<user>/trainground, container: /trainground}
+#
+#   phantomos-api-server:
+#     mounts:
+#       - {name: operator-ui-repo, host: /opt/argus/operator_ui,
+#                                  container: /home/operator/repos/argus/operator_ui}
+#       - {name: phantom-scripts,  host: /opt/phantom/scripts,
+#                                  container: /opt/phantom/scripts}

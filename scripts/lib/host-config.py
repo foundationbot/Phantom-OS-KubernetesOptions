@@ -11,7 +11,7 @@ Usage:
   host-config.py <path> get robot
   host-config.py <path> get aiPcUrl
   host-config.py <path> get-images-json
-  host-config.py <path> get-dev-patches-json
+  host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
   host-config.py <path> validate
@@ -135,56 +135,90 @@ def cmd_get_images_json(cfg: dict) -> int:
     return 0
 
 
-def _build_dev_patch_for_positronic(spec: dict) -> tuple[str, list[str]]:
-    """Render a strategic-merge YAML patch for the positronic-control
-    Deployment from a `devMode.positronic-control` spec. Returns
-    (patch_yaml, warnings)."""
+# Registry of known deployments addressable from /etc/phantomos/host-config.yaml's
+# `deployments:` section. Adding a new entry here is the entire change
+# needed to make a new workload's mounts host-configurable.
+#
+#   stack:     which Application stack owns this Deployment (used by
+#              bootstrap to route the patch to phantomos-<robot>-<stack>)
+#   kind:      Kubernetes resource kind for the strategic-merge target
+#   namespace: the Deployment's namespace
+#   container: the container name within the Pod template that the
+#              volumeMounts list applies to
+DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
+    "positronic-control": {
+        "stack": "core",
+        "kind": "Deployment",
+        "namespace": "positronic",
+        "container": "positronic-control",
+    },
+    "phantomos-api-server": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "phantom",
+        "container": "api",
+    },
+}
+
+
+def _build_deployment_patch(
+    deployment_name: str, spec: dict
+) -> tuple[str, list[str]]:
+    """Render a strategic-merge YAML patch for one entry under
+    `deployments:`. Returns (patch_yaml, warnings)."""
+    target = DEPLOYMENT_TARGETS[deployment_name]
     warnings: list[str] = []
-    src = spec.get("source")
     mounts = spec.get("mounts") or []
     privileged = bool(spec.get("privileged"))
 
     volumes: list[dict] = []
     volume_mounts: list[dict] = []
 
-    def _add(host_path: str, container_path: str, vol_name: str) -> None:
-        volumes.append({
-            "name": vol_name,
-            "hostPath": {"path": host_path, "type": "DirectoryOrCreate"},
-        })
-        volume_mounts.append({"name": vol_name, "mountPath": container_path})
-
-    if src:
-        _add(src, "/src", "dev-src")
-
+    seen_names: set[str] = set()
     for i, m in enumerate(mounts):
         if not isinstance(m, dict):
-            raise ValueError(f"devMode mount[{i}] is not a mapping")
+            raise ValueError(
+                f"deployments.{deployment_name}.mounts[{i}] is not a mapping"
+            )
         host = m.get("host")
         container = m.get("container")
+        name = m.get("name") or f"mount-{i}"
         if not host or not container:
             raise ValueError(
-                f"devMode mount[{i}] needs both 'host' and 'container'"
+                f"deployments.{deployment_name}.mounts[{i}] needs both "
+                f"'host' and 'container'"
             )
-        # name must be DNS-1123: lowercase alnum + hyphens.
-        name = f"dev-mount-{i}"
-        _add(host, container, name)
+        if name in seen_names:
+            raise ValueError(
+                f"deployments.{deployment_name}.mounts[{i}]: duplicate "
+                f"volume name {name!r}"
+            )
+        seen_names.add(name)
+        volumes.append({
+            "name": name,
+            "hostPath": {"path": host, "type": "DirectoryOrCreate"},
+        })
+        volume_mounts.append({"name": name, "mountPath": container})
 
     container_spec: dict = {
-        "name": "positronic-control",
+        "name": target["container"],
         "volumeMounts": volume_mounts,
     }
     if privileged:
         warnings.append(
-            "devMode.positronic-control.privileged=true — container will run "
-            "with full host access (/dev passthrough enabled)"
+            f"deployments.{deployment_name}.privileged=true — container "
+            f"will run with full host access (/dev passthrough enabled)"
         )
         container_spec["securityContext"] = {"privileged": True}
 
+    api_version = "apps/v1"
     patch = {
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": {"name": "positronic-control", "namespace": "positronic"},
+        "apiVersion": api_version,
+        "kind": target["kind"],
+        "metadata": {
+            "name": deployment_name,
+            "namespace": target["namespace"],
+        },
         "spec": {
             "template": {
                 "spec": {
@@ -197,47 +231,66 @@ def _build_dev_patch_for_positronic(spec: dict) -> tuple[str, list[str]]:
     return yaml.safe_dump(patch, sort_keys=False), warnings
 
 
-def cmd_get_dev_patches_json(cfg: dict) -> int:
-    """Emit the kustomize.patches array (Argo Application format) as
-    JSON, suitable for `kubectl patch app ... -p '{"spec":{"source":
-    {"kustomize":{"patches":[...]}}}}'`. Empty array if devMode is
-    unset — that explicitly clears any previously injected dev patches."""
-    dev = cfg.get("devMode") or {}
-    if not isinstance(dev, dict):
-        print("error: 'devMode' must be a mapping", file=sys.stderr)
+def cmd_get_deployment_patches_json(cfg: dict) -> int:
+    """Emit a list of patch entries grouped by owning stack:
+    [{"stack": "core", "patches": [{target, patch}, ...]}, ...].
+
+    Bootstrap consumes this and assigns each stack's patch list to that
+    stack's Application's spec.source.kustomize.patches. Stacks with no
+    patches still appear with an empty list so consumers can clear
+    previously-injected patches by setting kustomize.patches=[]."""
+    deployments = cfg.get("deployments") or {}
+    if not isinstance(deployments, dict):
+        print("error: 'deployments' must be a mapping", file=sys.stderr)
         return 2
 
-    patches: list[dict] = []
-    all_warnings: list[str] = []
+    # Initialize empty list per known stack so the output is symmetric.
+    by_stack: dict[str, list[dict]] = {}
+    for target in DEPLOYMENT_TARGETS.values():
+        by_stack.setdefault(target["stack"], [])
 
-    pos = dev.get("positronic-control")
-    if pos:
-        if not isinstance(pos, dict):
+    all_warnings: list[str] = []
+    for name, spec in deployments.items():
+        if name not in DEPLOYMENT_TARGETS:
             print(
-                "error: 'devMode.positronic-control' must be a mapping",
+                f"error: deployments.{name}: unknown deployment "
+                f"(known: {', '.join(sorted(DEPLOYMENT_TARGETS))})",
+                file=sys.stderr,
+            )
+            return 2
+        if not spec:
+            continue
+        if not isinstance(spec, dict):
+            print(
+                f"error: deployments.{name}: must be a mapping",
                 file=sys.stderr,
             )
             return 2
         try:
-            patch_yaml, warnings = _build_dev_patch_for_positronic(pos)
+            patch_yaml, warnings = _build_deployment_patch(name, spec)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         all_warnings.extend(warnings)
-        patches.append(
-            {
-                "target": {
-                    "kind": "Deployment",
-                    "name": "positronic-control",
-                    "namespace": "positronic",
-                },
-                "patch": patch_yaml,
-            }
-        )
+        target = DEPLOYMENT_TARGETS[name]
+        by_stack[target["stack"]].append({
+            "target": {
+                "kind": target["kind"],
+                "name": name,
+                "namespace": target["namespace"],
+            },
+            "patch": patch_yaml,
+        })
 
     for w in all_warnings:
         print(f"warning: {w}", file=sys.stderr)
-    print(json.dumps(patches))
+    # Emit as a stable list-of-{stack,patches} so bash callers can
+    # iterate predictably.
+    out = [
+        {"stack": stack, "patches": by_stack[stack]}
+        for stack in sorted(by_stack)
+    ]
+    print(json.dumps(out))
     return 0
 
 
@@ -316,39 +369,62 @@ def cmd_validate(cfg: dict) -> int:
         if not entry.get("newTag"):
             errors.append(f"images[{i}]: missing 'newTag'")
 
-    # devMode is optional. Reject relative paths and ~ — bootstrap runs
-    # as root, so ~ resolves to /root, which is almost never what the
-    # operator meant.
-    dev = cfg.get("devMode") or {}
-    if dev and not isinstance(dev, dict):
-        errors.append("'devMode' must be a mapping")
+    # deployments is optional. Each key must be a known deployment.
+    # Reject relative paths and '~' — bootstrap runs as root, so '~'
+    # resolves to /root, which is almost never what the operator meant.
+    deps = cfg.get("deployments") or {}
+    if deps and not isinstance(deps, dict):
+        errors.append("'deployments' must be a mapping")
     else:
-        for component, spec in dev.items():
-            if not isinstance(spec, dict):
-                errors.append(f"devMode.{component}: must be a mapping")
+        for name, spec in deps.items():
+            if name not in DEPLOYMENT_TARGETS:
+                errors.append(
+                    f"deployments.{name}: unknown deployment "
+                    f"(known: {', '.join(sorted(DEPLOYMENT_TARGETS))})"
+                )
                 continue
-            paths_to_check: list[tuple[str, str]] = []
-            src = spec.get("source")
-            if src:
-                paths_to_check.append((f"devMode.{component}.source", src))
-            for j, m in enumerate(spec.get("mounts") or []):
-                if isinstance(m, dict) and m.get("host"):
-                    paths_to_check.append(
-                        (f"devMode.{component}.mounts[{j}].host", m["host"])
-                    )
-            for label, p in paths_to_check:
-                if not isinstance(p, str):
-                    errors.append(f"{label}: must be a string")
+            if spec is None:
+                continue
+            if not isinstance(spec, dict):
+                errors.append(f"deployments.{name}: must be a mapping")
+                continue
+            if "privileged" in spec and not isinstance(spec["privileged"], bool):
+                errors.append(
+                    f"deployments.{name}.privileged: must be true or false"
+                )
+            mounts = spec.get("mounts") or []
+            if not isinstance(mounts, list):
+                errors.append(f"deployments.{name}.mounts: must be a list")
+                continue
+            seen_names: set[str] = set()
+            for j, m in enumerate(mounts):
+                label_base = f"deployments.{name}.mounts[{j}]"
+                if not isinstance(m, dict):
+                    errors.append(f"{label_base}: must be a mapping")
                     continue
-                if p.startswith("~"):
-                    errors.append(
-                        f"{label}: '~' is not allowed (bootstrap runs as root, "
-                        f"~ becomes /root). Use the absolute path instead."
-                    )
-                elif not p.startswith("/"):
-                    errors.append(
-                        f"{label}: must be an absolute path (got: {p!r})"
-                    )
+                for required in ("host", "container"):
+                    val = m.get(required)
+                    if not val or not isinstance(val, str):
+                        errors.append(f"{label_base}.{required}: required, must be a string")
+                    elif val.startswith("~"):
+                        errors.append(
+                            f"{label_base}.{required}: '~' is not allowed "
+                            f"(bootstrap runs as root, '~' becomes /root). "
+                            f"Use the absolute path instead."
+                        )
+                    elif not val.startswith("/"):
+                        errors.append(
+                            f"{label_base}.{required}: must be an absolute "
+                            f"path (got: {val!r})"
+                        )
+                vol_name = m.get("name")
+                if vol_name is not None:
+                    if not isinstance(vol_name, str):
+                        errors.append(f"{label_base}.name: must be a string")
+                    elif vol_name in seen_names:
+                        errors.append(f"{label_base}.name: duplicate {vol_name!r}")
+                    else:
+                        seen_names.add(vol_name)
 
     if errors:
         for e in errors:
@@ -371,8 +447,8 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
-    if cmd == "get-dev-patches-json":
-        return cmd_get_dev_patches_json(cfg)
+    if cmd == "get-deployment-patches-json":
+        return cmd_get_deployment_patches_json(cfg)
     if cmd == "get-enabled-stacks":
         return cmd_get_enabled_stacks(cfg)
     if cmd == "get-stack-selfheal":

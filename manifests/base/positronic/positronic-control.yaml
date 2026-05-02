@@ -113,20 +113,17 @@ spec:
             - { name: TRANSFORMERS_CACHE,              value: /root/.cache/huggingface/hub }
             - { name: TORCH_HOME,                      value: /root/.cache/torch/hub }
           volumeMounts:
-            # IPC + devices + scratch
+            # Universal kernel/runtime mounts. EVERY OTHER hostPath
+            # (data partitions, source checkout, recordings, torch
+            # cache, etc.) comes from /etc/phantomos/host-config.yaml's
+            # deployments.positronic-control.mounts list, injected at
+            # bootstrap time as a strategic-merge patch on the
+            # phantomos-<robot>-core Application's
+            # spec.source.kustomize.patches. See docs and the wizard
+            # ('configure-host.sh') for the per-host fields.
             - { name: shm,            mountPath: /dev/shm }
             - { name: dev,            mountPath: /dev }
             - { name: tmp,            mountPath: /tmp }
-            # positronic_control checkout — colcon builds inside the
-            # container land back on the host at /root/foundation/...
-            - { name: src,            mountPath: /src }
-            - { name: ihmc-config,    mountPath: /root/.ihmc }
-            # Data partitions
-            - { name: data,           mountPath: /data }
-            - { name: data2,          mountPath: /data2 }
-            - { name: trainground,    mountPath: /trainground }
-            - { name: recordings,     mountPath: /recordings }
-            - { name: torch-hub,      mountPath: /root/.cache/torch/hub }
             # Models — populated by the load-models initContainer.
             - { name: models,         mountPath: /root/models, readOnly: true }
           resources:
@@ -147,26 +144,15 @@ spec:
             # full device list is enumerated.
             privileged: true
       volumes:
+        # Universal kernel/runtime mounts only. Per-host mounts live
+        # in /etc/phantomos/host-config.yaml's deployments.positronic-control
+        # block and are injected as a strategic-merge patch by bootstrap.
         - name: shm
-          hostPath: { path: /dev/shm,                                       type: Directory }
+          hostPath: { path: /dev/shm, type: Directory }
         - name: dev
-          hostPath: { path: /dev,                                           type: Directory }
+          hostPath: { path: /dev,     type: Directory }
         - name: tmp
-          hostPath: { path: /tmp,                                           type: Directory }
-        - name: src
-          hostPath: { path: /root/foundation/DMA/positronic_control,        type: Directory }
-        - name: ihmc-config
-          hostPath: { path: /root/foundation/DMA/positronic_control/workspace/.ihmc, type: DirectoryOrCreate }
-        - name: data
-          hostPath: { path: /data,                                          type: DirectoryOrCreate }
-        - name: data2
-          hostPath: { path: /data2,                                         type: DirectoryOrCreate }
-        - name: trainground
-          hostPath: { path: /root/trainground,                              type: DirectoryOrCreate }
-        - name: recordings
-          hostPath: { path: /root/recordings,                               type: DirectoryOrCreate }
-        - name: torch-hub
-          hostPath: { path: /data/torch,                                    type: DirectoryOrCreate }
+          hostPath: { path: /tmp,     type: Directory }
         # Models — emptyDir populated by the load-models initContainer
         # which copies /models from the phantom-models image. emptyDir
         # lives on the kubelet's pod-volumes disk so it disappears with
