@@ -379,7 +379,7 @@ run `--gitops` instead.
 
 ### 3.8 Bump dma-ethercat installer image
 
-The bare-metal `dma-ethercat` service is installed by phase 5.7 from a
+The bare-metal `dma-ethercat` service is installed by phase 7 from a
 `.deb` baked into the `foundationbot/dma-ethercat` container image. To
 roll a new version of the realtime stack:
 
@@ -424,12 +424,12 @@ rotation runbook. Short version: re-`docker login`, then re-run
 | 3. cluster | `--cluster` | `k0s install controller --single --enable-worker`; systemd start; write `/root/.kube/config` |
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
-| 5.5 operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
-| 5.7 install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the .deb, enable + start `dma-ethercat.service`. **Gates phase 6.** |
+| 6 operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
+| 7 install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the .deb, enable + start `dma-ethercat.service`. **Gates phase 8.** |
 | 6. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
-| 6.5 argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
-| 6.7 image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
-| 6.8 deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
+| 9 argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
+| 10 image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
+| 11 deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
 | 7. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
 | 8. validate | `--validate` | `scripts/validate-local-registry.sh` |
 
@@ -870,7 +870,7 @@ sudo bash scripts/bootstrap-robot.sh --host --skip-nvidia
 
 ### 7.15 dma-ethercat installer Job stuck or service won't start
 
-Phase 5.7 (`--install-dma-ethercat`) gates phase 6 (gitops): a failure
+Phase 5.7 (`--install-dma-ethercat`) gates phase 8 (gitops): a failure
 halts the bootstrap with a `DMA-ETHERCAT FAILURE` banner. Diagnose by
 sub-step.
 

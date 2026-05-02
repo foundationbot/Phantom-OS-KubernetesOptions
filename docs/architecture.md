@@ -152,9 +152,9 @@ Everything in this directory is **per-device** and not in git.
 | --- | --- | --- | --- |
 | `robot` | One-line robot identity (DNS-1123). Persisted at first bringup so subsequent runs don't need `--robot`. | `bootstrap-robot.sh` (`persist_robot`) | `bootstrap-robot.sh`, `positronic.sh`, any tool sourcing `scripts/lib/robot-id.sh` |
 | `host-config.yaml` | Single per-host source-of-truth. Robot identity, AI PC URL, target revision, production flag, stack toggles, image overrides, deployment mounts. | `configure-host.sh` (interactive) or operator (manual) or `bootstrap-robot.sh --host-config <path>` (copy) | `bootstrap-robot.sh`, `configure-host.sh`, `host-config.py` |
-| `operator-ui-pairing.yaml` | The AI_PC_URL value for the operator-ui pod. Rendered into a ConfigMap in the `argus` namespace. | `bootstrap-robot.sh` phase 5.5 (`operator_ui_config`) | `kubectl apply` -> `argus/operator-ui-pairing` ConfigMap; operator-ui Deployment via `configMapKeyRef` |
-| `phantomos-app-core.yaml` | Rendered ArgoCD Application CR for the `core` stack (`phantomos-<robot>-core`). | `bootstrap-robot.sh` phase 6 (`gitops` -> `_gitops_render_app`) | `kubectl apply -f` |
-| `phantomos-app-operator.yaml` | Rendered ArgoCD Application CR for the `operator` stack (`phantomos-<robot>-operator`). Absent when `stacks.operator.enabled: false`. | `bootstrap-robot.sh` phase 6 | `kubectl apply -f` |
+| `operator-ui-pairing.yaml` | The AI_PC_URL value for the operator-ui pod. Rendered into a ConfigMap in the `argus` namespace. | `bootstrap-robot.sh` phase 6 (`operator_ui_config`) | `kubectl apply` -> `argus/operator-ui-pairing` ConfigMap; operator-ui Deployment via `configMapKeyRef` |
+| `phantomos-app-core.yaml` | Rendered ArgoCD Application CR for the `core` stack (`phantomos-<robot>-core`). | `bootstrap-robot.sh` phase 8 (`gitops` -> `_gitops_render_app`) | `kubectl apply -f` |
+| `phantomos-app-operator.yaml` | Rendered ArgoCD Application CR for the `operator` stack (`phantomos-<robot>-operator`). Absent when `stacks.operator.enabled: false`. | `bootstrap-robot.sh` phase 8 | `kubectl apply -f` |
 
 ```
 +----------------------------------------------------------------+
@@ -165,7 +165,7 @@ Everything in this directory is **per-device** and not in git.
                            |                                      |
                            v                                      v
        +----------------------------------+   +----------------------------------+
-       | bootstrap-robot.sh phase 5.5     |   | bootstrap-robot.sh phase 6        |
+       | bootstrap-robot.sh phase 6     |   | bootstrap-robot.sh phase 8        |
        | renders                          |   | renders one Application per stack |
        | /etc/phantomos/                  |   | /etc/phantomos/                   |
        |   operator-ui-pairing.yaml       |   |   phantomos-app-core.yaml         |
@@ -179,9 +179,9 @@ Everything in this directory is **per-device** and not in git.
                                               +----------------------------------+
                                                               |
                                               +---------------+---------------+
-                                              | phase 6.7 image-overrides:    |
+                                              | phase 10 image-overrides:    |
                                               |   patch kustomize.images      |
-                                              | phase 6.8 deployments:        |
+                                              | phase 11 deployments:        |
                                               |   patch kustomize.patches     |
                                               +-------------------------------+
                                                               |
@@ -229,7 +229,7 @@ List of mappings; each is a kustomize image override.
 | `newName` | string | optional | Replacement image name. When omitted, only the tag changes. |
 
 The list overrides anything declared in `manifests/stacks/<stack>/`. Bootstrap
-phase 6.7 indexes which stack each image belongs to (by running kustomize on
+phase 10 indexes which stack each image belongs to (by running kustomize on
 the stack and scanning rendered container image references), then patches
 each stack's Application with only the entries it owns.
 
@@ -304,7 +304,7 @@ images:
   - name: foundationbot/argus.operator-ui      # routed to operator stack
     newTag: 7af9c2b
   - name: foundationbot/dma-ethercat            # special case: not a stack image;
-    newTag: main-latest-aarch64                 # phase 5.7 reads it directly to
+    newTag: main-latest-aarch64                 # phase 7 reads it directly to
                                                 # render the installer Job
 
 deployments:
@@ -339,16 +339,16 @@ compose with both modes.
 | 3 | `cluster` | `/etc/k0s/k0s.yaml` (skip if present) | installs k0s controller, starts `k0scontroller`, writes `/root/.kube/config` | `--cluster` |
 | 4 | `host` | `lspci`, `/dev/nvidia0` | `/etc/k0s/containerd.toml` (mirror + nvidia runtime); restarts k0s | `--host` |
 | 5 | `seed-pull-secrets` | `--dockerhub-secret-file`, `~/.docker/config.json`, existing `phantom/dockerhub-creds` | creates `dockerhub-creds` Secret in `argus`, `dma-video`, `nimbus`, `phantom` | `--seed-pull-secrets` |
-| 5.5 | `operator-ui-config` | `--ai-pc-url` or existing `/etc/phantomos/operator-ui-pairing.yaml` | `/etc/phantomos/operator-ui-pairing.yaml`; ConfigMap `argus/operator-ui-pairing`; rolls operator-ui if changed | `--operator-ui-config` |
-| 5.7 | `install-dma-ethercat` | `host-config.yaml:images` for `foundationbot/dma-ethercat`; `manifests/installers/dma-ethercat/base/job.yaml` | renders `/etc/phantomos/dma-ethercat-installer.yaml` (sed PLACEHOLDER → tag); `kubectl apply -f` (Job, NOT ArgoCD-managed); waits `Complete`; `dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb`; `systemctl enable --now dma-ethercat.service`. Failure halts bootstrap with `DMA-ETHERCAT FAILURE` banner — gitops does NOT run | `--install-dma-ethercat` (skip with `--skip-ethercat-install`) |
-| 6 | `gitops` | `host-config.yaml` (`robot`, `targetRevision`, `stacks`, `production`); template | `terraform apply` (argocd Helm); `/etc/phantomos/phantomos-app-<stack>.yaml`; `kubectl apply` per stack; waits Synced+Healthy | `--gitops` |
-| 6.5 | `argocd-admin` | argocd CLI | installs `argocd` to `/usr/local/bin/`; resets admin password to `1984` (bcrypt patched into `argocd-secret`); deletes `argocd-initial-admin-secret` | `--argocd-admin` |
-| 6.7 | `image-overrides` | `host-config.yaml:images`; runs kustomize on each enabled stack to map image -> stack | patches each Application's `spec.source.kustomize.images`; triggers sync | `--image-overrides` |
-| 6.8 | `deployments` | `host-config.yaml:deployments`; `DEPLOYMENT_TARGETS` map | patches each Application's `spec.source.kustomize.patches` (one per owning stack); empty `[]` clears prior injection | `--deployments` (legacy alias `--dev-mounts`) |
-| 7 | `setup-positronic` (optional) | `--positronic-image`, local Docker | pushes positronic-control image; builds phantom-models; redeploys pod | `--setup-positronic` |
-| 8 | `validate` | local registry | nothing (smoke test) | `--validate` |
+| 6 | `operator-ui-config` | `--ai-pc-url` or existing `/etc/phantomos/operator-ui-pairing.yaml` | `/etc/phantomos/operator-ui-pairing.yaml`; ConfigMap `argus/operator-ui-pairing`; rolls operator-ui if changed | `--operator-ui-config` |
+| 7 | `install-dma-ethercat` | `host-config.yaml:images` for `foundationbot/dma-ethercat`; `manifests/installers/dma-ethercat/base/job.yaml` | renders `/etc/phantomos/dma-ethercat-installer.yaml` (sed PLACEHOLDER → tag); `kubectl apply -f` (Job, NOT ArgoCD-managed); waits `Complete`; `dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb`; `systemctl enable --now dma-ethercat.service`. Failure halts bootstrap with `DMA-ETHERCAT FAILURE` banner — gitops does NOT run | `--install-dma-ethercat` (skip with `--skip-ethercat-install`) |
+| 8 | `gitops` | `host-config.yaml` (`robot`, `targetRevision`, `stacks`, `production`); template | `terraform apply` (argocd Helm); `/etc/phantomos/phantomos-app-<stack>.yaml`; `kubectl apply` per stack; waits Synced+Healthy | `--gitops` |
+| 9 | `argocd-admin` | argocd CLI | installs `argocd` to `/usr/local/bin/`; resets admin password to `1984` (bcrypt patched into `argocd-secret`); deletes `argocd-initial-admin-secret` | `--argocd-admin` |
+| 10 | `image-overrides` | `host-config.yaml:images`; runs kustomize on each enabled stack to map image -> stack | patches each Application's `spec.source.kustomize.images`; triggers sync | `--image-overrides` |
+| 11 | `deployments` | `host-config.yaml:deployments`; `DEPLOYMENT_TARGETS` map | patches each Application's `spec.source.kustomize.patches` (one per owning stack); empty `[]` clears prior injection | `--deployments` (legacy alias `--dev-mounts`) |
+| 12 | `setup-positronic` (optional) | `--positronic-image`, local Docker | pushes positronic-control image; builds phantom-models; redeploys pod | `--setup-positronic` |
+| 13 | `validate` | local registry | nothing (smoke test) | `--validate` |
 
-### Why phase 5.7 gates phase 6
+### Why phase 7 gates phase 8
 
 `dma-ethercat` runs **bare metal**, not in k0s. It owns the EtherCAT
 NIC, runs at SCHED_FIFO priority on isolated RT cores, and exposes
@@ -370,7 +370,7 @@ manually pass `--skip-ethercat-install` to bypass the gate.
 
 The `foundationbot/dma-ethercat` image is the only entry under
 `host-config.yaml:images` that is **not** routed to a stack. Phase 6.7
-(image-overrides) silently skips it; phase 5.7 reads it directly via
+(image-overrides) silently skips it; phase 7 reads it directly via
 the host-config helper and substitutes the tag into the rendered
 installer Job before applying.
 
@@ -458,8 +458,8 @@ argocd namespace
   |       targetRevision: main
   |       path: manifests/stacks/core
   |       kustomize:
-  |         images:   [...]   # injected by phase 6.7
-  |         patches:  [...]   # injected by phase 6.8
+  |         images:   [...]   # injected by phase 10
+  |         patches:  [...]   # injected by phase 11
   |     destination: in-cluster, namespace=default (CreateNamespace=true)
   |     syncPolicy.automated.selfHeal: false (production: flag)
   |
@@ -490,7 +490,7 @@ argocd namespace
 
 Each child Application stands alone. There is no umbrella "app-of-apps"
 parent (Stage D removed it). Disabling a stack via
-`stacks.<name>.enabled: false` makes phase 6 delete that Application and its
+`stacks.<name>.enabled: false` makes phase 8 delete that Application and its
 rendered file; the workloads under it are pruned by ArgoCD because the
 Application carries `prune: true`.
 
@@ -541,7 +541,7 @@ operator                  configure-host.sh         /etc/phantomos/        boots
    |                            |                          |                       |    by owning stack      |
    |                            |                          |                       |--- kubectl patch app -->| Application.spec.source.kustomize.patches
    |                            |                          |                       |                         |
-   |                            |                          |                       |--- phase 8: validate -->|
+   |                            |                          |                       |--- phase 13: validate -->|
 ```
 
 ArgoCD then re-runs `kustomize build manifests/stacks/<stack>/` against the
@@ -556,7 +556,7 @@ ArgoCD's Application CR has a `spec.source.kustomize` object with two fields
 that bootstrap drives at runtime. Both are arrays inside a single CR; both
 are read by ArgoCD's kustomize backend at every reconcile.
 
-### `spec.source.kustomize.images` — image overrides (phase 6.7)
+### `spec.source.kustomize.images` — image overrides (phase 10)
 
 Each entry is a string of the form `name=newName:newTag` or `name:newTag`.
 ArgoCD passes them to `kustomize edit set image` before running the build,
@@ -579,14 +579,14 @@ Code: `bootstrap-robot.sh:_build_image_stack_map`, `_stack_for_image`,
 **Special case: `foundationbot/dma-ethercat`.** This image is the one
 entry under `host-config.yaml:images` that is *not* routed to a stack.
 Phase 6.7 silently skips it (the routing helper carries a
-`NON_STACK_IMAGES` skip-set). Instead, phase 5.7 (`install-dma-ethercat`)
+`NON_STACK_IMAGES` skip-set). Instead, phase 7 (`install-dma-ethercat`)
 reads the tag directly via the host-config Python helper and
 substitutes it into the rendered installer Job at
 `/etc/phantomos/dma-ethercat-installer.yaml`. The Job is
 bootstrap-managed (under `manifests/installers/dma-ethercat/`, outside
 any kustomize stack) so ArgoCD never touches it.
 
-### `spec.source.kustomize.patches` — strategic-merge patches (phase 6.8)
+### `spec.source.kustomize.patches` — strategic-merge patches (phase 11)
 
 Each entry is a `{target, patch}` mapping where `target` selects the
 resource (kind/name/namespace) and `patch` is a YAML strategic-merge
@@ -673,14 +673,14 @@ didn't eliminate per-robot directories yet.
 **Stage D — Application CR rendered per-host.**
 `gitops/apps/<robot>/` was deleted from git. The Application CR template
 moved to `host-config-templates/_template/phantomos-app.yaml.tpl`. Bootstrap
-phase 6 started rendering it with sed substitutions and applying the result
+phase 8 started rendering it with sed substitutions and applying the result
 from `/etc/phantomos/phantomos-app.yaml`. Repo lost the umbrella-app reference
 to robot identity. Stage D was the first version of the codebase where adding
 a new robot did not require a git commit.
 
 **Stage E — image-overrides + dev-mode mounts.**
 Per-host kustomize image tags moved into `host-config.yaml:images` and were
-injected into the live Application via `spec.source.kustomize.images` (phase 6.7).
+injected into the live Application via `spec.source.kustomize.images` (phase 10).
 First cut of mount injection landed as `host-config.yaml:devMode` (single
 flat list of dev-only mounts on positronic-control). Same patch path
 (`spec.source.kustomize.patches`), narrower schema.

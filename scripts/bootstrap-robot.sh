@@ -229,7 +229,7 @@ PULL_SECRET_NAME="dockerhub-creds"
 # Each entry is an ERE substring matched case-insensitively against
 # `systemctl list-unit-files --state=enabled` output. Append to extend.
 #   - api.*server   — host-systemd copy of phantomos-api-server (replaced by pod)
-#   - dma.*ethercat — replaced by phase 5.7 .deb install
+#   - dma.*ethercat — replaced by phase 7 .deb install
 SYSTEM_SERVICE_PATTERNS=(
   'api.*server'
   'dma.*ethercat'
@@ -604,7 +604,7 @@ stop_existing_services() {
 
 # ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall) ----
 
-# Tear down the dma-ethercat realtime control service so phase 5.7's
+# Tear down the dma-ethercat realtime control service so phase 7's
 # install lands on a clean slate.
 #   1. systemctl stop dma-ethercat.service     (if active)
 #   2. systemctl disable dma-ethercat.service  (if enabled)
@@ -1131,7 +1131,7 @@ seed_pull_secrets() {
   done
 }
 
-# ---- phase 5.5: operator-ui-config (AI_PC_URL ConfigMap) ---------------
+# ---- phase 6: operator-ui-config (AI_PC_URL ConfigMap) ---------------
 
 # Per-host pairing file. Holds a ConfigMap manifest that the operator-ui
 # Deployment in the argus namespace reads via configMapKeyRef. Lives on
@@ -1161,8 +1161,8 @@ EOF
 }
 
 operator_ui_config() {
-  if [ "$SKIP_OPERATOR_UI_CONFIG" = 1 ]; then phase "phase 5.5: operator-ui-config  (skipped)"; return; fi
-  phase "phase 5.5: operator-ui-config (operator-ui AI_PC_URL ConfigMap)"
+  if [ "$SKIP_OPERATOR_UI_CONFIG" = 1 ]; then phase "phase 6: operator-ui-config  (skipped)"; return; fi
+  phase "phase 6: operator-ui-config (operator-ui AI_PC_URL ConfigMap)"
 
   if [ "$DRY_RUN" = 1 ]; then
     if [ -n "$AI_PC_URL" ]; then
@@ -1228,11 +1228,11 @@ operator_ui_config() {
   fi
 }
 
-# ---- phase 5.7: install dma-ethercat (gates phase 6) -------------------
+# ---- phase 7: install dma-ethercat (gates phase 8) -------------------
 
 # Install the dma-ethercat .deb baked into the foundationbot/dma-ethercat
 # container image, then enable+start the bare-metal service. Runs strictly
-# BEFORE phase 6 (gitops) — the realtime stack must be up before
+# BEFORE phase 8 (gitops) — the realtime stack must be up before
 # positronic-control / dma-video / nimbus pods come up because they read
 # EtherCAT shared memory via hostIPC.
 #
@@ -1253,10 +1253,10 @@ DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-inst
 
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
-    phase "phase 5.7: install dma-ethercat  (skipped — --skip-ethercat-install)"
+    phase "phase 7: install dma-ethercat  (skipped — --skip-ethercat-install)"
     return
   fi
-  phase "phase 5.7: install dma-ethercat (gates phase 6)"
+  phase "phase 7: install dma-ethercat (gates phase 8)"
 
   if [ ! -f "$DMA_ETHERCAT_TEMPLATE" ]; then
     fail "$DMA_ETHERCAT_TEMPLATE missing"
@@ -1390,7 +1390,7 @@ PY
   fi
 }
 
-# ---- phase 6: gitops ----------------------------------------------------
+# ---- phase 8: gitops ----------------------------------------------------
 
 # Phase 6 has two pieces:
 #   6a. terraform install of argocd Helm chart
@@ -1498,8 +1498,8 @@ _gitops_render_app() {
 }
 
 gitops() {
-  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 6: gitops  (skipped)"; return; fi
-  phase "phase 6: gitops (install argocd + apply per-host Application)"
+  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 8: gitops  (skipped)"; return; fi
+  phase "phase 8: gitops (install argocd + apply per-host Application)"
 
   if [ ! -d "$REPO_ROOT/terraform" ]; then
     fail "terraform/ not found at $REPO_ROOT/terraform"; return
@@ -1677,7 +1677,7 @@ PY
   done <<< "$enabled_stacks"
 }
 
-# ---- phase 6.7: kustomize image overrides (per-host, per-stack) ---------
+# ---- phase 10: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
 # Bootstrap discovers the mapping by running kustomize on each enabled
@@ -1777,8 +1777,8 @@ _stack_for_image() {
 }
 
 image_overrides() {
-  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 6.7: image overrides  (skipped)"; return; fi
-  phase "phase 6.7: image overrides (inject kustomize.images per stack)"
+  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 10: image overrides  (skipped)"; return; fi
+  phase "phase 10: image overrides (inject kustomize.images per stack)"
 
   # In dry-run before --host-config has actually been installed, fall
   # back to the input path the operator passed.
@@ -1845,7 +1845,7 @@ for line in mapping_raw.splitlines():
 # Job) and intentionally don't route to a stack's kustomize.images.
 # Skip silently rather than warn.
 NON_STACK_IMAGES = {
-    "foundationbot/dma-ethercat",  # phase 5.7 install_dma_ethercat
+    "foundationbot/dma-ethercat",  # phase 7 install_dma_ethercat
 }
 
 per_stack: dict[str, list[str]] = {}
@@ -1927,7 +1927,7 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
   done <<< "$stacks_with_overrides"
 }
 
-# ---- phase 6.8: dev hostPath mounts (per-host) --------------------------
+# ---- phase 11: dev hostPath mounts (per-host) --------------------------
 
 # Inject strategic-merge patches derived from
 # /etc/phantomos/host-config.yaml's `deployments:` block into the live
@@ -1942,8 +1942,8 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
 # fewer mounts in host-config reverts the cluster to that smaller set.
 
 deployments_phase() {
-  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 6.8: deployments  (skipped)"; return; fi
-  phase "phase 6.8: deployments (inject kustomize.patches per stack)"
+  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 11: deployments  (skipped)"; return; fi
+  phase "phase 11: deployments (inject kustomize.patches per stack)"
 
   # Same dry-run/canonical fallback as image_overrides.
   local hc="$HOST_CONFIG_FILE"
@@ -2040,7 +2040,7 @@ PY
   done <<< "$entries"
 }
 
-# ---- phase 6.5: argocd admin (install CLI + reset password) -------------
+# ---- phase 9: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
 # the admin password by writing a bcrypt hash into argocd-secret. Done
@@ -2058,8 +2058,8 @@ PY
 _argocd_default_password="1984"
 
 argocd_admin() {
-  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 6.5: argocd admin  (skipped)"; return; fi
-  phase "phase 6.5: argocd admin (install CLI + set admin password)"
+  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 9: argocd admin  (skipped)"; return; fi
+  phase "phase 9: argocd admin (install CLI + set admin password)"
 
   # 1) install argocd CLI if missing
   #
@@ -2187,11 +2187,11 @@ argocd_admin() {
   fi
 }
 
-# ---- phase 7: setup-positronic (optional) --------------------------------
+# ---- phase 12: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
   if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 7: setup-positronic"
+  phase "phase 12: setup-positronic"
 
   if [ -z "$POSITRONIC_IMAGE" ]; then
     fail "--setup-positronic requires --positronic-image <image>"
@@ -2244,11 +2244,11 @@ setup_positronic() {
   fi
 }
 
-# ---- phase 8: validate --------------------------------------------------
+# ---- phase 13: validate --------------------------------------------------
 
 validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 8: validate  (skipped)"; return; fi
-  phase "phase 8: validate"
+  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 13: validate  (skipped)"; return; fi
+  phase "phase 13: validate"
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
@@ -2305,20 +2305,20 @@ print_plan() {
   _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
   _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
   _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall"
-  _step 1                                                           "phase 1   preflight"                    ""
-  _step 1                                                           "         configure-host (if missing)"   ""
-  _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase 2   deps"                         "--deps not selected"
-  _step $([ "$SKIP_CLUSTER"              = 0 ] && echo 1 || echo 0) "phase 3   cluster"                      "--cluster not selected"
-  _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase 4   host config"                  "--host not selected"
-  _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase 5   seed pull secrets"            "--seed-pull-secrets not selected"
-  _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase 5.5 operator-ui-config"           "--operator-ui-config not selected"
-  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 5.7 install dma-ethercat (gates 6)" "--install-dma-ethercat not selected"
-  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 6   gitops"                       "--gitops not selected"
-  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 6.5 argocd-admin"                 "--argocd-admin not selected"
-  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 6.7 image-overrides"              "--image-overrides not selected"
-  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 6.8 deployments"                  "--deployments not selected"
-  _step "$SETUP_POSITRONIC"                                         "phase 7   setup-positronic"             "--setup-positronic not set"
-  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 8   validate"                     "--validate not selected"
+  _step 1                                                           "phase  1  preflight"                    ""
+  _step 1                                                           "          configure-host (if missing)"  ""
+  _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase  2  deps"                         "--deps not selected"
+  _step $([ "$SKIP_CLUSTER"              = 0 ] && echo 1 || echo 0) "phase  3  cluster"                      "--cluster not selected"
+  _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase  4  host config"                  "--host not selected"
+  _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase  5  seed pull secrets"            "--seed-pull-secrets not selected"
+  _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  7  install dma-ethercat (gates 8)" "--install-dma-ethercat not selected"
+  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase  8  gitops"                       "--gitops not selected"
+  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase  9  argocd-admin"                 "--argocd-admin not selected"
+  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 10  image-overrides"              "--image-overrides not selected"
+  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 11  deployments"                  "--deployments not selected"
+  _step "$SETUP_POSITRONIC"                                         "phase 12  setup-positronic"             "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 13  validate"                     "--validate not selected"
   printf '\n'
 }
 
