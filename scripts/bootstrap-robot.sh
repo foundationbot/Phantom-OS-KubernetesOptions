@@ -1642,25 +1642,37 @@ PY
     pass "phantomos-$ROBOT-$stack applied"
   done <<< "$enabled_stacks"
 
-  # Wait for all enabled stacks to reach Synced + Healthy.
-  info "waiting for each enabled stack to reach Synced+Healthy..."
+  # Wait for Synced only — NOT Healthy.
+  #
+  # The Application is Synced as soon as ArgoCD applies the rendered
+  # manifests to the cluster. At this point the Deployment carries
+  # `image: localhost:5443/<name>:PLACEHOLDER` (literal — the base
+  # manifest's default), the pod will Init:ImagePullBackOff, and the
+  # Application reports Healthy=Degraded.
+  #
+  # Phase 6.7 (image-overrides) and 6.8 (deployments) run AFTER this
+  # phase to inject `kustomize.images` and `kustomize.patches` onto
+  # the live Application; ArgoCD then re-renders with the real tags
+  # and per-host mounts, the pod pulls a real image, and Healthy
+  # transitions to Healthy on its own. Waiting for Healthy here would
+  # deadlock the bootstrap (10 min) before image-overrides ever ran.
+  info "waiting for each enabled stack to reach Synced (Healthy comes after image-overrides)..."
   while IFS= read -r stack; do
     [ -z "$stack" ] && continue
     local app="phantomos-$ROBOT-$stack"
-    local sync health
+    local sync
     local ok=0
-    for _ in $(seq 1 120); do
+    for _ in $(seq 1 60); do
       sync=$("${KUBECTL[@]}" -n argocd get app "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
-      health=$("${KUBECTL[@]}" -n argocd get app "$app" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-      if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
-        pass "$app  Synced + Healthy"
+      if [ "$sync" = "Synced" ]; then
+        pass "$app  Synced (Healthy pending image-overrides)"
         ok=1
         break
       fi
       sleep 5
     done
     if [ "$ok" = 0 ]; then
-      fail "$app did not reach Synced+Healthy in 10min (sync=${sync:-?} health=${health:-?})"
+      fail "$app did not reach Synced in 5min (sync=${sync:-?})"
     fi
   done <<< "$enabled_stacks"
 }
