@@ -890,12 +890,15 @@ host_config() {
   if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
   phase "phase 4: host config"
 
-  if containerd_mirror_already_configured; then
-    skip "containerd mirror already configured (hosts.toml has localhost:5443 + upstream)"
-  elif [ "$DRY_RUN" = 1 ]; then
+  # Always run — the script is internally idempotent (hosts.toml insert
+  # is no-op when already present, daemon.json merge is no-op when the
+  # entry exists). A previous skip-on-hosts.toml-only check could leave
+  # /etc/docker/daemon.json without the insecure-registries entry on
+  # hosts where containerd was set up but docker wasn't.
+  if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/configure-k0s-containerd-mirror.sh"
   elif bash "$REPO_ROOT/scripts/configure-k0s-containerd-mirror.sh"; then
-    pass "containerd mirror configured"
+    pass "containerd mirror configured (idempotent re-run)"
   else
     fail "configure-k0s-containerd-mirror.sh"
   fi
