@@ -1640,41 +1640,17 @@ PY
       return
     fi
     pass "phantomos-$ROBOT-$stack applied"
+    # Force ArgoCD to reconcile immediately instead of waiting for the
+    # next 3-min refresh tick.
+    "${KUBECTL[@]}" -n argocd annotate app "phantomos-$ROBOT-$stack" \
+      argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
   done <<< "$enabled_stacks"
 
-  # Wait for Synced only — NOT Healthy.
-  #
-  # The Application is Synced as soon as ArgoCD applies the rendered
-  # manifests to the cluster. At this point the Deployment carries
-  # `image: localhost:5443/<name>:PLACEHOLDER` (literal — the base
-  # manifest's default), the pod will Init:ImagePullBackOff, and the
-  # Application reports Healthy=Degraded.
-  #
-  # Phase 6.7 (image-overrides) and 6.8 (deployments) run AFTER this
-  # phase to inject `kustomize.images` and `kustomize.patches` onto
-  # the live Application; ArgoCD then re-renders with the real tags
-  # and per-host mounts, the pod pulls a real image, and Healthy
-  # transitions to Healthy on its own. Waiting for Healthy here would
-  # deadlock the bootstrap (10 min) before image-overrides ever ran.
-  info "waiting for each enabled stack to reach Synced (Healthy comes after image-overrides)..."
-  while IFS= read -r stack; do
-    [ -z "$stack" ] && continue
-    local app="phantomos-$ROBOT-$stack"
-    local sync
-    local ok=0
-    for _ in $(seq 1 60); do
-      sync=$("${KUBECTL[@]}" -n argocd get app "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
-      if [ "$sync" = "Synced" ]; then
-        pass "$app  Synced (Healthy pending image-overrides)"
-        ok=1
-        break
-      fi
-      sleep 5
-    done
-    if [ "$ok" = 0 ]; then
-      fail "$app did not reach Synced in 5min (sync=${sync:-?})"
-    fi
-  done <<< "$enabled_stacks"
+  # No Synced wait — phases 10 (image-overrides) and 11 (deployments)
+  # only need the Application resource to exist (kubectl apply above
+  # makes it so), not for ArgoCD to have reconciled yet. Their patches
+  # land on the spec; ArgoCD's next reconcile renders with them in
+  # place. The validate phase confirms Healthy.
 }
 
 # ---- phase 10: kustomize image overrides (per-host, per-stack) ---------
