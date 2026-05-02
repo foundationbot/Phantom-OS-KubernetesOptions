@@ -572,19 +572,44 @@ if [ "$inject_images" = 1 ]; then
     done <<< "$seed_images_yaml"
   fi
 
-  if [ "${#img_names[@]}" -eq 0 ]; then
-    # No seed images — start from the canonical fleet set.
-    img_names+=("localhost:5443/positronic-control"); img_tags+=("")
-    img_names+=("localhost:5443/phantom-models");      img_tags+=("")
-    img_names+=("foundationbot/argus.operator-ui");    img_tags+=("")
-    img_names+=("foundationbot/dma-ethercat");         img_tags+=("main-latest-aarch64")
-  fi
+  # Canonical fleet image set with sensible default tags. Schema-evolution
+  # safe: any new entry here is automatically offered to existing
+  # host-configs as a missing-from-seed prompt, so adding an image to
+  # the fleet doesn't require operators to hand-edit their host-config.
+  declare -a canonical_names=(
+    "localhost:5443/positronic-control"
+    "localhost:5443/phantom-models"
+    "foundationbot/argus.operator-ui"
+    "foundationbot/dma-ethercat"
+  )
+  declare -a canonical_default_tags=(
+    ""
+    ""
+    ""
+    "main-latest-aarch64"
+  )
+
+  # Append any canonical name missing from the seed. Existing seed
+  # entries (and their values) are preserved; missing ones get the
+  # canonical default tag so the operator can press enter to accept.
+  for c_i in "${!canonical_names[@]}"; do
+    c_name="${canonical_names[$c_i]}"
+    found=0
+    for i in "${!img_names[@]}"; do
+      if [ "${img_names[$i]}" = "$c_name" ]; then found=1; break; fi
+    done
+    if [ "$found" = 0 ]; then
+      img_names+=("$c_name")
+      img_tags+=("${canonical_default_tags[$c_i]}")
+    fi
+  done
 
   echo
   hint "Press enter to keep each tag, or type a new value."
   example "0.2.44-production-cu130 (positronic-control)"
   example "2026-04-30 (phantom-models — date-stamped)"
   example "585e58803318f5366d793986ad3e6129538b8a81 (operator-ui — git SHA)"
+  example "main-latest-aarch64 (dma-ethercat — host arch matters)"
   for i in "${!img_names[@]}"; do
     new_tag="$(ask "${img_names[$i]} tag" "${img_tags[$i]}" "Tag this robot should pull. Empty to skip this image.")"
     img_tags[$i]="$new_tag"
