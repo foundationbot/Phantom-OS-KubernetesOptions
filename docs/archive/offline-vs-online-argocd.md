@@ -1,3 +1,5 @@
+> **Archived 2026-05-02.** Snapshot of an earlier design. Current architecture lives in [`docs/architecture.md`](../architecture.md).
+
 # ArgoCD Topology: Offline (per-robot) vs Online (central on AWS)
 
 **Decision: Online. One central ArgoCD on AWS, robots run plain k0s.**

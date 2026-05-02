@@ -6,15 +6,21 @@
 
 ## Problem
 
-Today the repo carries per-device knowledge — robot identity, AI PC pairings,
-image tag overrides, dev-mode mounts. Stage A–D of `feat/per-host-pairing-and-robot-id`
-moved most of it into `/etc/phantomos/host-config.yaml` on the device, and Stage
-D removed `gitops/apps/<robot>/` entirely (Application CR is rendered per-host
-at bringup). That works for tens of robots; it does not work for a million.
+Stages A through F (shipped on `feat/per-host-pairing-and-robot-id` and
+`feat/per-stack-applications`) moved per-device knowledge — robot identity,
+AI PC pairings, image tag overrides, hostPath mounts — out of git and into
+`/etc/phantomos/host-config.yaml` on each device. The repo is a library
+now: identical on every robot, per-host data lives only on the device.
+Stage F additionally split the umbrella Application into per-stack children
+(`phantomos-<robot>-core`, `phantomos-<robot>-operator`) and replaced the
+narrow `devMode:` schema with the general `deployments:` schema.
 
-At fleet scale the repo must be a **library** (manifests, scripts, templates)
-that is identical for every device. Per-device data must live in a **fleet
-control plane** that is queried by hardware identity at bringup.
+That works for tens of robots; it does not work for a million. The remaining
+gap: the operator must still SSH to a device to edit its `host-config.yaml`,
+and the canonical record of "what's on mk09" is whatever happens to be on
+the disk in `/etc/phantomos/` right now. At fleet scale per-device data must
+live in a **fleet control plane** that is queried by hardware identity at
+bringup; the device pulls its config rather than holding it.
 
 ## Goals
 
@@ -88,9 +94,12 @@ disconnected/dev environments and for offline imaging.
 
 ### Migration
 
-- **Phase 0 (already done):** repo carries no per-robot data. Per-robot
-  values live in each device's `/etc/phantomos/host-config.yaml`. Team
-  runbook holds the canonical record while we get the control plane up.
+- **Phase 0 (already done — Stages A–F).** Repo carries no per-robot data.
+  Per-robot values live in each device's `/etc/phantomos/host-config.yaml`.
+  Team runbook holds the canonical record while we get the control plane up.
+  Per-stack Applications, image overrides via `kustomize.images` injection,
+  hostPath mounts via `kustomize.patches` injection. See
+  [docs/architecture.md](../architecture.md) for the post-Phase-0 design.
 - **Phase 1 (this RFC's implementation):** stand up the control plane.
   Bulk-register existing robots in it (read each device's
   `/etc/phantomos/host-config.yaml`, POST to the API, key by serial).
@@ -99,7 +108,7 @@ disconnected/dev environments and for offline imaging.
 - **Phase 3:** retire the runbook's per-robot config table — control
   plane is the only source of truth. `host-config-templates/_template/`
   in the repo stays as the schema reference.
-- **Phase 4:** parameterize `manifests/robots/<name>/` overlays via
+- **Phase 4:** parameterize `manifests/stacks/<name>/` overlays via
   Kustomize components selected by the rendered Application CR. Eventual
   goal: a single generic overlay tree, fully driven by per-host config.
 
