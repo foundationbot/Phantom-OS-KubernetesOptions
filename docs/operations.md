@@ -377,6 +377,42 @@ If you only need to point ArgoCD at a new branch (and not pick up
 script changes), edit `targetRevision:` in `host-config.yaml` and
 run `--gitops` instead.
 
+### 3.8 Bump dma-ethercat installer image
+
+The bare-metal `dma-ethercat` service is installed by phase 5.7 from a
+`.deb` baked into the `foundationbot/dma-ethercat` container image. To
+roll a new version of the realtime stack:
+
+```bash
+sudo $EDITOR /etc/phantomos/host-config.yaml
+# under images:, set or update:
+#   - name: foundationbot/dma-ethercat
+#     newTag: <new-tag>     # e.g. main-latest-aarch64
+
+sudo bash scripts/bootstrap-robot.sh --install-dma-ethercat
+```
+
+The phase deletes any prior `dma-ethercat-installer` Job, re-renders
+`/etc/phantomos/dma-ethercat-installer.yaml` from
+`manifests/installers/dma-ethercat/base/job.yaml` with the new tag,
+applies it, waits for the Job to copy the `.deb` to
+`/var/lib/dma-ethercat-installer/`, runs `dpkg -i`, and re-enables
+`dma-ethercat.service`. Halts with a `DMA-ETHERCAT FAILURE` banner on
+any failure — gitops does NOT run on a failed install, so a broken
+realtime stack can't bring up the pods that depend on it.
+
+Tag conventions:
+- `…-latest-aarch64` — Jetson / arm64 robots
+- `…-latest-amd64`   — x86 robots
+- timestamped CI tags for known-good pins (e.g. `…-20260126T191500-aarch64`)
+
+### 3.9 Rotate DockerHub PAT
+
+See [`dockerhub-creds.md`](./dockerhub-creds.md) for the full PAT
+rotation runbook. Short version: re-`docker login`, then re-run
+`bootstrap-robot.sh --seed-pull-secrets` to propagate the refreshed
+`dockerhub-creds` Secret to every namespace that pulls private images.
+
 ---
 
 ## 4. Bootstrap phases reference
@@ -387,8 +423,9 @@ run `--gitops` instead.
 | 2. deps | `--deps` | apt installs, k0s binary, terraform binary |
 | 3. cluster | `--cluster` | `k0s install controller --single --enable-worker`; systemd start; write `/root/.kube/config` |
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
-| 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus` |
+| 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
 | 5.5 operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
+| 5.7 install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the .deb, enable + start `dma-ethercat.service`. **Gates phase 6.** |
 | 6. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
 | 6.5 argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
 | 6.7 image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
@@ -550,6 +587,37 @@ Recipe:
 
 Skip steps 1-2 only if you want the bare-base behaviour (no host
 data mounted into positronic-control).
+
+### 6.4 Legacy `manifests/installers/dma-ethercat/robots/<name>/` → `host-config.yaml:images`
+
+Older bringups carried a per-robot kustomization under
+`manifests/installers/dma-ethercat/robots/<robot>/kustomization.yaml`
+that pinned the `foundationbot/dma-ethercat` image tag for the
+installer Job. Our branch templatizes that tree away: a single
+template at `manifests/installers/dma-ethercat/base/job.yaml` carries
+`:PLACEHOLDER`, and the real tag flows in via `host-config.yaml:images`.
+
+Migration:
+
+1. Read the tag from the (now-deleted) per-robot file on a sibling
+   robot or from team records, e.g. `main-latest-aarch64`.
+
+2. Add it to `/etc/phantomos/host-config.yaml`:
+
+   ```yaml
+   images:
+     - name: foundationbot/dma-ethercat
+       newTag: main-latest-aarch64
+   ```
+
+3. Apply:
+
+   ```bash
+   sudo bash scripts/bootstrap-robot.sh --install-dma-ethercat
+   ```
+
+The base template renders once and reuses across the fleet — adding a
+new robot needs no installer-tree commit, just a host-config entry.
 
 ---
 
@@ -777,6 +845,9 @@ sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets \
   --dockerhub-secret-file /path/to/dockerconfig.json
 ```
 
+For credstore-detection, fresh-pull recipes, and the PAT rotation
+loop, see [`dockerhub-creds.md`](./dockerhub-creds.md).
+
 ### 7.14 NVIDIA pod missing GPU
 
 ```bash
@@ -797,7 +868,80 @@ To force-skip nvidia config (CPU-only host):
 sudo bash scripts/bootstrap-robot.sh --host --skip-nvidia
 ```
 
-### 7.15 Validate-registry failures
+### 7.15 dma-ethercat installer Job stuck or service won't start
+
+Phase 5.7 (`--install-dma-ethercat`) gates phase 6 (gitops): a failure
+halts the bootstrap with a `DMA-ETHERCAT FAILURE` banner. Diagnose by
+sub-step.
+
+Image tag missing from host-config:
+
+```bash
+grep -A1 'foundationbot/dma-ethercat' /etc/phantomos/host-config.yaml \
+  || echo "no entry — add one and re-run"
+```
+
+Job never reached `Complete`:
+
+```bash
+sudo k0s kubectl -n phantom describe job dma-ethercat-installer
+sudo k0s kubectl -n phantom logs -l app=dma-ethercat-installer --tail=100
+```
+
+Most common: image pull failure. The Job pulls a private image —
+confirm `dockerhub-creds` is in the `phantom` namespace:
+
+```bash
+sudo k0s kubectl -n phantom get secret dockerhub-creds
+# missing? re-seed:
+sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets
+sudo bash scripts/bootstrap-robot.sh --install-dma-ethercat
+```
+
+Job complete but no `.deb` on host:
+
+```bash
+ls -la /var/lib/dma-ethercat-installer/
+# expect dma-ethercat-*.deb + .ready sentinel
+```
+
+If only `.ready` is present, the image's `/usr/local/share/dma/deb/`
+path was empty — usually a wrong-arch tag (an `-amd64` tag on an
+aarch64 host, or vice versa). Fix the tag in `host-config.yaml:images`
+and re-run.
+
+`dpkg -i` failed: read the dpkg output (the bootstrap streams it).
+Usually a missing runtime dependency. Install the dependency and
+re-run the phase.
+
+`systemctl enable --now dma-ethercat.service` failed:
+
+```bash
+sudo systemctl status dma-ethercat.service
+sudo journalctl -u dma-ethercat -b --no-pager
+```
+
+Most common: wrong `INTERFACE` in `/etc/dma/dma-ethercat.env`, or the
+RT cores in `DMA_CPU_AFFINITY` aren't isolated.
+
+To bypass the gate while debugging (e.g. operator already has the
+`.deb` installed by hand):
+
+```bash
+sudo bash scripts/bootstrap-robot.sh --skip-ethercat-install
+```
+
+### 7.16 Reading dma-ethercat logs
+
+The DMA service runs on the host (not in k0s), so its logs are in
+journald — **not** `kubectl logs`:
+
+```bash
+sudo journalctl -u dma-ethercat -f
+sudo journalctl -u dma-ethercat -b --no-pager   # this boot
+```
+
+### 7.17 Validate-registry failures
 
 ```bash
 sudo bash scripts/validate-local-registry.sh

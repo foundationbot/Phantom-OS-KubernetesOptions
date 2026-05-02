@@ -303,6 +303,9 @@ images:
     newTag: 2026-04-30
   - name: foundationbot/argus.operator-ui      # routed to operator stack
     newTag: 7af9c2b
+  - name: foundationbot/dma-ethercat            # special case: not a stack image;
+    newTag: main-latest-aarch64                 # phase 5.7 reads it directly to
+                                                # render the installer Job
 
 deployments:
   positronic-control:
@@ -335,14 +338,55 @@ compose with both modes.
 | 2 | `deps` | apt / network | `/usr/local/bin/{k0s,terraform}`; apt packages | `--deps` |
 | 3 | `cluster` | `/etc/k0s/k0s.yaml` (skip if present) | installs k0s controller, starts `k0scontroller`, writes `/root/.kube/config` | `--cluster` |
 | 4 | `host` | `lspci`, `/dev/nvidia0` | `/etc/k0s/containerd.toml` (mirror + nvidia runtime); restarts k0s | `--host` |
-| 5 | `seed-pull-secrets` | `--dockerhub-secret-file`, `~/.docker/config.json`, existing `phantom/dockerhub-creds` | creates `dockerhub-creds` Secret in `argus`, `dma-video`, `nimbus` | `--seed-pull-secrets` |
+| 5 | `seed-pull-secrets` | `--dockerhub-secret-file`, `~/.docker/config.json`, existing `phantom/dockerhub-creds` | creates `dockerhub-creds` Secret in `argus`, `dma-video`, `nimbus`, `phantom` | `--seed-pull-secrets` |
 | 5.5 | `operator-ui-config` | `--ai-pc-url` or existing `/etc/phantomos/operator-ui-pairing.yaml` | `/etc/phantomos/operator-ui-pairing.yaml`; ConfigMap `argus/operator-ui-pairing`; rolls operator-ui if changed | `--operator-ui-config` |
+| 5.7 | `install-dma-ethercat` | `host-config.yaml:images` for `foundationbot/dma-ethercat`; `manifests/installers/dma-ethercat/base/job.yaml` | renders `/etc/phantomos/dma-ethercat-installer.yaml` (sed PLACEHOLDER → tag); `kubectl apply -f` (Job, NOT ArgoCD-managed); waits `Complete`; `dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb`; `systemctl enable --now dma-ethercat.service`. Failure halts bootstrap with `DMA-ETHERCAT FAILURE` banner — gitops does NOT run | `--install-dma-ethercat` (skip with `--skip-ethercat-install`) |
 | 6 | `gitops` | `host-config.yaml` (`robot`, `targetRevision`, `stacks`, `production`); template | `terraform apply` (argocd Helm); `/etc/phantomos/phantomos-app-<stack>.yaml`; `kubectl apply` per stack; waits Synced+Healthy | `--gitops` |
 | 6.5 | `argocd-admin` | argocd CLI | installs `argocd` to `/usr/local/bin/`; resets admin password to `1984` (bcrypt patched into `argocd-secret`); deletes `argocd-initial-admin-secret` | `--argocd-admin` |
 | 6.7 | `image-overrides` | `host-config.yaml:images`; runs kustomize on each enabled stack to map image -> stack | patches each Application's `spec.source.kustomize.images`; triggers sync | `--image-overrides` |
 | 6.8 | `deployments` | `host-config.yaml:deployments`; `DEPLOYMENT_TARGETS` map | patches each Application's `spec.source.kustomize.patches` (one per owning stack); empty `[]` clears prior injection | `--deployments` (legacy alias `--dev-mounts`) |
 | 7 | `setup-positronic` (optional) | `--positronic-image`, local Docker | pushes positronic-control image; builds phantom-models; redeploys pod | `--setup-positronic` |
 | 8 | `validate` | local registry | nothing (smoke test) | `--validate` |
+
+### Why phase 5.7 gates phase 6
+
+`dma-ethercat` runs **bare metal**, not in k0s. It owns the EtherCAT
+NIC, runs at SCHED_FIFO priority on isolated RT cores, and exposes
+shared-memory queues at `/dev/shm/{actuals,desired,errors,...}` that
+the `positronic-control`, `dma-video`, and `nimbus` pods read through
+`hostIPC: true`. If gitops brings those pods up before the `.deb` is
+installed and the service is healthy, they crashloop on missing IPC
+and DockerHub rate-limits the namespace inside ten minutes.
+
+Phase 5.7 closes the gate. The installer Job is bootstrap-managed (lives
+under `manifests/installers/dma-ethercat/`, deliberately outside any
+ArgoCD stack) so it can be force-deleted-and-reapplied on every run
+without racing the reconciler — same pattern as `--seed-pull-secrets`.
+The Job's only task is copying a baked-in `.deb` from the image to a
+hostPath; `dpkg -i` and `systemctl enable --now` happen on the bootstrap
+side. Failure raises a `DMA-ETHERCAT FAILURE` banner and short-circuits
+the bootstrap, leaving gitops un-run. Operators who installed the `.deb`
+manually pass `--skip-ethercat-install` to bypass the gate.
+
+The `foundationbot/dma-ethercat` image is the only entry under
+`host-config.yaml:images` that is **not** routed to a stack. Phase 6.7
+(image-overrides) silently skips it; phase 5.7 reads it directly via
+the host-config helper and substitutes the tag into the rendered
+installer Job before applying.
+
+### Pre-phases (default-on)
+
+Three pre-phases run before phase 1 (preflight) on every bootstrap.
+Each is cheap and idempotent on a healthy host; collectively they
+ensure the cluster phase doesn't fight a host port collision or a
+running realtime service. Skip with `--skip-docker-stop`,
+`--skip-stop-services`, `--skip-ethercat-uninstall`.
+
+| Pre-phase | What it does |
+| --- | --- |
+| `purge_docker` | `docker stop $(docker ps -q)` — stop every running container |
+| `stop_existing_services` | walk `systemctl list-unit-files --state=enabled --type=service`; stop+disable any unit name matching `SYSTEM_SERVICE_PATTERNS` (today: `api.*server`, `dma.*ethercat`) |
+| `uninstall_ethercat` | stop+disable `dma-ethercat.service`; run `/usr/sbin/dma-ethercat-uninstall` if present. Phase 5.7 reinstalls fresh from the image |
 
 Phase ordering with file I/O:
 
@@ -531,6 +575,16 @@ followed by a sync trigger.
 
 Code: `bootstrap-robot.sh:_build_image_stack_map`, `_stack_for_image`,
 `image_overrides`. Helper: `host-config.py:cmd_get_images_json`.
+
+**Special case: `foundationbot/dma-ethercat`.** This image is the one
+entry under `host-config.yaml:images` that is *not* routed to a stack.
+Phase 6.7 silently skips it (the routing helper carries a
+`NON_STACK_IMAGES` skip-set). Instead, phase 5.7 (`install-dma-ethercat`)
+reads the tag directly via the host-config Python helper and
+substitutes it into the rendered installer Job at
+`/etc/phantomos/dma-ethercat-installer.yaml`. The Job is
+bootstrap-managed (under `manifests/installers/dma-ethercat/`, outside
+any kustomize stack) so ArgoCD never touches it.
 
 ### `spec.source.kustomize.patches` — strategic-merge patches (phase 6.8)
 
