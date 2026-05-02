@@ -86,11 +86,15 @@ C_RESET=$'\033[0m'
 
 [ -t 1 ] || { C_BOLD=""; C_DIM=""; C_GREEN=""; C_YELLOW=""; C_CYAN=""; C_RED=""; C_RESET=""; }
 
-heading() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$1" "$C_RESET"; }
-hint()    { printf '%s  %s%s\n' "$C_DIM" "${1:-}" "$C_RESET"; }
-example() { printf '%s    e.g. %s%s\n' "$C_DIM" "$1" "$C_RESET"; }
-ok()      { printf '%s  ✓ %s%s\n' "$C_GREEN" "$1" "$C_RESET"; }
-warn()    { printf '%s  ! %s%s\n' "$C_YELLOW" "$1" "$C_RESET"; }
+heading() { printf '\n%s== %s ==%s\n' "$C_BOLD" "$1" "$C_RESET" >&2; }
+hint()    { printf '%s  %s%s\n' "$C_DIM" "${1:-}" "$C_RESET" >&2; }
+info()    { printf '  %s\n' "${1:-}" >&2; }
+# All status helpers go to stderr so $(ask ...) captures only the
+# user's value. ok/warn/info/example/heading/hint never end up inside
+# the rendered YAML.
+example() { printf '%s    e.g. %s%s\n' "$C_DIM" "$1" "$C_RESET" >&2; }
+ok()      { printf '%s  ✓ %s%s\n' "$C_GREEN" "$1" "$C_RESET" >&2; }
+warn()    { printf '%s  ! %s%s\n' "$C_YELLOW" "$1" "$C_RESET" >&2; }
 err()     { printf '%s  ✗ %s%s\n' "$C_RED" "$1" "$C_RESET" >&2; }
 
 die() { err "$1"; exit "${2:-1}"; }
@@ -144,13 +148,13 @@ confirm() {
   local prompt="$1"; local default="${2:-y}"; local input
   while :; do
     if [ "$default" = "y" ]; then
-      printf '  %s%s%s [Y/n]: ' "$C_CYAN" "$prompt" "$C_RESET"
+      printf '  %s%s%s [Y/n]: ' "$C_CYAN" "$prompt" "$C_RESET" >&2
     else
-      printf '  %s%s%s [y/N]: ' "$C_CYAN" "$prompt" "$C_RESET"
+      printf '  %s%s%s [y/N]: ' "$C_CYAN" "$prompt" "$C_RESET" >&2
     fi
     if [ "$YES" = 1 ]; then
       input=""
-      printf '\n'
+      printf '\n' >&2
     else
       IFS= read -r input || input=""
     fi
@@ -531,7 +535,7 @@ if [ -z "$seed_images_yaml" ]; then
   fi
 else
   hint "Defaults from seed:"
-  printf '%s%s%s\n' "$C_DIM" "$(printf '%s\n' "$seed_images_yaml" | sed 's/^/    /')" "$C_RESET"
+  printf '%s%s%s\n' "$C_DIM" "$(printf '%s\n' "$seed_images_yaml" | sed 's/^/    /')" "$C_RESET" >&2
   if ! confirm "Use these as the starting point?" "y"; then
     if ! confirm "Skip image overrides entirely?" "n"; then
       die "aborted — re-run and accept defaults or pick --from-template <robot>"
@@ -841,7 +845,7 @@ tmp="$(mktemp)"
 } > "$tmp"
 
 heading "review"
-sed 's/^/    /' "$tmp"
+sed 's/^/    /' "$tmp" >&2
 
 if ! python3 "$HELPER" "$tmp" validate >/dev/null; then
   err "validation failed — re-running"
