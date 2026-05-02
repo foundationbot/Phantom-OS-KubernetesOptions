@@ -1495,6 +1495,24 @@ _gitops_render_app() {
     -e "s#{{SELF_HEAL}}#$self_heal#g" \
     "$APP_TEMPLATE_FILE" > "$out"
   chmod 0644 "$out"
+
+  # Inject spec.source.kustomize.{images,patches} from host-config so
+  # ArgoCD's first reconcile renders the right tags + per-host mounts
+  # in one shot. Phases 10/11 still re-run this same path for day-2
+  # changes (edited host-config), but full bootstrap doesn't need them
+  # in the critical path.
+  local hc="$HOST_CONFIG_FILE"
+  if [ ! -r "$hc" ]; then
+    return 0
+  fi
+  local inject_out
+  if ! inject_out="$(python3 "$HOST_CONFIG_HELPER" "$hc" \
+        inject-kustomize-block "$out" "$stack" \
+        "$REPO_ROOT/manifests/stacks" 2>&1)"; then
+    fail "inject-kustomize-block failed: $inject_out"
+    return 1
+  fi
+  info "$inject_out"
 }
 
 gitops() {

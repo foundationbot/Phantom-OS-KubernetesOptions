@@ -14,6 +14,7 @@ Usage:
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
+  host-config.py <path> inject-kustomize-block <app-yaml> <stack> <stacks-dir>
   host-config.py <path> validate
 
 Exit codes:
@@ -26,6 +27,8 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -312,6 +315,172 @@ def cmd_get_stack_selfheal(cfg: dict, stack: str) -> int:
     return 0
 
 
+def _kustomize_cmd() -> list[str] | None:
+    """First available kustomize command on this host."""
+    if shutil.which("kustomize"):
+        return ["kustomize", "build"]
+    if shutil.which("kubectl"):
+        return ["kubectl", "kustomize"]
+    if shutil.which("k0s"):
+        return ["k0s", "kubectl", "kustomize"]
+    return None
+
+
+def _scan_stack_images(stacks_dir: str, stack: str) -> set[str]:
+    """Run kustomize on manifests/stacks/<stack> and return the set of
+    image references (registry/path, no tag/digest) used by any
+    container in the rendered output."""
+    cmd = _kustomize_cmd()
+    if cmd is None:
+        raise RuntimeError(
+            "neither kustomize, kubectl, nor k0s available — cannot scan stacks"
+        )
+    target = f"{stacks_dir.rstrip('/')}/{stack}"
+    try:
+        out = subprocess.check_output([*cmd, target], stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"kustomize build failed for {target}: "
+            f"{exc.stderr.decode(errors='replace').strip()}"
+        )
+    seen: set[str] = set()
+    for doc in yaml.safe_load_all(out):
+        if not isinstance(doc, dict):
+            continue
+        kind = doc.get("kind")
+        if kind in ("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"):
+            pod = doc.get("spec", {}).get("template", {}).get("spec", {}) or {}
+        elif kind == "Pod":
+            pod = doc.get("spec", {}) or {}
+        else:
+            continue
+        for c in (pod.get("containers") or []) + (pod.get("initContainers") or []):
+            img = (c or {}).get("image", "") or ""
+            if not img:
+                continue
+            # Strip tag/digest to keep just the registry/path/repo portion.
+            if "@" in img:
+                img = img.split("@", 1)[0]
+            if img.count(":") >= 1 and not img.startswith("localhost:") \
+               and ":" in img.rsplit("/", 1)[-1]:
+                img = img.rsplit(":", 1)[0]
+            elif img.startswith("localhost:") and img.count(":") >= 2:
+                img = img.rsplit(":", 1)[0]
+            seen.add(img)
+    return seen
+
+
+def cmd_inject_kustomize_block(
+    cfg: dict, app_yaml_path: str, stack: str, stacks_dir: str
+) -> int:
+    """Read the rendered Application CR at app_yaml_path, compute
+    spec.source.kustomize.{images,patches} for this stack from the
+    host-config, and write the merged result back in place.
+
+    images: filtered to those actually referenced by the stack's
+    rendered manifests (kustomize-scan).
+    patches: from host-config's `deployments:` block, routed by
+    DEPLOYMENT_TARGETS to this stack."""
+    p = Path(app_yaml_path)
+    if not p.is_file():
+        print(f"error: {app_yaml_path} not found", file=sys.stderr)
+        return 2
+    try:
+        with p.open("r") as f:
+            app = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        print(f"error: invalid YAML in {app_yaml_path}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(app, dict) or app.get("kind") != "Application":
+        print(
+            f"error: {app_yaml_path} is not an Application CR",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Resolve images for this stack via kustomize-scan.
+    try:
+        stack_images = _scan_stack_images(stacks_dir, stack)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Filter host-config images to those owned by this stack.
+    raw_images = cfg.get("images") or []
+    if not isinstance(raw_images, list):
+        print("error: 'images' must be a list", file=sys.stderr)
+        return 2
+    images_block: list[str] = []
+    for entry in raw_images:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        new_tag = entry.get("newTag")
+        new_name = entry.get("newName")
+        if not name or not new_tag:
+            continue
+        if name not in stack_images:
+            continue
+        if new_name:
+            images_block.append(f"{name}={new_name}:{new_tag}")
+        else:
+            images_block.append(f"{name}:{new_tag}")
+
+    # Build patches from `deployments:` filtered to this stack.
+    patches_block: list[dict] = []
+    deployments = cfg.get("deployments") or {}
+    if not isinstance(deployments, dict):
+        print("error: 'deployments' must be a mapping", file=sys.stderr)
+        return 2
+    warnings: list[str] = []
+    for name, spec in deployments.items():
+        if name not in DEPLOYMENT_TARGETS:
+            continue
+        target = DEPLOYMENT_TARGETS[name]
+        if target["stack"] != stack:
+            continue
+        if not spec:
+            continue
+        if not isinstance(spec, dict):
+            print(f"error: deployments.{name}: must be a mapping", file=sys.stderr)
+            return 2
+        try:
+            patch_yaml, w = _build_deployment_patch(name, spec)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        warnings.extend(w)
+        patches_block.append({
+            "patch": patch_yaml,
+            "target": {
+                "kind": target["kind"],
+                "name": name,
+                "namespace": target["namespace"],
+            },
+        })
+
+    # Inject under spec.source.kustomize. Preserve siblings in case the
+    # template gains other kustomize keys later.
+    spec_source = app.setdefault("spec", {}).setdefault("source", {})
+    kust = spec_source.get("kustomize")
+    if not isinstance(kust, dict):
+        kust = {}
+    kust["images"] = images_block
+    kust["patches"] = patches_block
+    spec_source["kustomize"] = kust
+
+    with p.open("w") as f:
+        yaml.safe_dump(app, f, sort_keys=False)
+    for w in warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    # Report what landed so bootstrap can echo it.
+    print(
+        f"injected: stack={stack} images={len(images_block)} "
+        f"patches={len(patches_block)}"
+    )
+    return 0
+
+
 def cmd_validate(cfg: dict) -> int:
     errors: list[str] = []
     if not cfg.get("robot"):
@@ -456,6 +625,17 @@ def main() -> int:
             print("usage: host-config.py <path> get-stack-selfheal <stack>", file=sys.stderr)
             return 2
         return cmd_get_stack_selfheal(cfg, sys.argv[3])
+    if cmd == "inject-kustomize-block":
+        if len(sys.argv) != 6:
+            print(
+                "usage: host-config.py <path> inject-kustomize-block "
+                "<app-yaml> <stack> <stacks-dir>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_inject_kustomize_block(
+            cfg, sys.argv[3], sys.argv[4], sys.argv[5]
+        )
     if cmd == "validate":
         return cmd_validate(cfg)
     print(f"error: unknown subcommand: {cmd}", file=sys.stderr)
