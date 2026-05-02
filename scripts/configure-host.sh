@@ -577,6 +577,7 @@ if [ "$inject_images" = 1 ]; then
     img_names+=("localhost:5443/positronic-control"); img_tags+=("")
     img_names+=("localhost:5443/phantom-models");      img_tags+=("")
     img_names+=("foundationbot/argus.operator-ui");    img_tags+=("")
+    img_names+=("foundationbot/dma-ethercat");         img_tags+=("main-latest-aarch64")
   fi
 
   echo

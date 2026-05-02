@@ -1,0 +1,67 @@
+# dma-ethercat-installer Job — exposes the dma-ethercat .deb (baked into
+# the foundationbot/dma-ethercat image at /usr/local/share/dma/deb/) on
+# the host so scripts/bootstrap-robot.sh can dpkg -i it.
+#
+# This Job is managed by bootstrap-robot.sh via `kubectl apply -k`, NOT
+# by ArgoCD. Argo's Application watches manifests/robots/<robot>/ — this
+# tree lives under manifests/installers/ specifically so Argo never sees
+# it. That lets the bootstrap force a fresh extract on every run by
+# delete + apply, with no race against Argo's reconciler. Same pattern
+# the bootstrap already uses for seeding `dockerhub-creds`.
+#
+# The container's only job is the copy: it overrides the image's
+# default entrypoint (which would run dma_main), copies the .deb to a
+# hostPath at /var/lib/dma-ethercat-installer/, writes a sentinel file,
+# and exits. Pod ends in Completed and is reaped 30s later by the TTL
+# controller — long enough for an operator to `kubectl logs` the pod
+# if something looks off, short enough that successive bootstraps don't
+# leave stale Completed rows in `kubectl get pods`. The .deb on
+# hostPath survives the pod deletion (it's on the host filesystem, not
+# in the pod's writable layer), so the bootstrap's subsequent
+# `dpkg -i` step is unaffected.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dma-ethercat-installer
+  namespace: phantom
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 30
+  template:
+    metadata:
+      labels:
+        app: dma-ethercat-installer
+    spec:
+      restartPolicy: OnFailure
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: extract
+          # Tag is rewritten per-robot via kustomize `images:` in
+          # manifests/installers/dma-ethercat/robots/<robot>/kustomization.yaml.
+          image: foundationbot/dma-ethercat:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "==> contents of /usr/local/share/dma/deb:"
+              ls -la /usr/local/share/dma/deb/
+              # Drop stale .deb / sentinel from a previous bootstrap so
+              # the host install step never sees a half-written file or
+              # an outdated package.
+              mkdir -p /host-out
+              rm -f /host-out/*.deb /host-out/.ready
+              cp /usr/local/share/dma/deb/dma-ethercat-*.deb /host-out/
+              # Sentinel — the bootstrap reads /host-out/.ready to
+              # confirm the copy finished before running dpkg -i.
+              touch /host-out/.ready
+              echo "==> wrote $(ls /host-out/dma-ethercat-*.deb)"
+          volumeMounts:
+            - name: host-out
+              mountPath: /host-out
+      volumes:
+        - name: host-out
+          hostPath:
+            path: /var/lib/dma-ethercat-installer
+            type: DirectoryOrCreate

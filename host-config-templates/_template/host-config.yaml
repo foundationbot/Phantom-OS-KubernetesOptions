@@ -58,6 +58,13 @@ images:
     newTag: REPLACE-WITH-MODEL-BUILD-DATE
   - name: foundationbot/argus.operator-ui
     newTag: REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
+  # dma-ethercat is special: NOT routed to a stack. Phase 5.7 reads
+  # this entry directly to render the bootstrap-managed installer Job.
+  # Tag convention:
+  #   *-latest-aarch64  Jetson / arm64 robots
+  #   *-latest-amd64    x86 robots
+  - name: foundationbot/dma-ethercat
+    newTag: main-latest-aarch64
 
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal
