@@ -344,20 +344,21 @@ else:
     fi
   fi
 
-  # devMode intent from /etc/phantomos/host-config.yaml. Tells the operator
-  # what the host expects, independent of what's currently running. A
-  # disagreement between the two means bootstrap hasn't been re-run since
-  # the host-config changed.
-  bold "devMode (intent, /etc/phantomos/host-config.yaml)"
+  # deployments intent from /etc/phantomos/host-config.yaml. Tells the
+  # operator what the host expects, independent of what's currently
+  # running. A disagreement between the live mounts above and the intent
+  # below means bootstrap hasn't been re-run since the host-config
+  # changed; run `bootstrap-robot.sh --deployments` to reconcile.
+  bold "deployments (intent, /etc/phantomos/host-config.yaml)"
   local hc=/etc/phantomos/host-config.yaml
   if [ ! -r "$hc" ]; then
-    info "(no host-config.yaml — devMode not configured)"
+    info "(no host-config.yaml — deployments not configured)"
   elif ! command -v python3 >/dev/null 2>&1; then
     info "(python3 unavailable)"
   else
-    local dev_out
-    dev_out="$(python3 - "$hc" <<'PY' 2>/dev/null
-import sys, json
+    local dep_out
+    dep_out="$(python3 - "$hc" <<'PY' 2>/dev/null
+import sys
 try:
     import yaml
 except ImportError:
@@ -369,20 +370,35 @@ try:
 except Exception as exc:
     print(f"(error reading host-config: {exc})")
     sys.exit(0)
-dev = (cfg.get("devMode") or {}).get("positronic-control")
-if not dev:
-    print("(devMode not set — production topology)")
+
+# New schema: deployments.<name>. Falls back to legacy devMode.<name>
+# so an unmigrated host-config still produces useful status output.
+deployments = cfg.get("deployments") if isinstance(cfg, dict) else None
+legacy_dev = cfg.get("devMode") if isinstance(cfg, dict) else None
+
+if not deployments and not legacy_dev:
+    print("(no deployments/devMode block — bare base mounts only)")
     sys.exit(0)
-print(f"source:     {dev.get('source', '<unset>')}")
-print(f"privileged: {dev.get('privileged', False)}")
-mnts = dev.get("mounts") or []
-print(f"mounts:     {len(mnts)} configured")
-for i, m in enumerate(mnts):
-    if isinstance(m, dict) and m.get("host") and m.get("container"):
-        print(f"  [{i}] {m['host']}  ->  {m['container']}")
+
+if legacy_dev and not deployments:
+    print("(host-config still uses legacy 'devMode:' schema — re-run configure-host.sh to migrate)")
+
+source = deployments or {}
+for name, spec in (source.items() if isinstance(source, dict) else []):
+    if not isinstance(spec, dict):
+        continue
+    privileged = bool(spec.get("privileged"))
+    mounts = spec.get("mounts") or []
+    print(f"{name}:")
+    print(f"  privileged: {'true' if privileged else 'false'}")
+    print(f"  mounts:     {len(mounts)} configured")
+    for i, m in enumerate(mounts):
+        if isinstance(m, dict) and m.get("host") and m.get("container"):
+            vol = m.get("name") or f"mount-{i}"
+            print(f"    [{vol}] {m['host']}  ->  {m['container']}")
 PY
 )"
-    printf '%s\n' "$dev_out" | sed 's/^/    /'
+    printf '%s\n' "$dep_out" | sed 's/^/    /'
   fi
 }
 
