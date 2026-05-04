@@ -11,6 +11,8 @@ Usage:
   host-config.py <path> get robot
   host-config.py <path> get aiPcUrl
   host-config.py <path> get-dma-ethercat-config-set
+  host-config.py <path> get-dma-ethercat-config-path
+  host-config.py <path> set-dma-ethercat-config-path <value>
   host-config.py <path> get-images-json
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
@@ -115,6 +117,67 @@ def cmd_get_dma_ethercat_config_set(cfg: dict) -> int:
     if not value:
         return 1
     print(value)
+    return 0
+
+
+def cmd_get_dma_ethercat_config_path(cfg: dict) -> int:
+    """Print dmaEthercat.configPath (a path to a JSON file, absolute or
+    relative to /usr/share/dma-ethercat/config/) or exit 1 if unset."""
+    block = cfg.get("dmaEthercat") or {}
+    if not isinstance(block, dict):
+        return 1
+    value = block.get("configPath")
+    if not value:
+        return 1
+    print(value)
+    return 0
+
+
+def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
+    """Persist dmaEthercat.configPath into the host-config file in
+    place. Strips any existing top-level dmaEthercat: block (key plus
+    its indented children) and appends a fresh block at EOF.
+
+    Line-based rewrite — preserves comments and ordering elsewhere; the
+    rewritten dmaEthercat block loses any comments it had (acceptable;
+    the operator opted in by re-running the prompt)."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+    if not value or not isinstance(value, str):
+        print("error: configPath value required", file=sys.stderr)
+        return 2
+
+    src = p.read_text().splitlines(keepends=True)
+    out: list[str] = []
+    skipping = False
+    for line in src:
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if skipping:
+            # End the skip when we hit another top-level key (indent 0,
+            # non-blank, not a comment-only line).
+            if (
+                indent == 0
+                and stripped.strip()
+                and not stripped.startswith("#")
+            ):
+                skipping = False
+                out.append(line)
+            # else: still inside the dmaEthercat block — drop the line
+            continue
+        if indent == 0 and stripped.startswith("dmaEthercat:"):
+            skipping = True
+            continue
+        out.append(line)
+
+    if out and not out[-1].endswith("\n"):
+        out[-1] = out[-1] + "\n"
+    out.append("dmaEthercat:\n")
+    out.append(f"  configPath: {value}\n")
+
+    p.write_text("".join(out))
     return 0
 
 
@@ -558,6 +621,14 @@ def cmd_validate(cfg: dict) -> int:
                         "dmaEthercat.configSet: must be a single directory "
                         "name (no '/', no leading '.')"
                     )
+            cpath = dma.get("configPath")
+            if cpath is not None:
+                if not isinstance(cpath, str) or not cpath:
+                    errors.append("dmaEthercat.configPath: must be a non-empty string")
+                elif ".." in cpath.split("/"):
+                    errors.append(
+                        "dmaEthercat.configPath: '..' not allowed in path components"
+                    )
 
     images = cfg.get("images") or []
     if not isinstance(images, list):
@@ -651,6 +722,16 @@ def main() -> int:
         return cmd_get_images_json(cfg)
     if cmd == "get-dma-ethercat-config-set":
         return cmd_get_dma_ethercat_config_set(cfg)
+    if cmd == "get-dma-ethercat-config-path":
+        return cmd_get_dma_ethercat_config_path(cfg)
+    if cmd == "set-dma-ethercat-config-path":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> set-dma-ethercat-config-path <value>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_set_dma_ethercat_config_path(path, sys.argv[3])
     if cmd == "get-deployment-patches-json":
         return cmd_get_deployment_patches_json(cfg)
     if cmd == "get-enabled-stacks":

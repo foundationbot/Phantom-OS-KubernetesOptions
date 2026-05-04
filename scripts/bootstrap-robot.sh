@@ -1515,6 +1515,52 @@ PY
 DMA_ETHERCAT_ENV_FILE="${DMA_ETHERCAT_ENV_FILE:-/etc/dma/dma-ethercat.env}"
 DMA_ETHERCAT_CONFIG_DIR="${DMA_ETHERCAT_CONFIG_DIR:-/usr/share/dma-ethercat/config}"
 
+# Interactive picker for DMA config JSON. Walks
+# DMA_ETHERCAT_CONFIG_DIR to depth 2, lists every *.json, asks the
+# operator to pick by number, echoes the absolute path on stdout.
+# Returns non-zero on EOF, invalid input, or no .json files found —
+# all prompt UI goes to stderr so stdout is the result channel.
+_dma_ethercat_prompt_for_config() {
+  local robot="$1"
+  local files=()
+  while IFS= read -r f; do files+=("$f"); done < <(
+    find "$DMA_ETHERCAT_CONFIG_DIR" -maxdepth 2 -type f -name '*.json' \
+      2>/dev/null | sort
+  )
+  if [ "${#files[@]}" -eq 0 ]; then
+    fail "no .json files under $DMA_ETHERCAT_CONFIG_DIR" >&2
+    return 1
+  fi
+
+  {
+    printf '\n'
+    printf '  no auto-match for robot %q. pick a hardware config:\n' "$robot"
+    printf '\n'
+    local i path rel
+    for i in "${!files[@]}"; do
+      path="${files[$i]}"
+      rel="${path#"$DMA_ETHERCAT_CONFIG_DIR"/}"
+      printf '    %3d) %s\n' "$((i+1))" "$rel"
+    done
+    printf '\n'
+  } >&2
+
+  local choice
+  printf '  selection [1-%d]: ' "${#files[@]}" >&2
+  if ! IFS= read -r choice </dev/tty; then
+    fail "no input on /dev/tty" >&2
+    return 1
+  fi
+  case "$choice" in
+    ''|*[!0-9]*) fail "not a number: $choice" >&2; return 1 ;;
+  esac
+  if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#files[@]}" ]; then
+    fail "out of range: $choice" >&2
+    return 1
+  fi
+  printf '%s\n' "${files[$((choice-1))]}"
+}
+
 configure_dma_ethercat_env() {
   local hc="$1"
   local robot="${ROBOT:-}"
@@ -1522,19 +1568,38 @@ configure_dma_ethercat_env() {
     ethercat_die "robot id not resolved — cannot pick dma-ethercat config"
   fi
 
-  # Resolution: host-config.dmaEthercat.configSet wins; else auto-detect.
-  local config_set="" candidate=""
+  # Resolution order:
+  #   1. host-config dmaEthercat.configPath (absolute, or relative to
+  #      DMA_ETHERCAT_CONFIG_DIR)
+  #   2. host-config dmaEthercat.configSet -> <set>/<robot>.json
+  #   3. auto-detect: <robot>.json or <robot>/<robot>.json
+  #   4. interactive prompt (TTY only); persist selection back to
+  #      host-config as configPath
+  #   5. die with the available files listed
+  local config_path="" config_set="" candidate=""
   if [ -r "$hc" ]; then
+    config_path="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
+                    "$hc" get-dma-ethercat-config-path 2>/dev/null || true)"
     config_set="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
                     "$hc" get-dma-ethercat-config-set 2>/dev/null || true)"
   fi
 
-  if [ -n "$config_set" ]; then
+  if [ -n "$config_path" ]; then
+    case "$config_path" in
+      /*) candidate="$config_path" ;;
+      *)  candidate="$DMA_ETHERCAT_CONFIG_DIR/$config_path" ;;
+    esac
+    note "host-config dmaEthercat.configPath=$config_path"
+    if [ ! -r "$candidate" ]; then
+      fail "no config at $candidate"
+      ethercat_die "dmaEthercat.configPath=$config_path, but $candidate is missing — check the .deb ships this file or update configPath"
+    fi
+  elif [ -n "$config_set" ]; then
     candidate="$DMA_ETHERCAT_CONFIG_DIR/$config_set/$robot.json"
     note "host-config dmaEthercat.configSet=$config_set"
     if [ ! -r "$candidate" ]; then
       fail "no config at $candidate"
-      ethercat_die "dmaEthercat.configSet=$config_set, but $candidate is missing — check the .deb ships this robot's JSON or update configSet"
+      ethercat_die "dmaEthercat.configSet=$config_set, but $candidate is missing — set dmaEthercat.configPath to a specific JSON instead"
     fi
   else
     local c1="$DMA_ETHERCAT_CONFIG_DIR/$robot.json"
@@ -1542,13 +1607,38 @@ configure_dma_ethercat_env() {
     if   [ -r "$c1" ]; then candidate="$c1"
     elif [ -r "$c2" ]; then candidate="$c2"
     else
-      fail "no dma-ethercat config for robot '$robot'"
-      info "searched:"
-      info "  $c1"
-      info "  $c2"
-      info "available config sets under $DMA_ETHERCAT_CONFIG_DIR:"
-      ls -1 "$DMA_ETHERCAT_CONFIG_DIR" 2>&1 | sed 's/^/    /' || true
-      ethercat_die "set dmaEthercat.configSet in $hc to one of the directories above (the JSON inside must be named ${robot}.json), or rename the JSON to ${robot}.json"
+      # Interactive fallback. Only prompt when stdin is a TTY; in CI
+      # or non-interactive runs we keep the old hard-fail behaviour.
+      if [ -t 0 ] && [ "$DRY_RUN" != 1 ]; then
+        candidate="$(_dma_ethercat_prompt_for_config "$robot")" || \
+          ethercat_die "no JSON selected — rerun and pick a config, or set dmaEthercat.configPath in $hc"
+
+        # Persist as configPath (relative form when under config dir).
+        local persist="$candidate"
+        case "$candidate" in
+          "$DMA_ETHERCAT_CONFIG_DIR"/*)
+            persist="${candidate#"$DMA_ETHERCAT_CONFIG_DIR"/}"
+            ;;
+        esac
+        if [ -r "$hc" ]; then
+          if python3 "$REPO_ROOT/scripts/lib/host-config.py" \
+              "$hc" set-dma-ethercat-config-path "$persist" >/dev/null 2>&1; then
+            pass "persisted dmaEthercat.configPath=$persist to $hc"
+          else
+            info "could not persist configPath to $hc — next bootstrap will re-prompt"
+          fi
+        else
+          info "$hc not writable — next bootstrap will re-prompt"
+        fi
+      else
+        fail "no dma-ethercat config for robot '$robot'"
+        info "searched:"
+        info "  $c1"
+        info "  $c2"
+        info "available entries under $DMA_ETHERCAT_CONFIG_DIR:"
+        ls -1 "$DMA_ETHERCAT_CONFIG_DIR" 2>&1 | sed 's/^/    /' || true
+        ethercat_die "set dmaEthercat.configPath in $hc (e.g. test_single_novanta/phantom-0001.json), or rerun on a TTY to be prompted"
+      fi
     fi
   fi
   pass "resolved DMA_CONFIG: $candidate"

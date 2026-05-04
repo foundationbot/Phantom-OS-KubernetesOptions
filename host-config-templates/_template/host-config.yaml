@@ -70,17 +70,22 @@ images:
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
 # bare-metal dma-ethercat.service picks the right hardware config JSON.
 # Resolution order:
-#   1. dmaEthercat.configSet below (if set):
-#        /usr/share/dma-ethercat/config/<configSet>/<robot>.json
-#   2. auto-detect by robot name, in order:
+#   1. dmaEthercat.configPath  — explicit path, absolute or relative to
+#      /usr/share/dma-ethercat/config/. Wins over everything else.
+#   2. dmaEthercat.configSet   — directory name under
+#      /usr/share/dma-ethercat/config/; bootstrap appends `<robot>.json`.
+#   3. auto-detect by robot name, in order:
 #        /usr/share/dma-ethercat/config/<robot>.json
 #        /usr/share/dma-ethercat/config/<robot>/<robot>.json
-#   3. neither -> bootstrap halts and asks you to set dmaEthercat.configSet
+#   4. interactive prompt (TTY only) — operator picks from the .json
+#      files shipped in the .deb. The selection is persisted back here
+#      as configPath so re-bootstraps are non-interactive.
+#   5. non-TTY with no match -> bootstrap halts.
 #
-# `configSet` is just the directory name under /usr/share/dma-ethercat/config/
-# (no slashes, no extension). Example: test_single_novanta.
+# Examples:
 # dmaEthercat:
-#   configSet: test_single_novanta
+#   configPath: test_single_novanta/phantom-0001.json
+#   # configSet: test_single_novanta
 
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal
