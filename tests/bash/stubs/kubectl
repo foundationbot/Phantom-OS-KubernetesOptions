@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stub kubectl: appends args to $STUB_LOG_KUBECTL, reads optional stdin to
+# a sibling .stdin file, exits 0 unless $STUB_KUBECTL_FAIL=1.
+set -euo pipefail
+log="${STUB_LOG_KUBECTL:?STUB_LOG_KUBECTL not set}"
+printf '%s\n' "$*" >> "$log"
+if [ ! -t 0 ]; then
+  cat >> "${log}.stdin" || true
+fi
+if [ "${STUB_KUBECTL_FAIL:-0}" = 1 ]; then
+  echo "stub-kubectl: forced failure" >&2
+  exit 1
+fi
+# A few canned responses used by bootstrap probes:
+case "$*" in
+  *"-n argocd get secret argocd-secret"*) echo 'argocd-secret 1';;
+  *"get secret argocd-initial-admin-secret"*) exit 1;;  # not present
+  *) :;;
+esac
+exit 0

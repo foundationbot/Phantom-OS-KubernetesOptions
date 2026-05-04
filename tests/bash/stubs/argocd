@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${STUB_LOG_ARGOCD:?}"
+case "$*" in
+  "version --client"*|"version --client --short"*) echo 'argocd: v2.10.0';;
+  "repo list"*) printf 'TYPE  NAME  REPO  STATUS\ngit   kos   https://github.com/foundationbot/Phantom-OS-KubernetesOptions  Successful\n';;
+  *) :;;
+esac
+exit 0
