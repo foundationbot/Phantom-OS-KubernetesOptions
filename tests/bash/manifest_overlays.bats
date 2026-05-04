@@ -64,3 +64,26 @@ setup() { setup_common; }
   echo "$out" | grep -qE 'p, role:fleet-operator, accounts, \*,\s+\*, deny'
   echo "$out" | grep -qE 'p, role:fleet-operator, exec, create,\s+\*/\*, deny'
 }
+
+@test "fleet-operator-kubectl-rbac overlay defines SA, view binding, scale ClusterRole" {
+  out="$(kustomize build "$REPO_ROOT/manifests/base/fleet-operator-kubectl-rbac")"
+  echo "$out" | grep -q 'kind: ServiceAccount'
+  echo "$out" | grep -q 'name: fleet-operator'
+  # bound to built-in `view` ClusterRole
+  echo "$out" | grep -qE 'name: view'
+  # scale ClusterRole
+  echo "$out" | grep -q 'kind: ClusterRole'
+  echo "$out" | grep -q 'fleet-operator-scale'
+}
+
+@test "fleet-operator scale ClusterRole permits update/patch on */scale only" {
+  out="$(kustomize build "$REPO_ROOT/manifests/base/fleet-operator-kubectl-rbac")"
+  # rule names *only* the scale subresources
+  echo "$out" | grep -qE 'deployments/scale'
+  echo "$out" | grep -qE 'statefulsets/scale'
+  echo "$out" | grep -qE 'replicasets/scale'
+  # verbs are exactly update,patch — no get/list/delete on scale
+  ! echo "$out" | awk '/fleet-operator-scale/,/^---/' | grep -qE 'verbs:.*\b(create|delete|deletecollection)\b'
+  # explicit absence of secret read in any rule of this overlay
+  ! echo "$out" | grep -qE 'resources:.*\bsecrets\b'
+}

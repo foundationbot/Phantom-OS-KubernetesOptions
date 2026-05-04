@@ -1,0 +1,13 @@
+# fleet-operator can scale workloads up/down via `kubectl scale` or
+# `kubectl patch`. No other mutations: no delete, no exec, no create.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet-operator-scale
+rules:
+  - apiGroups: ["apps"]
+    resources:
+      - deployments/scale
+      - statefulsets/scale
+      - replicasets/scale
+    verbs: ["update", "patch"]
