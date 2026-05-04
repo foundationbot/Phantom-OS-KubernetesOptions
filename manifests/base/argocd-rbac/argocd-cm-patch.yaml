@@ -1,0 +1,14 @@
+# Strategic-merge patch on the argocd-cm ConfigMap installed by the Helm
+# chart. Adds two non-admin accounts. Passwords are set out-of-band by
+# scripts/bootstrap-robot.sh (see argocd_users phase) — they are NOT
+# stored in this manifest.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  accounts.operator: login
+  accounts.operator.enabled: "true"
+  accounts.fleet-operator: login
+  accounts.fleet-operator.enabled: "true"

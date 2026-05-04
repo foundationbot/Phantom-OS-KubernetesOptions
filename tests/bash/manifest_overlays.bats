@@ -37,3 +37,30 @@ setup() { setup_common; }
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-redis-secret-init\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-commit-server\s*$')" -eq 1 ]
 }
+
+@test "argocd-rbac overlay declares operator and fleet-operator accounts" {
+  out="$(kustomize build "$REPO_ROOT/manifests/base/argocd-rbac")"
+  echo "$out" | grep -q 'accounts.operator: login'
+  echo "$out" | grep -q 'accounts.fleet-operator: login'
+  echo "$out" | grep -q 'accounts.operator.enabled: "true"'
+  echo "$out" | grep -q 'accounts.fleet-operator.enabled: "true"'
+}
+
+@test "argocd-rbac policy.csv binds operator to readonly and fleet-operator to custom role" {
+  out="$(kustomize build "$REPO_ROOT/manifests/base/argocd-rbac")"
+  echo "$out" | grep -qE 'g, operator,\s+role:readonly'
+  echo "$out" | grep -qE 'g, fleet-operator,\s+role:fleet-operator'
+}
+
+@test "role:fleet-operator allows sync/action and denies destructive ops" {
+  out="$(kustomize build "$REPO_ROOT/manifests/base/argocd-rbac")"
+  # allows
+  echo "$out" | grep -qE 'p, role:fleet-operator, applications, sync,\s+\*/\*, allow'
+  echo "$out" | grep -qE 'p, role:fleet-operator, applications, action/\*,\s+\*/\*, allow'
+  # denies (Casbin: deny overrides allow)
+  echo "$out" | grep -qE 'p, role:fleet-operator, applications, delete,\s+\*/\*, deny'
+  echo "$out" | grep -qE 'p, role:fleet-operator, clusters, \*,\s+\*, deny'
+  echo "$out" | grep -qE 'p, role:fleet-operator, repositories, (create|update|delete),\s+\*, deny'
+  echo "$out" | grep -qE 'p, role:fleet-operator, accounts, \*,\s+\*, deny'
+  echo "$out" | grep -qE 'p, role:fleet-operator, exec, create,\s+\*/\*, deny'
+}
