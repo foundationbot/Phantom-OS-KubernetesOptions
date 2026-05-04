@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'k0s %s\n' "$*" >> "${STUB_LOG_DIR}/k0s.log"
+printf 'k0s %s\n' "$*" >> "${STUB_LOG_K0S:?STUB_LOG_K0S not set}"
 exit 0

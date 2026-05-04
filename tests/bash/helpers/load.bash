@@ -17,6 +17,7 @@ _install_stubs() {
   export STUB_LOG_KUBECTL="${STUB_LOG_DIR}/kubectl.log"
   export STUB_LOG_ARGOCD="${STUB_LOG_DIR}/argocd.log"
   export STUB_LOG_HTPASSWD="${STUB_LOG_DIR}/htpasswd.log"
+  export STUB_LOG_K0S="${STUB_LOG_DIR}/k0s.log"
 }
 
 setup_common() {
