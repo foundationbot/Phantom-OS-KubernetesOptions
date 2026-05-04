@@ -1,5 +1,13 @@
-# Strategic-merge patch on argocd-rbac-cm. Defines role:fleet-operator and
-# binds operator → role:readonly, fleet-operator → role:fleet-operator.
+# Applied via `kubectl patch configmap argocd-rbac-cm -n argocd --type merge --patch-file <this-file>`
+# from the bootstrap script (Task 9). Field stomp risk is avoided because only
+# the keys declared here are written; all other keys in the chart-owned argocd-rbac-cm
+# are left untouched.
+#
+# Do NOT apply with `kubectl apply -k` — that would replace the entire ConfigMap
+# and destroy chart-managed keys.
+#
+# Defines role:fleet-operator and binds operator → role:readonly,
+# fleet-operator → role:fleet-operator.
 # Casbin: deny rules override allow rules, so the deny block is what makes
 # the negative permissions stick.
 apiVersion: v1

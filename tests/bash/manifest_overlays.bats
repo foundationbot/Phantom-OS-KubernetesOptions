@@ -50,6 +50,8 @@ setup() { setup_common; }
   out="$(kustomize build "$REPO_ROOT/manifests/base/argocd-rbac")"
   echo "$out" | grep -qE 'g, operator,\s+role:readonly'
   echo "$out" | grep -qE 'g, fleet-operator,\s+role:fleet-operator'
+  [ "$(echo "$out" | grep -cE '^[[:space:]]+g, ')" -eq 2 ]
+  ! echo "$out" | grep -qE 'role:admin'
 }
 
 @test "role:fleet-operator allows sync/action and denies destructive ops" {

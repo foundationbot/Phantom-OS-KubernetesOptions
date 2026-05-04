@@ -1,7 +1,19 @@
-# Strategic-merge patch on the argocd-cm ConfigMap installed by the Helm
-# chart. Adds two non-admin accounts. Passwords are set out-of-band by
-# scripts/bootstrap-robot.sh (see argocd_users phase) — they are NOT
-# stored in this manifest.
+# Applied via `kubectl patch configmap argocd-cm -n argocd --type merge --patch-file <this-file>`
+# from the bootstrap script (Task 9). Field stomp risk is avoided because only
+# the keys declared here are written; all other keys in the chart-owned argocd-cm
+# are left untouched.
+#
+# Do NOT apply with `kubectl apply -k` — that would replace the entire ConfigMap
+# and destroy chart-managed keys.
+#
+# Adds two non-admin ArgoCD local accounts. Passwords are set out-of-band by
+# scripts/bootstrap-robot.sh (see argocd_users phase) — they are NOT stored
+# in this manifest.
+#
+# Note: the `fleet-operator` name here is the ArgoCD account login. There is
+# also a K8s ServiceAccount named `fleet-operator` (manifests/base/fleet-operator-kubectl-rbac/).
+# These are intentionally aligned — the same on-call person uses both — but
+# they live in separate auth systems (ArgoCD UI vs. kubectl).
 apiVersion: v1
 kind: ConfigMap
 metadata:
