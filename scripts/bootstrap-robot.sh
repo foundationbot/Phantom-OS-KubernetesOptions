@@ -1363,10 +1363,11 @@ operator_ui_config() {
 # starts unisolated.
 #
 # Host-config-driven. The cpuIsolation: block in host-config.yaml is
-# the source of truth; this phase is a no-op when cpuIsolation.enabled
-# is unset or false. See docs/cpu-isolation.md for the schema and
-# lifecycle (apply -> install-service -> install-affinity-defaults ->
-# optional migrate-cmdline).
+# the source of truth. Default-on: if the cpuIsolation block is missing
+# entirely AND stdin is a TTY, bootstrap prompts the operator and
+# persists the answers back to host-config.yaml. Only an explicit
+# `enabled: false` skips the phase. See docs/cpu-isolation.md for the
+# schema and lifecycle.
 #
 # Idempotent: re-runs are safe. The vendored manage_cpusets.sh skips
 # already-active partitions with matching CPUs; install-service and
@@ -1377,7 +1378,7 @@ cpu_isolation() {
     return
   fi
 
-  # Read the cpuIsolation block. Empty/missing = phase is a no-op.
+  # Read the cpuIsolation block.
   local hc="$HOST_CONFIG_FILE"
   if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
     hc="$HOST_CONFIG_INPUT"
@@ -1388,9 +1389,38 @@ cpu_isolation() {
   fi
   local ci_json enabled
   ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+
+  # Empty block? Default-on flow:
+  #   - DRY_RUN: skip (don't mutate host-config in dry-run)
+  #   - TTY    : prompt operator, persist, reload
+  #   - else   : skip with a clear actionable message
+  if [ "$ci_json" = "{}" ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      phase "phase 7: cpu-isolation  (skipped — no cpuIsolation block, dry-run won't prompt)"
+      return
+    fi
+    if [ -t 0 ] && [ -t 2 ]; then
+      phase "phase 7: cpu-isolation (first-bringup setup)"
+      if ! _cpu_isolation_prompt "$hc"; then
+        fail "cpu-isolation interactive setup aborted"
+        info "rerun and complete the prompts, or set cpuIsolation.enabled=false in $hc to opt out"
+        return
+      fi
+      ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+    else
+      phase "phase 7: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
+      info "first bringup needs an interactive shell to configure CPU isolation,"
+      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/cpu-isolation.md),"
+      info "OR set cpuIsolation.enabled=false to opt out persistently."
+      return
+    fi
+  fi
+
+  # Block presence implies enabled-by-default — only an explicit
+  # `enabled: false` opts out. Matches stacks.<name>.enabled semantics.
   enabled="$(cpusets_json_field "$ci_json" enabled)"
-  if [ "$enabled" != "true" ]; then
-    phase "phase 7: cpu-isolation  (skipped — cpuIsolation.enabled not true)"
+  if [ -n "$enabled" ] && [ "$enabled" != "true" ]; then
+    phase "phase 7: cpu-isolation  (skipped — cpuIsolation.enabled=false)"
     return
   fi
   phase "phase 7: cpu-isolation (gates phase 8)"
@@ -1751,6 +1781,127 @@ _dma_ethercat_prompt_for_config() {
     return 1
   fi
   printf '%s\n' "${files[$((choice-1))]}"
+}
+
+# Interactive setup for the cpuIsolation: block when host-config.yaml
+# doesn't have one yet. Persists the answers back to host-config.yaml
+# so re-runs are non-interactive. Returns 0 when the block was written
+# and validates; returns 1 on operator opt-out, EOF, or validation
+# failure (the caller skips the phase in those cases).
+#
+# Prompts (with sensible defaults):
+#   1. enable now? — N writes `enabled: false` and returns 1
+#   2. partition cpus      (default 11-13)
+#   3. partition name      (default ecat)
+#   4. NIC iface           (empty = skip NIC pinning)
+#   5. NIC rtCore          (only if iface set; default = first cpu)
+#   6. installAffinityDefaults  (default Y)
+#   7. migrateCmdline           (default N — destructive on Jetson)
+_cpu_isolation_prompt() {
+  local hc="$1"
+
+  {
+    printf '\n  CPU isolation carves cpuset partitions for the EtherCAT realtime\n'
+    printf '  control loop. Required for production robots — answer the prompts\n'
+    printf '  below to populate cpuIsolation: in %s.\n' "$hc"
+    printf '  See docs/cpu-isolation.md for the full schema.\n\n'
+  } >&2
+
+  local ans
+  printf '  configure CPU isolation now? [Y/n]: ' >&2
+  IFS= read -r ans </dev/tty || return 1
+  case "${ans,,}" in
+    n|no)
+      if _cpu_isolation_persist "$hc" '{"enabled": false}'; then
+        info "wrote cpuIsolation.enabled=false to $hc — phase will skip on re-runs"
+      fi
+      return 1
+      ;;
+  esac
+
+  local partition_cpus partition_name nic_iface nic_rt aff_ans mig_ans
+  while :; do
+    printf '  partition cpus (e.g. 11-13, 10,12-13) [11-13]: ' >&2
+    IFS= read -r partition_cpus </dev/tty || return 1
+    [ -z "$partition_cpus" ] && partition_cpus="11-13"
+    if printf '%s' "$partition_cpus" | grep -Eq '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'; then
+      break
+    fi
+    printf '    invalid — must match kernel cpu-list syntax\n' >&2
+  done
+
+  printf '  partition name [ecat]: ' >&2
+  IFS= read -r partition_name </dev/tty || return 1
+  [ -z "$partition_name" ] && partition_name="ecat"
+
+  printf '  EtherCAT NIC interface (empty to skip NIC pinning) [ecat0]: ' >&2
+  IFS= read -r nic_iface </dev/tty || return 1
+  if [ -z "$nic_iface" ]; then
+    # Empty input means use default. Operators who really want "no nic"
+    # can hand-edit later — most robots want the NIC pinned.
+    nic_iface="ecat0"
+  fi
+
+  if [ -n "$nic_iface" ]; then
+    local first_cpu
+    first_cpu="$(printf '%s' "$partition_cpus" | sed -E 's/^([0-9]+).*$/\1/')"
+    while :; do
+      printf '  NIC RT core (integer inside %s) [%s]: ' "$partition_cpus" "$first_cpu" >&2
+      IFS= read -r nic_rt </dev/tty || return 1
+      [ -z "$nic_rt" ] && nic_rt="$first_cpu"
+      case "$nic_rt" in
+        ''|*[!0-9]*) printf '    not a number\n' >&2 ;;
+        *) break ;;
+      esac
+    done
+  fi
+
+  printf '  install systemd CPUAffinity drop-in? [Y/n]: ' >&2
+  IFS= read -r aff_ans </dev/tty || return 1
+  printf '  migrate kernel cmdline (DESTRUCTIVE on Jetson — needs reboot)? [y/N]: ' >&2
+  IFS= read -r mig_ans </dev/tty || return 1
+
+  local aff_bool="true" mig_bool="false"
+  case "${aff_ans,,}" in n|no) aff_bool="false" ;; esac
+  case "${mig_ans,,}" in y|yes) mig_bool="true" ;; esac
+
+  # Build JSON. The Python validator (cmd_validate) re-checks rtCore
+  # falls inside the partition; if the operator typed a stray number,
+  # validation post-persist surfaces the error.
+  local nic_field=""
+  if [ -n "$nic_iface" ]; then
+    nic_field=", \"nic\": {\"iface\": \"$nic_iface\", \"rtCore\": $nic_rt}"
+  fi
+  local json
+  json=$(printf '{"enabled": true, "partitions": [{"name": "%s", "cpus": "%s"}]%s, "installAffinityDefaults": %s, "migrateCmdline": %s}' \
+    "$partition_name" "$partition_cpus" "$nic_field" "$aff_bool" "$mig_bool")
+
+  if ! _cpu_isolation_persist "$hc" "$json"; then
+    return 1
+  fi
+  pass "persisted cpuIsolation block to $hc"
+}
+
+# Persist a JSON cpuIsolation blob, then validate the resulting file.
+# Reverts the file on validation failure (writes through a tmp copy).
+_cpu_isolation_persist() {
+  local hc="$1" json="$2"
+  local backup
+  backup="$(mktemp)"
+  cp "$hc" "$backup" || return 1
+  if ! python3 "$HOST_CONFIG_HELPER" "$hc" set-cpu-isolation-json "$json" >/dev/null 2>&1; then
+    cp "$backup" "$hc"; rm -f "$backup"
+    fail "could not write cpuIsolation block to $hc"
+    return 1
+  fi
+  if ! python3 "$HOST_CONFIG_HELPER" "$hc" validate >/dev/null 2>&1; then
+    cp "$backup" "$hc"; rm -f "$backup"
+    fail "cpuIsolation block did not validate — restored $hc"
+    info "validator output:"
+    python3 "$HOST_CONFIG_HELPER" "$hc" validate >&2 || true
+    return 1
+  fi
+  rm -f "$backup"
 }
 
 configure_dma_ethercat_env() {

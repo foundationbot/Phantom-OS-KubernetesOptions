@@ -14,6 +14,7 @@ Usage:
   host-config.py <path> get-dma-ethercat-config-path
   host-config.py <path> set-dma-ethercat-config-path <value>
   host-config.py <path> get-cpu-isolation-json
+  host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-images-json
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
@@ -194,6 +195,57 @@ def cmd_get_cpu_isolation_json(cfg: dict) -> int:
         print("error: 'cpuIsolation' must be a mapping", file=sys.stderr)
         return 2
     print(json.dumps(block))
+    return 0
+
+
+def cmd_set_cpu_isolation_json(path: str, blob: str) -> int:
+    """Persist a cpuIsolation block into the host-config file in place.
+    Strips any existing top-level cpuIsolation: block and appends a
+    fresh block at EOF. Comments and ordering elsewhere are preserved.
+
+    Input is a JSON object — the same shape get-cpu-isolation-json
+    emits (so an interactive prompt can build a dict, JSON-encode it,
+    and round-trip through this command)."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+    try:
+        block = json.loads(blob or "{}")
+    except json.JSONDecodeError as exc:
+        print(f"error: invalid JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(block, dict):
+        print("error: cpuIsolation must be a JSON object", file=sys.stderr)
+        return 2
+
+    src = p.read_text().splitlines(keepends=True)
+    out: list[str] = []
+    skipping = False
+    for line in src:
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if skipping:
+            if (
+                indent == 0
+                and stripped.strip()
+                and not stripped.startswith("#")
+            ):
+                skipping = False
+                out.append(line)
+            continue
+        if indent == 0 and stripped.startswith("cpuIsolation:"):
+            skipping = True
+            continue
+        out.append(line)
+
+    if out and not out[-1].endswith("\n"):
+        out[-1] = out[-1] + "\n"
+    out.append("cpuIsolation:\n")
+    out.append(yaml.safe_dump({"_": block}, sort_keys=False)
+               .split("_:\n", 1)[1])
+
+    p.write_text("".join(out))
     return 0
 
 
@@ -848,6 +900,14 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
+    if cmd == "set-cpu-isolation-json":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> set-cpu-isolation-json <json>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_set_cpu_isolation_json(path, sys.argv[3])
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
     if cmd == "get-dma-ethercat-config-set":

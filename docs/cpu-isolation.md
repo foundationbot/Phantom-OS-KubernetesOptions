@@ -12,12 +12,14 @@ internals, verification phases). This file is the runbook.
 >
 > - **Hands-on (this runbook):** invoke `scripts/cpusets/manage_cpusets.sh`
 >   directly. Covers debugging, exploration, and one-off changes.
-> - **Bootstrap-driven:** add a `cpuIsolation:` block to
->   `/etc/phantomos/host-config.yaml` and let `bootstrap-robot.sh` phase 7
->   (cpu-isolation) drive every subcommand non-interactively. See
->   [the Bootstrap-driven setup](#bootstrap-driven-setup) section near the
->   end of this file. Phase 7 gates phase 8 (install dma-ethercat) so the
->   .deb's systemd unit comes up with the partition already active.
+> - **Bootstrap-driven (default-on):** `bootstrap-robot.sh` phase 7
+>   (cpu-isolation) prompts the operator on first bringup if no
+>   `cpuIsolation:` block exists in `/etc/phantomos/host-config.yaml`,
+>   persists the answers, and drives every subcommand non-interactively
+>   on subsequent runs. See
+>   [the Bootstrap-driven setup](#bootstrap-driven-setup) section near
+>   the end of this file. Phase 7 gates phase 8 (install dma-ethercat)
+>   so the .deb's systemd unit comes up with the partition already active.
 
 ---
 
@@ -330,10 +332,17 @@ file under `/etc/systemd/system/`).
 ## Bootstrap-driven setup
 
 `bootstrap-robot.sh` phase 7 (`cpu-isolation`) drives every subcommand
-above non-interactively when `cpuIsolation:` is set in
+above non-interactively, reading `cpuIsolation:` from
 `/etc/phantomos/host-config.yaml`. Phase 7 gates phase 8
 (`install-dma-ethercat`) so the .deb's `dma-ethercat.service` unit is
 started with the partition already active.
+
+**Default-on.** If the block is absent and bootstrap runs on a TTY,
+the operator is prompted for partition cpus, name, NIC iface, RT core,
+affinity-drop-in, and cmdline-migration; answers persist back to
+`host-config.yaml`. Re-runs are non-interactive. Pass
+`--skip-cpu-isolation` to bypass for one run, or set
+`cpuIsolation.enabled: false` to opt out persistently.
 
 ### Schema
 

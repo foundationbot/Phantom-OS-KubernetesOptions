@@ -87,12 +87,16 @@ images:
 #   configPath: test_single_novanta/phantom-0001.json
 #   # configSet: test_single_novanta
 
-# Optional CPU isolation. When enabled, bootstrap phase 7 carves cpuset
-# partitions out of the running kernel, installs a systemd boot service
-# so they reactivate on reboot, and (optionally) pins the EtherCAT NIC's
-# IRQs onto an RT core. The vendored manage_cpusets.sh
-# (scripts/cpusets/manage_cpusets.sh) does the heavy lifting; see
-# docs/cpu-isolation.md for the full lifecycle.
+# CPU isolation. Bootstrap phase 7 carves cpuset partitions out of the
+# running kernel, installs a systemd boot service so they reactivate on
+# reboot, and (optionally) pins the EtherCAT NIC's IRQs onto an RT core.
+# The vendored manage_cpusets.sh (scripts/cpusets/manage_cpusets.sh)
+# does the heavy lifting; see docs/cpu-isolation.md for the full
+# lifecycle.
+#
+# Default-on. If this block is absent and bootstrap runs on a TTY, the
+# operator is prompted and the answers persist here. Only an explicit
+# `enabled: false` skips the phase.
 #
 # Schema:
 #   enabled                  bool, default unset (= phase is a no-op)
