@@ -353,13 +353,33 @@ cpuIsolation:
     - {name: ecat, cpus: "10-13", description: "EtherCAT master RT loop"}
   nic:                          # optional — only when this host pins a NIC
     iface: ecat0
-    rtCore: 11                  # must lie inside one of the partitions above
+    irqCore: 12                 # NIC IRQs / NAPI / softirq handling
+  dmaRtCpu: 11                  # SOEM cyclic loop (DMA_RT_CPU)
   installAffinityDefaults: true # default: true. Writes /etc/systemd/system.conf.d/cpuaffinity.conf.
   migrateCmdline: false         # default: false. DESTRUCTIVE on Jetson.
 ```
 
 The full schema (with validation rules) lives at
 [`host-config-templates/_template/host-config.yaml`](../host-config-templates/_template/host-config.yaml).
+
+### Why irqCore and dmaRtCpu should differ
+
+Async NIC interrupts (link blips, broadcasts, ARP) can land at any
+moment. When the IRQ handler and the cyclic loop share a core, those
+events can preempt the loop in the wrong microsecond — fine on average,
+ugly in the p99.9 tail. The IgH EtherCAT documentation makes the same
+point: hardware-IRQ-driven RX is asynchronous and indeterministic, so
+keeping the cyclic path on a "no surprises" core matters for hard-RT.
+
+The interactive prompt picks two distinct defaults from the partition
+(first cpu for IRQs, second for the loop). The validator warns —
+doesn't error — if you set them equal so you can deliberately co-locate
+on hosts where average latency matters more than worst-case jitter
+(e.g. soft-RT EtherCAT, or a 1-cpu partition where you have no choice).
+
+The legacy `nic.rtCore` field is still accepted (with a deprecation
+warning) and treated as `irqCore`. New configs should use the split
+fields.
 
 ### What phase 7 does
 

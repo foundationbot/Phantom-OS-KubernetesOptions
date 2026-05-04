@@ -88,16 +88,31 @@ else:
 PY
 }
 
-# Read nic.iface and nic.rtCore — empty when absent.
+# Read nic.iface and nic.irqCore — empty when absent. The legacy
+# nic.rtCore key is auto-translated to irqCore for back-compat.
 cpusets_json_nic() {
   python3 - "$1" <<'PY' 2>/dev/null || true
 import json, sys
 data = json.loads(sys.argv[1] or "{}")
 nic = data.get("nic") or {}
 iface = nic.get("iface", "")
-rt = nic.get("rtCore", "")
+irq = nic.get("irqCore")
+if irq is None:
+    irq = nic.get("rtCore", "")
 print(iface)
-print(rt)
+print(irq if irq != "" else "")
+PY
+}
+
+# Read top-level cpuIsolation.dmaRtCpu (the SOEM RT loop core).
+# Returns empty string when not set — caller decides whether to fall
+# back to nic.irqCore for legacy configs.
+cpusets_json_dma_rt_cpu() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+v = data.get("dmaRtCpu", "")
+print(v if v != "" else "")
 PY
 }
 

@@ -104,10 +104,18 @@ images:
 #                              name: alnum/underscore (INI section)
 #                              cpus: kernel cpu-list ('10-13', '10,12-14')
 #                              partitions cannot overlap on a CPU
-#   nic                      optional {iface, rtCore}
-#                              iface:  e.g. ecat0
-#                              rtCore: integer, must lie inside one of
-#                                      the declared partitions
+#   nic                      optional {iface, irqCore}
+#                              iface:   e.g. ecat0
+#                              irqCore: core for NIC IRQs / NAPI / softirqs
+#                                       (must lie inside a partition)
+#                              (legacy alias `rtCore` still accepted with
+#                              a deprecation warning).
+#   dmaRtCpu                 int, core for the SOEM cyclic loop (becomes
+#                              DMA_RT_CPU in /etc/dma/dma-ethercat.env).
+#                              SHOULD differ from nic.irqCore: async NIC
+#                              interrupts on the same core can preempt
+#                              the loop. Validator warns (not errors)
+#                              when equal.
 #   installAffinityDefaults  bool, default true. Writes
 #                              /etc/systemd/system.conf.d/cpuaffinity.conf
 #                              so systemd-spawned services stay off the
@@ -123,7 +131,8 @@ images:
 #     - {name: ecat, cpus: "10-13", description: "EtherCAT master RT loop"}
 #   nic:
 #     iface: ecat0
-#     rtCore: 11
+#     irqCore: 12              # IRQs on a core distinct from the loop
+#   dmaRtCpu: 11               # SOEM cyclic loop core
 #   installAffinityDefaults: true
 #   migrateCmdline: false
 

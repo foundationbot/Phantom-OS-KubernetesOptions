@@ -1443,10 +1443,10 @@ cpu_isolation() {
     info "DRY-RUN  $CPUSETS_SCRIPT apply $CPUSETS_CONF --yes"
     info "DRY-RUN  $CPUSETS_SCRIPT install-service $CPUSETS_CONF"
     info "DRY-RUN  $CPUSETS_SCRIPT install-affinity-defaults"
-    local _nic_iface _nic_rt
-    { read -r _nic_iface; read -r _nic_rt; } < <(cpusets_json_nic "$ci_json")
-    if [ -n "$_nic_iface" ] && [ -n "$_nic_rt" ]; then
-      info "DRY-RUN  $CPUSETS_SCRIPT ethercat-rt <partition> --nic $_nic_iface --rt-core $_nic_rt"
+    local _nic_iface _nic_irq
+    { read -r _nic_iface; read -r _nic_irq; } < <(cpusets_json_nic "$ci_json")
+    if [ -n "$_nic_iface" ] && [ -n "$_nic_irq" ]; then
+      info "DRY-RUN  $CPUSETS_SCRIPT ethercat-rt <partition> --nic $_nic_iface --rt-core $_nic_irq"
     fi
     if [ "$(cpusets_json_field "$ci_json" migrateCmdline)" = "true" ]; then
       info "DRY-RUN  $CPUSETS_SCRIPT migrate-cmdline --add-rt-flags --yes"
@@ -1499,12 +1499,12 @@ cpu_isolation() {
   fi
 
   # NIC IRQ pinning. Optional — only when cpuIsolation.nic is set.
-  # Requires --rt-core; bootstrap is non-interactive.
-  local nic_iface nic_rt
-  { read -r nic_iface; read -r nic_rt; } < <(cpusets_json_nic "$ci_json")
-  if [ -n "$nic_iface" ] && [ -n "$nic_rt" ]; then
-    # Pick the first declared partition that contains nic_rt. The
-    # validator already guaranteed nic_rt is inside some partition.
+  # Pins the NIC's IRQs to nic.irqCore (renamed from rtCore). The
+  # SOEM cyclic loop runs on cpuIsolation.dmaRtCpu, which by default
+  # is a *different* core inside the same partition.
+  local nic_iface nic_irq
+  { read -r nic_iface; read -r nic_irq; } < <(cpusets_json_nic "$ci_json")
+  if [ -n "$nic_iface" ] && [ -n "$nic_irq" ]; then
     local target_part=""
     while IFS= read -r pname; do
       [ -z "$pname" ] && continue
@@ -1516,9 +1516,12 @@ cpu_isolation() {
     if [ -z "$target_part" ]; then
       fail "cpuIsolation.nic set but no active partition to pin onto"
     else
-      note "pinning $nic_iface IRQs to core $nic_rt (partition $target_part)..."
-      if cpusets_run ethercat-rt "$target_part" --nic "$nic_iface" --rt-core "$nic_rt"; then
-        pass "ethercat-rt configured on $nic_iface core $nic_rt"
+      note "pinning $nic_iface IRQs to core $nic_irq (partition $target_part)..."
+      # Upstream flag is still --rt-core; semantically it's the IRQ pin
+      # target. Bootstrap renames it to irqCore in our schema for
+      # clarity but uses the same upstream flag here.
+      if cpusets_run ethercat-rt "$target_part" --nic "$nic_iface" --rt-core "$nic_irq"; then
+        pass "ethercat-rt configured: $nic_iface IRQs on core $nic_irq"
       else
         fail "manage_cpusets.sh ethercat-rt failed"
       fi
@@ -1794,9 +1797,10 @@ _dma_ethercat_prompt_for_config() {
 #   2. partition cpus      (default 11-13)
 #   3. partition name      (default ecat)
 #   4. NIC iface           (empty = skip NIC pinning)
-#   5. NIC rtCore          (only if iface set; default = first cpu)
-#   6. installAffinityDefaults  (default Y)
-#   7. migrateCmdline           (default N — destructive on Jetson)
+#   5. NIC IRQ core        (default = first cpu of partition)
+#   6. SOEM RT loop core   (default = a different cpu in the partition)
+#   7. installAffinityDefaults  (default Y)
+#   8. migrateCmdline           (default N — destructive on Jetson)
 _cpu_isolation_prompt() {
   local hc="$1"
 
@@ -1819,7 +1823,7 @@ _cpu_isolation_prompt() {
       ;;
   esac
 
-  local partition_cpus partition_name nic_iface nic_rt aff_ans mig_ans
+  local partition_cpus partition_name nic_iface nic_irq dma_rt_cpu aff_ans mig_ans
   while :; do
     printf '  partition cpus (e.g. 11-13, 10,12-13) [11-13]: ' >&2
     IFS= read -r partition_cpus </dev/tty || return 1
@@ -1842,19 +1846,50 @@ _cpu_isolation_prompt() {
     nic_iface="ecat0"
   fi
 
+  # Compute partition's expanded cpu list and pick two distinct
+  # defaults: first cpu for IRQs, second (or last) for the SOEM loop.
+  # For minimum jitter the IRQ core and the loop core SHOULD differ —
+  # async NIC interrupts can preempt the cyclic loop at the wrong
+  # microsecond when they share a core.
+  local part_cpus_expanded first_cpu second_cpu
+  part_cpus_expanded="$(_cpu_isolation_expand_cpus "$partition_cpus")"
+  first_cpu="$(printf '%s\n' "$part_cpus_expanded" | head -n1)"
+  second_cpu="$(printf '%s\n' "$part_cpus_expanded" | sed -n '2p')"
+  [ -z "$second_cpu" ] && second_cpu="$first_cpu"  # 1-cpu partition fallback
+
   if [ -n "$nic_iface" ]; then
-    local first_cpu
-    first_cpu="$(printf '%s' "$partition_cpus" | sed -E 's/^([0-9]+).*$/\1/')"
     while :; do
-      printf '  NIC RT core (integer inside %s) [%s]: ' "$partition_cpus" "$first_cpu" >&2
-      IFS= read -r nic_rt </dev/tty || return 1
-      [ -z "$nic_rt" ] && nic_rt="$first_cpu"
-      case "$nic_rt" in
+      printf '  NIC IRQ core (integer inside %s) [%s]: ' "$partition_cpus" "$first_cpu" >&2
+      IFS= read -r nic_irq </dev/tty || return 1
+      [ -z "$nic_irq" ] && nic_irq="$first_cpu"
+      case "$nic_irq" in
         ''|*[!0-9]*) printf '    not a number\n' >&2 ;;
         *) break ;;
       esac
     done
   fi
+
+  # SOEM RT loop core. Default to a *different* core from nic_irq.
+  local rt_default="$second_cpu"
+  if [ -n "$nic_irq" ] && [ "$nic_irq" = "$second_cpu" ]; then
+    rt_default="$first_cpu"
+  fi
+  while :; do
+    printf '  SOEM RT loop core (integer inside %s) [%s]: ' "$partition_cpus" "$rt_default" >&2
+    IFS= read -r dma_rt_cpu </dev/tty || return 1
+    [ -z "$dma_rt_cpu" ] && dma_rt_cpu="$rt_default"
+    case "$dma_rt_cpu" in
+      ''|*[!0-9]*) printf '    not a number\n' >&2; continue ;;
+    esac
+    if [ -n "$nic_irq" ] && [ "$dma_rt_cpu" = "$nic_irq" ]; then
+      printf '    warning: same core as NIC IRQ (%s) — async interrupts may\n' "$nic_irq" >&2
+      printf '    preempt the SOEM loop. Continue anyway? [y/N]: ' >&2
+      local same_ans
+      IFS= read -r same_ans </dev/tty || return 1
+      case "${same_ans,,}" in y|yes) break ;; *) continue ;; esac
+    fi
+    break
+  done
 
   printf '  install systemd CPUAffinity drop-in? [Y/n]: ' >&2
   IFS= read -r aff_ans </dev/tty || return 1
@@ -1865,21 +1900,37 @@ _cpu_isolation_prompt() {
   case "${aff_ans,,}" in n|no) aff_bool="false" ;; esac
   case "${mig_ans,,}" in y|yes) mig_bool="true" ;; esac
 
-  # Build JSON. The Python validator (cmd_validate) re-checks rtCore
-  # falls inside the partition; if the operator typed a stray number,
-  # validation post-persist surfaces the error.
+  # Build JSON. Validator post-persist re-checks the integers fall
+  # inside the partition.
   local nic_field=""
   if [ -n "$nic_iface" ]; then
-    nic_field=", \"nic\": {\"iface\": \"$nic_iface\", \"rtCore\": $nic_rt}"
+    nic_field=", \"nic\": {\"iface\": \"$nic_iface\", \"irqCore\": $nic_irq}"
   fi
   local json
-  json=$(printf '{"enabled": true, "partitions": [{"name": "%s", "cpus": "%s"}]%s, "installAffinityDefaults": %s, "migrateCmdline": %s}' \
-    "$partition_name" "$partition_cpus" "$nic_field" "$aff_bool" "$mig_bool")
+  json=$(printf '{"enabled": true, "partitions": [{"name": "%s", "cpus": "%s"}]%s, "dmaRtCpu": %s, "installAffinityDefaults": %s, "migrateCmdline": %s}' \
+    "$partition_name" "$partition_cpus" "$nic_field" "$dma_rt_cpu" "$aff_bool" "$mig_bool")
 
   if ! _cpu_isolation_persist "$hc" "$json"; then
     return 1
   fi
   pass "persisted cpuIsolation block to $hc"
+}
+
+# Expand a kernel cpu-list ("11-13", "10,12-13") to one CPU per line.
+_cpu_isolation_expand_cpus() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys
+spec = sys.argv[1]
+out = []
+for part in spec.split(","):
+    if "-" in part:
+        lo, hi = part.split("-", 1)
+        out.extend(range(int(lo), int(hi) + 1))
+    else:
+        out.append(int(part))
+for c in out:
+    print(c)
+PY
 }
 
 # Persist a JSON cpuIsolation blob, then validate the resulting file.
@@ -1993,14 +2044,19 @@ configure_dma_ethercat_env() {
   # has the right pinning. Empty when cpuIsolation is absent — those
   # keys are simply not written (existing values in the conffile are
   # preserved if they predate this run).
-  local ci_json="" iface="" rt_cpu="" cpu_affinity=""
+  local ci_json="" iface="" rt_cpu="" cpu_affinity="" nic_irq=""
   if [ -r "$hc" ]; then
     ci_json="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
                  "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
   fi
   if [ -n "$ci_json" ] && [ "$ci_json" != "{}" ]; then
     cpu_affinity="$(_resolve_dma_cpu_affinity "$ci_json")"
-    { read -r iface; read -r rt_cpu; } < <(cpusets_json_nic "$ci_json")
+    { read -r iface; read -r nic_irq; } < <(cpusets_json_nic "$ci_json")
+    # DMA_RT_CPU comes from cpuIsolation.dmaRtCpu (the SOEM loop core).
+    # Legacy configs without dmaRtCpu fall back to nic.irqCore so they
+    # still produce a usable env file (matches old same-core behaviour).
+    rt_cpu="$(cpusets_json_dma_rt_cpu "$ci_json")"
+    if [ -z "$rt_cpu" ]; then rt_cpu="$nic_irq"; fi
   fi
 
   # Write DMA_CONFIG (and optionally INTERFACE, DMA_CPU_AFFINITY,

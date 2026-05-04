@@ -674,7 +674,12 @@ def cmd_validate(cfg: dict) -> int:
     # cpuIsolation is optional. Schema:
     #   enabled: bool
     #   partitions: list of {name: str, cpus: str, description?: str}
-    #   nic: optional {iface: str, rtCore: int}
+    #   nic: optional {iface: str, irqCore: int}
+    #     (legacy alias `rtCore` accepted with a stderr warning)
+    #   dmaRtCpu: int — core for the SOEM cyclic loop (DMA_RT_CPU).
+    #     Should differ from nic.irqCore: the IRQ handler can preempt
+    #     the loop at the wrong instant when they share a core. Equal
+    #     values produce a stderr warning, not an error.
     #   installAffinityDefaults: bool (default true if cpuIsolation.enabled)
     #   migrateCmdline: bool (default false; opt-in, destructive)
     import re as _re
@@ -755,6 +760,7 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(f"{label}.description: must be a string")
 
             nic = ci.get("nic")
+            irq_core: int | None = None
             if nic is not None:
                 if not isinstance(nic, dict):
                     errors.append("cpuIsolation.nic: must be a mapping")
@@ -762,19 +768,59 @@ def cmd_validate(cfg: dict) -> int:
                     iface = nic.get("iface")
                     if not iface or not isinstance(iface, str):
                         errors.append("cpuIsolation.nic.iface: required, must be a string")
-                    rt = nic.get("rtCore")
-                    if rt is None:
+                    # `irqCore` is canonical; `rtCore` is the deprecated
+                    # name from before we split IRQ-pin from RT-loop core.
+                    raw_irq = nic.get("irqCore")
+                    raw_legacy = nic.get("rtCore")
+                    field_name = "irqCore"
+                    if raw_irq is None and raw_legacy is not None:
+                        print(
+                            "warning: cpuIsolation.nic.rtCore is deprecated, "
+                            "use cpuIsolation.nic.irqCore instead "
+                            "(this field pins the NIC's IRQs)",
+                            file=sys.stderr,
+                        )
+                        raw_irq = raw_legacy
+                        field_name = "rtCore"
+                    elif raw_irq is not None and raw_legacy is not None:
                         errors.append(
-                            "cpuIsolation.nic.rtCore: required when nic block "
+                            "cpuIsolation.nic: set either irqCore or rtCore "
+                            "(legacy), not both"
+                        )
+                    if raw_irq is None:
+                        errors.append(
+                            "cpuIsolation.nic.irqCore: required when nic block "
                             "present (bootstrap is non-interactive)"
                         )
-                    elif not isinstance(rt, int) or isinstance(rt, bool):
-                        errors.append("cpuIsolation.nic.rtCore: must be an integer")
-                    elif rt not in seen_cpus:
+                    elif not isinstance(raw_irq, int) or isinstance(raw_irq, bool):
+                        errors.append(f"cpuIsolation.nic.{field_name}: must be an integer")
+                    elif raw_irq not in seen_cpus:
                         errors.append(
-                            f"cpuIsolation.nic.rtCore={rt}: not in any declared "
-                            f"partition cpus ({sorted(seen_cpus) or 'none'})"
+                            f"cpuIsolation.nic.{field_name}={raw_irq}: not in any "
+                            f"declared partition cpus ({sorted(seen_cpus) or 'none'})"
                         )
+                    else:
+                        irq_core = raw_irq
+
+            # dmaRtCpu — top-level. Core where dma_main pins its
+            # cyclic loop. Different from nic.irqCore by default.
+            if "dmaRtCpu" in ci:
+                rt_cpu = ci["dmaRtCpu"]
+                if not isinstance(rt_cpu, int) or isinstance(rt_cpu, bool):
+                    errors.append("cpuIsolation.dmaRtCpu: must be an integer")
+                elif rt_cpu not in seen_cpus:
+                    errors.append(
+                        f"cpuIsolation.dmaRtCpu={rt_cpu}: not in any declared "
+                        f"partition cpus ({sorted(seen_cpus) or 'none'})"
+                    )
+                elif irq_core is not None and rt_cpu == irq_core:
+                    print(
+                        f"warning: cpuIsolation.dmaRtCpu={rt_cpu} equals "
+                        f"cpuIsolation.nic.irqCore — async NIC IRQs can "
+                        f"preempt the SOEM RT loop. For minimum jitter, "
+                        f"pick distinct cores inside the partition.",
+                        file=sys.stderr,
+                    )
 
             if ci.get("migrateCmdline") and not ci.get("installAffinityDefaults", True):
                 errors.append(
