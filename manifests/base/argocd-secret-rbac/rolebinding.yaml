@@ -1,6 +1,7 @@
-# Bind argocd-secret-reader to the ArgoCD ServiceAccounts that legitimately
-# need it. Names match the argo-cd Helm chart defaults; verify with
-# `kubectl -n argocd get sa` after install.
+# Subject names follow the argo-cd Helm chart fullname pattern <release>-<component>
+# (release name "argocd"). Verified against chart versions 5.x through 7.x.
+# Do NOT modify terraform/variables.tf to pin the chart here; that is a separate
+# operations concern.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -10,6 +11,12 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: argocd-secret-reader
+# This list mirrors the argo-cd Helm chart's component ServiceAccounts for
+# release name "argocd". The overlay is ADDITIVE to chart-rendered RBAC —
+# chart-installed ClusterRoles may also grant Secret access, and tightening
+# to "this is the only path" is a separate follow-up tracked in RFC 0002.
+# If a future chart version adds or removes a component SA, update this list
+# and the bats test in tests/bash/manifest_overlays.bats.
 subjects:
   - kind: ServiceAccount
     name: argocd-server
@@ -25,4 +32,16 @@ subjects:
     namespace: argocd
   - kind: ServiceAccount
     name: argocd-notifications-controller
+    namespace: argocd
+  # dex-server: enabled by default when dex is used for SSO.
+  - kind: ServiceAccount
+    name: argocd-dex-server
+    namespace: argocd
+  # redis-secret-init: runs when in-cluster Redis is used (default).
+  - kind: ServiceAccount
+    name: argocd-redis-secret-init
+    namespace: argocd
+  # commit-server: introduced in newer chart versions; no-op when disabled.
+  - kind: ServiceAccount
+    name: argocd-commit-server
     namespace: argocd
