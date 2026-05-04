@@ -10,6 +10,7 @@ free of YAML parsing logic.
 Usage:
   host-config.py <path> get robot
   host-config.py <path> get aiPcUrl
+  host-config.py <path> get-dma-ethercat-config-set
   host-config.py <path> get-images-json
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
@@ -99,6 +100,19 @@ def load(path: str) -> dict:
 def cmd_get(cfg: dict, field: str) -> int:
     value = cfg.get(field)
     if value is None or value == "":
+        return 1
+    print(value)
+    return 0
+
+
+def cmd_get_dma_ethercat_config_set(cfg: dict) -> int:
+    """Print dmaEthercat.configSet (a single directory name under
+    /usr/share/dma-ethercat/config/) or exit 1 if unset."""
+    block = cfg.get("dmaEthercat") or {}
+    if not isinstance(block, dict):
+        return 1
+    value = block.get("configSet")
+    if not value:
         return 1
     print(value)
     return 0
@@ -526,6 +540,25 @@ def cmd_validate(cfg: dict) -> int:
                         )
                 if "selfHeal" in spec and not isinstance(spec["selfHeal"], bool):
                     errors.append(f"stacks.{name}.selfHeal: must be true or false")
+    # dmaEthercat is optional. configSet must be a single directory
+    # name (no slashes, no '..') — bootstrap interpolates it into
+    # /usr/share/dma-ethercat/config/<configSet>/<robot>.json, so
+    # path separators would let an operator escape that directory.
+    dma = cfg.get("dmaEthercat")
+    if dma is not None:
+        if not isinstance(dma, dict):
+            errors.append("'dmaEthercat' must be a mapping")
+        else:
+            cset = dma.get("configSet")
+            if cset is not None:
+                if not isinstance(cset, str) or not cset:
+                    errors.append("dmaEthercat.configSet: must be a non-empty string")
+                elif "/" in cset or cset in (".", "..") or cset.startswith("."):
+                    errors.append(
+                        "dmaEthercat.configSet: must be a single directory "
+                        "name (no '/', no leading '.')"
+                    )
+
     images = cfg.get("images") or []
     if not isinstance(images, list):
         errors.append("'images' must be a list")
@@ -616,6 +649,8 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
+    if cmd == "get-dma-ethercat-config-set":
+        return cmd_get_dma_ethercat_config_set(cfg)
     if cmd == "get-deployment-patches-json":
         return cmd_get_deployment_patches_json(cfg)
     if cmd == "get-enabled-stacks":

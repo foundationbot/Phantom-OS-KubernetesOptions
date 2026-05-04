@@ -66,6 +66,22 @@ images:
   - name: foundationbot/dma-ethercat
     newTag: main-latest-aarch64
 
+# Optional dma-ethercat overrides. After phase 7 installs the .deb,
+# bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
+# bare-metal dma-ethercat.service picks the right hardware config JSON.
+# Resolution order:
+#   1. dmaEthercat.configSet below (if set):
+#        /usr/share/dma-ethercat/config/<configSet>/<robot>.json
+#   2. auto-detect by robot name, in order:
+#        /usr/share/dma-ethercat/config/<robot>.json
+#        /usr/share/dma-ethercat/config/<robot>/<robot>.json
+#   3. neither -> bootstrap halts and asks you to set dmaEthercat.configSet
+#
+# `configSet` is just the directory name under /usr/share/dma-ethercat/config/
+# (no slashes, no extension). Example: test_single_novanta.
+# dmaEthercat:
+#   configSet: test_single_novanta
+
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal
 # kernel/runtime mounts (/dev, /dev/shm, /tmp); EVERY OTHER host path

@@ -1485,6 +1485,17 @@ PY
     ethercat_die "dpkg -i failed — check above output for missing dependencies or conflicting packages"
   fi
 
+  # Resolve DMA_CONFIG and pin it in /etc/dma/dma-ethercat.env. The .deb
+  # ships a default DMA_CONFIG that is correct only for the package's
+  # canonical robot — every other robot needs an override. Order:
+  #   1. host-config dmaEthercat.configSet ->
+  #        /usr/share/dma-ethercat/config/<configSet>/<robot>.json
+  #   2. auto-detect by robot name:
+  #        /usr/share/dma-ethercat/config/<robot>.json
+  #        /usr/share/dma-ethercat/config/<robot>/<robot>.json
+  #   3. neither -> halt with instructions to set dmaEthercat.configSet.
+  configure_dma_ethercat_env "$hc"
+
   # Enable + start. Failed start halts the bootstrap.
   note "enabling + starting dma-ethercat.service..."
   if systemctl enable --now dma-ethercat.service; then
@@ -1495,6 +1506,75 @@ PY
     systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/      /' || true
     ethercat_die "service did not start — check systemctl status / journalctl -u dma-ethercat for the underlying cause"
   fi
+}
+
+# Resolve the per-robot DMA_CONFIG path and write it to
+# /etc/dma/dma-ethercat.env. The env file is a dpkg conffile, so we
+# preserve every line except DMA_CONFIG=. Path resolution uses the
+# robot id ($ROBOT) and, optionally, host-config dmaEthercat.configSet.
+DMA_ETHERCAT_ENV_FILE="${DMA_ETHERCAT_ENV_FILE:-/etc/dma/dma-ethercat.env}"
+DMA_ETHERCAT_CONFIG_DIR="${DMA_ETHERCAT_CONFIG_DIR:-/usr/share/dma-ethercat/config}"
+
+configure_dma_ethercat_env() {
+  local hc="$1"
+  local robot="${ROBOT:-}"
+  if [ -z "$robot" ]; then
+    ethercat_die "robot id not resolved — cannot pick dma-ethercat config"
+  fi
+
+  # Resolution: host-config.dmaEthercat.configSet wins; else auto-detect.
+  local config_set="" candidate=""
+  if [ -r "$hc" ]; then
+    config_set="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
+                    "$hc" get-dma-ethercat-config-set 2>/dev/null || true)"
+  fi
+
+  if [ -n "$config_set" ]; then
+    candidate="$DMA_ETHERCAT_CONFIG_DIR/$config_set/$robot.json"
+    note "host-config dmaEthercat.configSet=$config_set"
+    if [ ! -r "$candidate" ]; then
+      fail "no config at $candidate"
+      ethercat_die "dmaEthercat.configSet=$config_set, but $candidate is missing — check the .deb ships this robot's JSON or update configSet"
+    fi
+  else
+    local c1="$DMA_ETHERCAT_CONFIG_DIR/$robot.json"
+    local c2="$DMA_ETHERCAT_CONFIG_DIR/$robot/$robot.json"
+    if   [ -r "$c1" ]; then candidate="$c1"
+    elif [ -r "$c2" ]; then candidate="$c2"
+    else
+      fail "no dma-ethercat config for robot '$robot'"
+      info "searched:"
+      info "  $c1"
+      info "  $c2"
+      info "available config sets under $DMA_ETHERCAT_CONFIG_DIR:"
+      ls -1 "$DMA_ETHERCAT_CONFIG_DIR" 2>&1 | sed 's/^/    /' || true
+      ethercat_die "set dmaEthercat.configSet in $hc to one of the directories above (the JSON inside must be named ${robot}.json), or rename the JSON to ${robot}.json"
+    fi
+  fi
+  pass "resolved DMA_CONFIG: $candidate"
+
+  # Write DMA_CONFIG into the env file in place. Preserve every other
+  # line. Create the file if missing (defensive — dpkg -i should have
+  # placed it already, but the package layout may evolve).
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  set DMA_CONFIG=$candidate in $DMA_ETHERCAT_ENV_FILE"
+    return
+  fi
+
+  mkdir -p "$(dirname "$DMA_ETHERCAT_ENV_FILE")"
+  local tmp
+  tmp="$(mktemp)"
+  if [ -r "$DMA_ETHERCAT_ENV_FILE" ]; then
+    grep -v '^[[:space:]]*DMA_CONFIG=' "$DMA_ETHERCAT_ENV_FILE" > "$tmp" || true
+  fi
+  printf 'DMA_CONFIG=%s\n' "$candidate" >> "$tmp"
+  if ! mv "$tmp" "$DMA_ETHERCAT_ENV_FILE"; then
+    rm -f "$tmp"
+    fail "could not write $DMA_ETHERCAT_ENV_FILE"
+    ethercat_die "could not update $DMA_ETHERCAT_ENV_FILE — check permissions"
+  fi
+  chmod 0644 "$DMA_ETHERCAT_ENV_FILE"
+  pass "wrote DMA_CONFIG to $DMA_ETHERCAT_ENV_FILE"
 }
 
 # ---- phase 8: gitops ----------------------------------------------------
