@@ -1,0 +1,11 @@
+# Read access to Secrets in the argocd namespace, scoped to ArgoCD's own
+# components. Bound by rolebinding.yaml. No human is bound to this Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-secret-reader
+  namespace: argocd
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
