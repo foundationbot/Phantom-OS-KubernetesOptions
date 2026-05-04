@@ -184,6 +184,10 @@ ROBOT=""
 YES=0
 DRY_RUN=0
 KEEP_GOING=0
+SKIP_DOCKER_STOP=0
+SKIP_STOP_SERVICES=0
+SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
 HOST_CONFIG_INPUT=""
@@ -761,6 +765,106 @@ EOF
   # 5. Reset cached KUBECTL — k0s is gone, anything we cached at startup
   #    is no longer valid until the cluster phase reinstalls it.
   KUBECTL=()
+}
+
+# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall)
+
+# Tear down the dma-ethercat realtime control service. Runs by default;
+# --skip-ethercat-uninstall opts out (use it for routine re-bootstraps
+# where the realtime stack should stay in place). Designed to run AFTER
+# purge_docker and reset_cluster so the pods that talk to ethercat are
+# already gone — stopping the service while pods are still pinging its
+# socket can leave the kernel module in a wedged state.
+#
+# Sequence (each step independent + idempotent):
+#   1. if no unit file installed                  -> skip whole phase
+#   2. if active                                  -> systemctl stop
+#   3. if stop failed                             -> bail (do NOT disable
+#                                                   or run uninstaller —
+#                                                   leaving the service
+#                                                   half-torn-down is
+#                                                   worse than no-op)
+#   4. if enabled / enabled-runtime / alias       -> systemctl disable
+#   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
+uninstall_ethercat() {
+  if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
+    return
+  fi
+  phase "pre-phase: uninstall dma-ethercat"
+
+  local svc=dma-ethercat.service
+  local uninstaller=/usr/sbin/dma-ethercat-uninstall
+
+  if ! systemctl list-unit-files "$svc" 2>/dev/null | grep -q "^$svc"; then
+    skip "$svc unit not installed — nothing to tear down"
+    if [ -x "$uninstaller" ]; then
+      note "running $uninstaller anyway (cleanup of stray files)..."
+      if [ "$DRY_RUN" = 1 ]; then
+        note "DRY-RUN: $uninstaller"
+      elif "$uninstaller"; then
+        pass "$uninstaller completed"
+      else
+        fail "$uninstaller exited non-zero"
+      fi
+    fi
+    return
+  fi
+
+  local active enabled
+  active=$(systemctl is-active  "$svc" 2>/dev/null || true)
+  enabled=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+  note "current state: active=${active:-unknown}  enabled=${enabled:-unknown}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    [ "$active" = "active" ]              && note "DRY-RUN: systemctl stop $svc"
+    [[ "$enabled" =~ ^enabled ]]          && note "DRY-RUN: systemctl disable $svc"
+    [ -x "$uninstaller" ]                 && note "DRY-RUN: $uninstaller"
+    return
+  fi
+
+  # 1. stop (only if active)
+  if [ "$active" = "active" ]; then
+    note "stopping $svc..."
+    if systemctl stop "$svc"; then
+      pass "stopped  $svc"
+    else
+      fail "stop $svc — refusing to disable/uninstall a running service"
+      return
+    fi
+  else
+    skip "stop     $svc  (not active)"
+  fi
+
+  # 2. disable (only if enabled in some form)
+  # `is-enabled` returns 'enabled', 'enabled-runtime', 'alias', etc. when
+  # there's something to disable. 'static', 'masked', 'disabled' are no-op.
+  if [[ "$enabled" =~ ^(enabled|enabled-runtime|alias)$ ]]; then
+    if systemctl disable "$svc" 2>/dev/null; then
+      pass "disabled $svc"
+    else
+      fail "disable  $svc"
+      return
+    fi
+  else
+    skip "disable  $svc  (state=${enabled:-unknown})"
+  fi
+
+  # 3. run the uninstaller
+  if [ ! -e "$uninstaller" ]; then
+    fail "$uninstaller not found — cannot complete uninstall"
+    return
+  fi
+  if [ ! -x "$uninstaller" ]; then
+    fail "$uninstaller not executable"
+    return
+  fi
+  note "running $uninstaller..."
+  if "$uninstaller"; then
+    pass "$uninstaller completed"
+  else
+    fail "$uninstaller exited non-zero"
+  fi
 }
 
 # ---- phase 1: preflight -------------------------------------------------
