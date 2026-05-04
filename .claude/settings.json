@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk '/^kind: PersistentVolume$/,/^---$/' manifests/base/argus/mongodb.yaml)",
+      "Bash(awk '/^kind: PersistentVolume$/,/^---$/' manifests/base/argus/redis.yaml)",
+      "Bash(awk '/^kind: PersistentVolume$/,/^---$/' manifests/base/nimbus/postgres.yaml)",
+      "Bash(bash -n scripts/rebind-stuck-pvc.sh)",
+      "Bash(bash scripts/rebind-stuck-pvc.sh recordings)",
+      "Bash(bash scripts/rebind-stuck-pvc.sh all)"
+    ]
+  }
+}

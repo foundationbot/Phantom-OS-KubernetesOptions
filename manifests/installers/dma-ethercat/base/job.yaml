@@ -37,8 +37,9 @@ spec:
         - name: dockerhub-creds
       containers:
         - name: extract
-          # Tag is rewritten per-robot via kustomize `images:` in
-          # manifests/installers/dma-ethercat/robots/<robot>/kustomization.yaml.
+          # Tag is sed-substituted at apply time by bootstrap-robot.sh's
+          # install_dma_ethercat phase, using the foundationbot/dma-ethercat
+          # newTag from /etc/phantomos/host-config.yaml's images: list.
           image: foundationbot/dma-ethercat:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
