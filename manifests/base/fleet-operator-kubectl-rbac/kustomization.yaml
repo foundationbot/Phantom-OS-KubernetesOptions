@@ -4,4 +4,4 @@ resources:
   - serviceaccount.yaml
   - clusterrolebinding-view.yaml
   - clusterrole-scale.yaml
-  - clusterrolebinding-scale.yaml
+  - rolebinding-scale.yaml

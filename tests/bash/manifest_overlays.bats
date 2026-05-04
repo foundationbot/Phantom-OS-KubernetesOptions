@@ -69,13 +69,18 @@ setup() { setup_common; }
 
 @test "fleet-operator-kubectl-rbac overlay defines SA, view binding, scale ClusterRole" {
   out="$(kustomize build "$REPO_ROOT/manifests/base/fleet-operator-kubectl-rbac")"
-  echo "$out" | grep -q 'kind: ServiceAccount'
-  echo "$out" | grep -q 'name: fleet-operator'
-  # bound to built-in `view` ClusterRole
-  echo "$out" | grep -qE 'name: view'
-  # scale ClusterRole
-  echo "$out" | grep -q 'kind: ClusterRole'
-  echo "$out" | grep -q 'fleet-operator-scale'
+  # ServiceAccount in kube-system
+  [ "$(echo "$out" | grep -cE '^kind: ServiceAccount$')" -eq 1 ]
+  echo "$out" | awk '/^kind: ServiceAccount$/,/^---$/' | grep -qE '^\s*name: fleet-operator\s*$'
+  echo "$out" | awk '/^kind: ServiceAccount$/,/^---$/' | grep -qE '^\s*namespace: kube-system\s*$'
+
+  # exactly one ClusterRoleBinding named fleet-operator-view, bound to ClusterRole/view
+  [ "$(echo "$out" | grep -cE '^kind: ClusterRoleBinding$')" -ge 1 ]
+  echo "$out" | grep -qE '^\s*name: fleet-operator-view\s*$'
+  echo "$out" | grep -qE '^\s*name: view\s*$'
+
+  # custom scale ClusterRole
+  echo "$out" | grep -qE '^\s*name: fleet-operator-scale\s*$'
 }
 
 @test "fleet-operator scale ClusterRole permits update/patch on */scale only" {
@@ -88,4 +93,12 @@ setup() { setup_common; }
   ! echo "$out" | awk '/fleet-operator-scale/,/^---/' | grep -qE 'verbs:.*\b(create|delete|deletecollection)\b'
   # explicit absence of secret read in any rule of this overlay
   ! echo "$out" | grep -qE 'resources:.*\bsecrets\b'
+  # scale must NOT be granted cluster-wide
+  ! echo "$out" | grep -A2 'kind: ClusterRoleBinding' | grep -qE 'name: fleet-operator-scale\b'
+  # scale binding is RoleBinding(s) in fleet namespaces
+  [ "$(echo "$out" | grep -cE '^kind: RoleBinding$')" -ge 4 ]
+  echo "$out" | grep -qE 'namespace: default'
+  echo "$out" | grep -qE 'namespace: nimbus'
+  echo "$out" | grep -qE 'namespace: argus'
+  echo "$out" | grep -qE 'namespace: dma-video'
 }

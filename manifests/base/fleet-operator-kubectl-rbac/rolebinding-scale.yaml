@@ -1,0 +1,61 @@
+# RoleBindings for fleet-operator's scale ClusterRole. Bound only in fleet
+# workload namespaces — explicitly NOT cluster-wide, so fleet-operator
+# cannot scale (and brown-out) kube-system / argocd / k0s-system workloads.
+#
+# To grant fleet-operator scale access in a new namespace, append another
+# RoleBinding here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-operator-scale
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-operator-scale
+subjects:
+  - kind: ServiceAccount
+    name: fleet-operator
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-operator-scale
+  namespace: nimbus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-operator-scale
+subjects:
+  - kind: ServiceAccount
+    name: fleet-operator
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-operator-scale
+  namespace: argus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-operator-scale
+subjects:
+  - kind: ServiceAccount
+    name: fleet-operator
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-operator-scale
+  namespace: dma-video
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-operator-scale
+subjects:
+  - kind: ServiceAccount
+    name: fleet-operator
+    namespace: kube-system
