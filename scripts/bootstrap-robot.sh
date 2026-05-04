@@ -1600,6 +1600,7 @@ PY
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
     info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    info "DRY-RUN  resolve+write DMA_CONFIG, INTERFACE, DMA_CPU_AFFINITY, DMA_RT_CPU into $DMA_ETHERCAT_ENV_FILE"
     info "DRY-RUN  systemctl enable --now dma-ethercat.service"
     return
   fi
@@ -1834,11 +1835,32 @@ configure_dma_ethercat_env() {
   fi
   pass "resolved DMA_CONFIG: $candidate"
 
-  # Write DMA_CONFIG into the env file in place. Preserve every other
-  # line. Create the file if missing (defensive — dpkg -i should have
-  # placed it already, but the package layout may evolve).
+  # Resolve cpuset values from host-config cpuIsolation (read by phase
+  # 7). The .deb's dma-ethercat.service unit reads INTERFACE,
+  # DMA_CPU_AFFINITY, and DMA_RT_CPU from /etc/dma/dma-ethercat.env;
+  # phase 8 here is the place to land them so the unit's first start
+  # has the right pinning. Empty when cpuIsolation is absent — those
+  # keys are simply not written (existing values in the conffile are
+  # preserved if they predate this run).
+  local ci_json="" iface="" rt_cpu="" cpu_affinity=""
+  if [ -r "$hc" ]; then
+    ci_json="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
+                 "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  fi
+  if [ -n "$ci_json" ] && [ "$ci_json" != "{}" ]; then
+    cpu_affinity="$(_resolve_dma_cpu_affinity "$ci_json")"
+    { read -r iface; read -r rt_cpu; } < <(cpusets_json_nic "$ci_json")
+  fi
+
+  # Write DMA_CONFIG (and optionally INTERFACE, DMA_CPU_AFFINITY,
+  # DMA_RT_CPU) into the env file in place. Preserve every other line —
+  # the file is a dpkg conffile, so unrelated comments and operator
+  # tweaks must survive.
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  set DMA_CONFIG=$candidate in $DMA_ETHERCAT_ENV_FILE"
+    [ -n "$iface" ]        && info "DRY-RUN  set INTERFACE=$iface"
+    [ -n "$cpu_affinity" ] && info "DRY-RUN  set DMA_CPU_AFFINITY=$cpu_affinity"
+    [ -n "$rt_cpu" ]       && info "DRY-RUN  set DMA_RT_CPU=$rt_cpu"
     return
   fi
 
@@ -1846,16 +1868,66 @@ configure_dma_ethercat_env() {
   local tmp
   tmp="$(mktemp)"
   if [ -r "$DMA_ETHERCAT_ENV_FILE" ]; then
-    grep -v '^[[:space:]]*DMA_CONFIG=' "$DMA_ETHERCAT_ENV_FILE" > "$tmp" || true
+    # Strip every key we're about to rewrite. Preserves comments,
+    # other variables, and blank lines.
+    grep -vE '^[[:space:]]*(DMA_CONFIG|INTERFACE|DMA_CPU_AFFINITY|DMA_RT_CPU)=' \
+      "$DMA_ETHERCAT_ENV_FILE" > "$tmp" || true
   fi
   printf 'DMA_CONFIG=%s\n' "$candidate" >> "$tmp"
+  [ -n "$iface" ]        && printf 'INTERFACE=%s\n' "$iface" >> "$tmp"
+  [ -n "$cpu_affinity" ] && printf 'DMA_CPU_AFFINITY=%s\n' "$cpu_affinity" >> "$tmp"
+  [ -n "$rt_cpu" ]       && printf 'DMA_RT_CPU=%s\n' "$rt_cpu" >> "$tmp"
   if ! mv "$tmp" "$DMA_ETHERCAT_ENV_FILE"; then
     rm -f "$tmp"
     fail "could not write $DMA_ETHERCAT_ENV_FILE"
     ethercat_die "could not update $DMA_ETHERCAT_ENV_FILE — check permissions"
   fi
   chmod 0644 "$DMA_ETHERCAT_ENV_FILE"
-  pass "wrote DMA_CONFIG to $DMA_ETHERCAT_ENV_FILE"
+  if [ -n "$iface" ] || [ -n "$cpu_affinity" ] || [ -n "$rt_cpu" ]; then
+    pass "wrote DMA_CONFIG, cpuset (INTERFACE=$iface DMA_CPU_AFFINITY=$cpu_affinity DMA_RT_CPU=$rt_cpu) to $DMA_ETHERCAT_ENV_FILE"
+  else
+    pass "wrote DMA_CONFIG to $DMA_ETHERCAT_ENV_FILE"
+  fi
+}
+
+# Pick the partition cpus that should populate DMA_CPU_AFFINITY. When
+# nic.rtCore is set, prefer the partition that contains it (so the RT
+# loop and its affinity superset stay coherent). Otherwise fall back
+# to the first declared partition. Echoes the cpus string ("10-13",
+# "11,12,13", etc.) or empty when cpuIsolation has no partitions.
+_resolve_dma_cpu_affinity() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+data = json.loads(sys.argv[1] or "{}")
+parts = data.get("partitions") or []
+if not parts:
+    sys.exit(0)
+
+rt = (data.get("nic") or {}).get("rtCore")
+chosen = None
+if isinstance(rt, int):
+    for p in parts:
+        try:
+            if rt in expand(p.get("cpus", "")):
+                chosen = p
+                break
+        except (ValueError, AttributeError):
+            continue
+if chosen is None:
+    chosen = parts[0]
+print(chosen.get("cpus", ""))
+PY
 }
 
 # ---- phase 9: gitops ----------------------------------------------------
