@@ -13,6 +13,7 @@ Usage:
   host-config.py <path> get-dma-ethercat-config-set
   host-config.py <path> get-dma-ethercat-config-path
   host-config.py <path> set-dma-ethercat-config-path <value>
+  host-config.py <path> get-cpu-isolation-json
   host-config.py <path> get-images-json
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
@@ -178,6 +179,21 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
     out.append(f"  configPath: {value}\n")
 
     p.write_text("".join(out))
+    return 0
+
+
+def cmd_get_cpu_isolation_json(cfg: dict) -> int:
+    """Emit the cpuIsolation: block as JSON, or {} if absent. Bootstrap's
+    cpu-isolation phase consumes this and renders /etc/cpusets.conf +
+    drives manage_cpusets.sh subcommands."""
+    block = cfg.get("cpuIsolation")
+    if block is None:
+        print("{}")
+        return 0
+    if not isinstance(block, dict):
+        print("error: 'cpuIsolation' must be a mapping", file=sys.stderr)
+        return 2
+    print(json.dumps(block))
     return 0
 
 
@@ -603,6 +619,118 @@ def cmd_validate(cfg: dict) -> int:
                         )
                 if "selfHeal" in spec and not isinstance(spec["selfHeal"], bool):
                     errors.append(f"stacks.{name}.selfHeal: must be true or false")
+    # cpuIsolation is optional. Schema:
+    #   enabled: bool
+    #   partitions: list of {name: str, cpus: str, description?: str}
+    #   nic: optional {iface: str, rtCore: int}
+    #   installAffinityDefaults: bool (default true if cpuIsolation.enabled)
+    #   migrateCmdline: bool (default false; opt-in, destructive)
+    import re as _re
+    _PART_NAME_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    _CPU_RANGE_RE = _re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
+
+    def _expand_cpus(spec: str) -> set[int]:
+        out: set[int] = set()
+        for part in spec.split(","):
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                a, b = int(lo), int(hi)
+                if a > b:
+                    raise ValueError(f"reversed range {part!r}")
+                out.update(range(a, b + 1))
+            else:
+                out.add(int(part))
+        return out
+
+    ci = cfg.get("cpuIsolation")
+    if ci is not None:
+        if not isinstance(ci, dict):
+            errors.append("'cpuIsolation' must be a mapping")
+        else:
+            if "enabled" in ci and not isinstance(ci["enabled"], bool):
+                errors.append("cpuIsolation.enabled: must be true or false")
+            for boolfield in ("installAffinityDefaults", "migrateCmdline"):
+                if boolfield in ci and not isinstance(ci[boolfield], bool):
+                    errors.append(
+                        f"cpuIsolation.{boolfield}: must be true or false"
+                    )
+
+            partitions = ci.get("partitions") or []
+            if not isinstance(partitions, list):
+                errors.append("cpuIsolation.partitions: must be a list")
+                partitions = []
+            seen_names: set[str] = set()
+            seen_cpus: set[int] = set()
+            for i, p in enumerate(partitions):
+                label = f"cpuIsolation.partitions[{i}]"
+                if not isinstance(p, dict):
+                    errors.append(f"{label}: must be a mapping")
+                    continue
+                pname = p.get("name")
+                if not pname or not isinstance(pname, str):
+                    errors.append(f"{label}.name: required, must be a string")
+                elif not _PART_NAME_RE.match(pname):
+                    errors.append(
+                        f"{label}.name={pname!r}: must be alnum/underscore "
+                        f"(matches manage_cpusets.sh INI section rules)"
+                    )
+                elif pname in seen_names:
+                    errors.append(f"{label}.name: duplicate {pname!r}")
+                else:
+                    seen_names.add(pname)
+                cpus = p.get("cpus")
+                if not cpus or not isinstance(cpus, str):
+                    errors.append(f"{label}.cpus: required, must be a string")
+                elif not _CPU_RANGE_RE.match(cpus):
+                    errors.append(
+                        f"{label}.cpus={cpus!r}: must match kernel cpu-list "
+                        f"syntax (e.g. '10-13', '10,12', '10-11,13')"
+                    )
+                else:
+                    try:
+                        cpuset = _expand_cpus(cpus)
+                    except ValueError as exc:
+                        errors.append(f"{label}.cpus: {exc}")
+                        cpuset = set()
+                    overlap = cpuset & seen_cpus
+                    if overlap:
+                        errors.append(
+                            f"{label}.cpus: overlaps existing partition on "
+                            f"CPUs {sorted(overlap)}"
+                        )
+                    seen_cpus.update(cpuset)
+                if "description" in p and not isinstance(p["description"], str):
+                    errors.append(f"{label}.description: must be a string")
+
+            nic = ci.get("nic")
+            if nic is not None:
+                if not isinstance(nic, dict):
+                    errors.append("cpuIsolation.nic: must be a mapping")
+                else:
+                    iface = nic.get("iface")
+                    if not iface or not isinstance(iface, str):
+                        errors.append("cpuIsolation.nic.iface: required, must be a string")
+                    rt = nic.get("rtCore")
+                    if rt is None:
+                        errors.append(
+                            "cpuIsolation.nic.rtCore: required when nic block "
+                            "present (bootstrap is non-interactive)"
+                        )
+                    elif not isinstance(rt, int) or isinstance(rt, bool):
+                        errors.append("cpuIsolation.nic.rtCore: must be an integer")
+                    elif rt not in seen_cpus:
+                        errors.append(
+                            f"cpuIsolation.nic.rtCore={rt}: not in any declared "
+                            f"partition cpus ({sorted(seen_cpus) or 'none'})"
+                        )
+
+            if ci.get("migrateCmdline") and not ci.get("installAffinityDefaults", True):
+                errors.append(
+                    "cpuIsolation.migrateCmdline=true requires "
+                    "installAffinityDefaults=true (otherwise systemd "
+                    "services will land on isolated cores)"
+                )
+
     # dmaEthercat is optional. configSet must be a single directory
     # name (no slashes, no '..') — bootstrap interpolates it into
     # /usr/share/dma-ethercat/config/<configSet>/<robot>.json, so
@@ -718,6 +846,8 @@ def main() -> int:
             print("usage: host-config.py <path> get <field>", file=sys.stderr)
             return 2
         return cmd_get(cfg, sys.argv[3])
+    if cmd == "get-cpu-isolation-json":
+        return cmd_get_cpu_isolation_json(cfg)
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
     if cmd == "get-dma-ethercat-config-set":

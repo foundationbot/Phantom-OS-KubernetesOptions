@@ -87,6 +87,42 @@ images:
 #   configPath: test_single_novanta/phantom-0001.json
 #   # configSet: test_single_novanta
 
+# Optional CPU isolation. When enabled, bootstrap phase 7 carves cpuset
+# partitions out of the running kernel, installs a systemd boot service
+# so they reactivate on reboot, and (optionally) pins the EtherCAT NIC's
+# IRQs onto an RT core. The vendored manage_cpusets.sh
+# (scripts/cpusets/manage_cpusets.sh) does the heavy lifting; see
+# docs/cpu-isolation.md for the full lifecycle.
+#
+# Schema:
+#   enabled                  bool, default unset (= phase is a no-op)
+#   partitions               list of {name, cpus, description?}
+#                              name: alnum/underscore (INI section)
+#                              cpus: kernel cpu-list ('10-13', '10,12-14')
+#                              partitions cannot overlap on a CPU
+#   nic                      optional {iface, rtCore}
+#                              iface:  e.g. ecat0
+#                              rtCore: integer, must lie inside one of
+#                                      the declared partitions
+#   installAffinityDefaults  bool, default true. Writes
+#                              /etc/systemd/system.conf.d/cpuaffinity.conf
+#                              so systemd-spawned services stay off the
+#                              isolated cores.
+#   migrateCmdline           bool, default false. Removes isolcpus= from
+#                              the kernel cmdline and adds RT flags.
+#                              DESTRUCTIVE on Jetson — no in-place
+#                              rollback after reboot. Reboot required.
+#
+# cpuIsolation:
+#   enabled: true
+#   partitions:
+#     - {name: ecat, cpus: "10-13", description: "EtherCAT master RT loop"}
+#   nic:
+#     iface: ecat0
+#     rtCore: 11
+#   installAffinityDefaults: true
+#   migrateCmdline: false
+
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal
 # kernel/runtime mounts (/dev, /dev/shm, /tmp); EVERY OTHER host path

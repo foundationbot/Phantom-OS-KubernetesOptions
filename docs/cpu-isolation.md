@@ -8,6 +8,17 @@ in favour of cgroup-v2 cpuset partitions.
 The companion reference doc is `scripts/cpusets/CPUSETS.md` (architecture, library
 internals, verification phases). This file is the runbook.
 
+> **Two ways to run this**
+>
+> - **Hands-on (this runbook):** invoke `scripts/cpusets/manage_cpusets.sh`
+>   directly. Covers debugging, exploration, and one-off changes.
+> - **Bootstrap-driven:** add a `cpuIsolation:` block to
+>   `/etc/phantomos/host-config.yaml` and let `bootstrap-robot.sh` phase 7
+>   (cpu-isolation) drive every subcommand non-interactively. See
+>   [the Bootstrap-driven setup](#bootstrap-driven-setup) section near the
+>   end of this file. Phase 7 gates phase 8 (install dma-ethercat) so the
+>   .deb's systemd unit comes up with the partition already active.
+
 ---
 
 ## What this procedure produces
@@ -47,8 +58,9 @@ uname -r
 ip -br link | grep '^ecat'
 ```
 
-If no `ecat*` interface is present, run `the upstream DMA.ethercat repo (scripts/setup_ethercat_interface.sh — not vendored here)`
-first to create one (it writes the udev rules that rename the adapter).
+If no `ecat*` interface is present, run `setup_ethercat_interface.sh`
+from the upstream DMA.ethercat repo (not vendored here) first to create
+one — it writes the udev rules that rename the adapter.
 
 ---
 
@@ -312,3 +324,64 @@ The NIC RT-tuning service installed by `ethercat-rt` is removed via
 `the upstream DMA.ethercat repo (scripts/setup_ethercat_interface.sh — not vendored here)` (or by hand —
 `systemctl disable --now <ecat-tuning-service>` and delete the unit
 file under `/etc/systemd/system/`).
+
+---
+
+## Bootstrap-driven setup
+
+`bootstrap-robot.sh` phase 7 (`cpu-isolation`) drives every subcommand
+above non-interactively when `cpuIsolation:` is set in
+`/etc/phantomos/host-config.yaml`. Phase 7 gates phase 8
+(`install-dma-ethercat`) so the .deb's `dma-ethercat.service` unit is
+started with the partition already active.
+
+### Schema
+
+```yaml
+cpuIsolation:
+  enabled: true
+  partitions:
+    - {name: ecat, cpus: "10-13", description: "EtherCAT master RT loop"}
+  nic:                          # optional — only when this host pins a NIC
+    iface: ecat0
+    rtCore: 11                  # must lie inside one of the partitions above
+  installAffinityDefaults: true # default: true. Writes /etc/systemd/system.conf.d/cpuaffinity.conf.
+  migrateCmdline: false         # default: false. DESTRUCTIVE on Jetson.
+```
+
+The full schema (with validation rules) lives at
+[`host-config-templates/_template/host-config.yaml`](../host-config-templates/_template/host-config.yaml).
+
+### What phase 7 does
+
+1. Validates cgroup v2 is mounted.
+2. Renders `/etc/cpusets.conf` from `cpuIsolation.partitions`.
+3. `manage_cpusets.sh apply --yes` (idempotent — skips matching state).
+4. `manage_cpusets.sh install-service` (boot persistence).
+5. `manage_cpusets.sh install-affinity-defaults` + `daemon-reexec`
+   (skipped only when `installAffinityDefaults: false`).
+6. If `cpuIsolation.nic` is set:
+   `manage_cpusets.sh ethercat-rt <partition> --nic <iface> --rt-core <N>`
+   (the `--rt-core` flag is a Phantom-OS local addition — see
+   [`scripts/cpusets/VENDORED.md`](../scripts/cpusets/VENDORED.md)).
+7. If `migrateCmdline: true`:
+   `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes`, then drop
+   `/etc/phantomos/cpu-isolation.reboot-pending` so the operator
+   knows a reboot is needed.
+
+### Skipping the phase
+
+`--skip-cpu-isolation` opts out for one bootstrap run (e.g. when
+debugging another phase). To turn it off persistently, set
+`cpuIsolation.enabled: false` (or omit the block entirely) in
+`host-config.yaml`.
+
+### Re-runs
+
+Phase 7 is idempotent. The vendored `manage_cpusets.sh apply` skips
+already-active partitions whose CPUs match the config. Re-bootstrapping
+after editing `cpuIsolation.partitions` will tear down and recreate
+only the partitions whose CPUs changed.
+
+The reboot-pending marker is auto-cleared on the next bootstrap that
+sees a clean kernel cmdline (`isolcpus=` absent).

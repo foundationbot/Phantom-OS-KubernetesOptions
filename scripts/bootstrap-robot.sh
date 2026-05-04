@@ -34,6 +34,12 @@
 #   --operator-ui-config render+apply the operator-ui-pairing ConfigMap
 #                        (currently holds AI_PC_URL; reserved for any
 #                        future per-host operator-ui env)
+#   --cpu-isolation      activate cpuset partitions, install cpusets.service,
+#                        write systemd CPUAffinity drop-in, optionally pin
+#                        EtherCAT NIC IRQs and migrate kernel cmdline. Reads
+#                        host-config.yaml's cpuIsolation: block; no-op when
+#                        cpuIsolation.enabled is unset/false.
+#                        See docs/cpu-isolation.md.
 #   --gitops             terraform apply (argocd Helm) + render+apply
 #                        the per-host phantomos-<robot> Application
 #   --argocd-admin       install argocd CLI; prompt and set admin
@@ -48,6 +54,7 @@
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
+#   --skip-cpu-isolation skip the phase 7 cpu-isolation setup
 #   --skip-validate      skip the final validate-local-registry.sh run
 #
 # Other flags:
@@ -220,6 +227,7 @@ SKIP_NVIDIA=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
 SKIP_ETHERCAT_UNINSTALL=0
+SKIP_CPU_ISOLATION=0
 SKIP_INSTALL_DMA_ETHERCAT=0
 SELECTED_PHASES=()
 
@@ -233,7 +241,7 @@ PULL_SECRET_NAME="dockerhub-creds"
 # Each entry is an ERE substring matched case-insensitively against
 # `systemctl list-unit-files --state=enabled` output. Append to extend.
 #   - api.*server   — host-systemd copy of phantomos-api-server (replaced by pod)
-#   - dma.*ethercat — replaced by phase 7 .deb install
+#   - dma.*ethercat — replaced by phase 8 .deb install
 SYSTEM_SERVICE_PATTERNS=(
   'api.*server'
   'dma.*ethercat'
@@ -249,6 +257,7 @@ while [ $# -gt 0 ]; do
     --host)              SELECTED_PHASES+=(host); shift ;;
     --seed-pull-secrets) SELECTED_PHASES+=(seed-pull-secrets); shift ;;
     --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
+    --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
@@ -265,6 +274,8 @@ while [ $# -gt 0 ]; do
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
                          SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+    --skip-cpu-isolation)
+                         SKIP_CPU_ISOLATION=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
 
@@ -373,6 +384,12 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/lib/robot-id.sh
 . "$SCRIPT_DIR/lib/robot-id.sh"
 
+# CPU isolation (cpuset partitions, NIC IRQ pinning, kernel cmdline
+# migration). Helper wraps the vendored scripts/cpusets/manage_cpusets.sh
+# and renders /etc/cpusets.conf from host-config.yaml.
+# shellcheck source=scripts/lib/cpusets.sh
+. "$SCRIPT_DIR/lib/cpusets.sh"
+
 # host-config.yaml — single per-host source-of-truth. If --host-config
 # was passed, copy it to the canonical location so subsequent runs use
 # the same file. Then, if the file exists, harvest defaults for fields
@@ -433,6 +450,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_HOST=1
   SKIP_SEED_PULL_SECRETS=1
   SKIP_OPERATOR_UI_CONFIG=1
+  SKIP_CPU_ISOLATION=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
@@ -446,6 +464,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       host)              SKIP_HOST=0 ;;
       seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
       operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
+      cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
@@ -466,7 +485,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -608,7 +627,7 @@ stop_existing_services() {
 
 # ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall) ----
 
-# Tear down the dma-ethercat realtime control service so phase 7's
+# Tear down the dma-ethercat realtime control service so phase 8's
 # install lands on a clean slate.
 #   1. systemctl stop dma-ethercat.service     (if active)
 #   2. systemctl disable dma-ethercat.service  (if enabled)
@@ -1335,11 +1354,183 @@ operator_ui_config() {
   fi
 }
 
-# ---- phase 7: install dma-ethercat (gates phase 8) -------------------
+# ---- phase 7: cpu-isolation (gates phase 8) --------------------------
+
+# Carve isolated cpuset partitions out of the running kernel, pin the
+# EtherCAT NIC's IRQs (optional), and persist via systemd. Runs BEFORE
+# phase 8's dma-ethercat install because the .deb's systemd unit pins
+# itself to the RT cores — if the partition isn't there yet, the unit
+# starts unisolated.
+#
+# Host-config-driven. The cpuIsolation: block in host-config.yaml is
+# the source of truth; this phase is a no-op when cpuIsolation.enabled
+# is unset or false. See docs/cpu-isolation.md for the schema and
+# lifecycle (apply -> install-service -> install-affinity-defaults ->
+# optional migrate-cmdline).
+#
+# Idempotent: re-runs are safe. The vendored manage_cpusets.sh skips
+# already-active partitions with matching CPUs; install-service and
+# install-affinity-defaults overwrite their target files in place.
+cpu_isolation() {
+  if [ "$SKIP_CPU_ISOLATION" = 1 ]; then
+    phase "phase 7: cpu-isolation  (skipped — --skip-cpu-isolation)"
+    return
+  fi
+
+  # Read the cpuIsolation block. Empty/missing = phase is a no-op.
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    phase "phase 7: cpu-isolation  (skipped — no host-config.yaml)"
+    return
+  fi
+  local ci_json enabled
+  ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  enabled="$(cpusets_json_field "$ci_json" enabled)"
+  if [ "$enabled" != "true" ]; then
+    phase "phase 7: cpu-isolation  (skipped — cpuIsolation.enabled not true)"
+    return
+  fi
+  phase "phase 7: cpu-isolation (gates phase 8)"
+
+  # Sanity: cgroup v2 + manage_cpusets.sh present.
+  if ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
+    fail "cgroup v2 not mounted at /sys/fs/cgroup"
+    info "kernel must be booted with unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1, default on modern distros)"
+    return
+  fi
+  pass "cgroup v2 mounted"
+  if [ ! -x "$CPUSETS_SCRIPT" ]; then
+    fail "$CPUSETS_SCRIPT not found or not executable"
+    return
+  fi
+
+  # Render /etc/cpusets.conf from cpuIsolation.partitions.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  render $CPUSETS_CONF from host-config cpuIsolation.partitions"
+    info "DRY-RUN  $CPUSETS_SCRIPT apply $CPUSETS_CONF --yes"
+    info "DRY-RUN  $CPUSETS_SCRIPT install-service $CPUSETS_CONF"
+    info "DRY-RUN  $CPUSETS_SCRIPT install-affinity-defaults"
+    local _nic_iface _nic_rt
+    { read -r _nic_iface; read -r _nic_rt; } < <(cpusets_json_nic "$ci_json")
+    if [ -n "$_nic_iface" ] && [ -n "$_nic_rt" ]; then
+      info "DRY-RUN  $CPUSETS_SCRIPT ethercat-rt <partition> --nic $_nic_iface --rt-core $_nic_rt"
+    fi
+    if [ "$(cpusets_json_field "$ci_json" migrateCmdline)" = "true" ]; then
+      info "DRY-RUN  $CPUSETS_SCRIPT migrate-cmdline --add-rt-flags --yes"
+    fi
+    return
+  fi
+
+  if ! cpusets_render_conf "$ci_json" >/dev/null; then
+    fail "could not render $CPUSETS_CONF"
+    return
+  fi
+  pass "rendered $CPUSETS_CONF"
+
+  # Apply partitions. `apply` is idempotent on matching state.
+  note "applying partitions..."
+  if cpusets_run apply "$CPUSETS_CONF" --yes; then
+    pass "partitions applied"
+  else
+    fail "manage_cpusets.sh apply failed"
+    info "common cause: docker.slice or user.slice still claims an isolated CPU."
+    info "stop the offending service and re-run, or run install-service first so"
+    info "boot-ordering takes care of it on next reboot."
+    return
+  fi
+
+  # Install boot service so partitions reactivate after reboot.
+  note "installing cpusets.service..."
+  if cpusets_run install-service "$CPUSETS_CONF"; then
+    pass "cpusets.service installed"
+  else
+    fail "manage_cpusets.sh install-service failed"
+    return
+  fi
+
+  # Affinity drop-in keeps systemd-spawned services off isolated cores.
+  # Defaults to true when the cpuIsolation block is enabled — turn off
+  # only when you know you want systemd services on RT cores (rare).
+  local install_aff
+  install_aff="$(cpusets_json_field "$ci_json" installAffinityDefaults)"
+  if [ -z "$install_aff" ] || [ "$install_aff" = "true" ]; then
+    note "writing /etc/systemd/system.conf.d/cpuaffinity.conf..."
+    if cpusets_run install-affinity-defaults; then
+      pass "systemd CPUAffinity drop-in installed"
+      systemctl daemon-reexec || true
+    else
+      fail "manage_cpusets.sh install-affinity-defaults failed"
+    fi
+  else
+    skip "cpuIsolation.installAffinityDefaults=false — leaving systemd defaults alone"
+  fi
+
+  # NIC IRQ pinning. Optional — only when cpuIsolation.nic is set.
+  # Requires --rt-core; bootstrap is non-interactive.
+  local nic_iface nic_rt
+  { read -r nic_iface; read -r nic_rt; } < <(cpusets_json_nic "$ci_json")
+  if [ -n "$nic_iface" ] && [ -n "$nic_rt" ]; then
+    # Pick the first declared partition that contains nic_rt. The
+    # validator already guaranteed nic_rt is inside some partition.
+    local target_part=""
+    while IFS= read -r pname; do
+      [ -z "$pname" ] && continue
+      if cpusets_run list 2>/dev/null | grep -qE "^[[:space:]]*$pname[[:space:]]"; then
+        target_part="$pname"
+        break
+      fi
+    done < <(cpusets_json_partition_names "$ci_json")
+    if [ -z "$target_part" ]; then
+      fail "cpuIsolation.nic set but no active partition to pin onto"
+    else
+      note "pinning $nic_iface IRQs to core $nic_rt (partition $target_part)..."
+      if cpusets_run ethercat-rt "$target_part" --nic "$nic_iface" --rt-core "$nic_rt"; then
+        pass "ethercat-rt configured on $nic_iface core $nic_rt"
+      else
+        fail "manage_cpusets.sh ethercat-rt failed"
+      fi
+    fi
+  else
+    skip "cpuIsolation.nic not set — skipping NIC IRQ pinning"
+  fi
+
+  # Kernel cmdline migration. Off by default — destructive on Jetson
+  # (no in-place rollback after reboot). When opt-in:
+  #   - run migrate-cmdline --yes
+  #   - drop a marker file so the operator (and re-runs) know a reboot
+  #     is pending; deleted on the next run when the live cmdline is
+  #     already clean of isolcpus=.
+  if [ "$(cpusets_json_field "$ci_json" migrateCmdline)" = "true" ]; then
+    note "migrating kernel cmdline (removing isolcpus=, adding RT flags)..."
+    if cpusets_run migrate-cmdline --add-rt-flags --yes; then
+      pass "cmdline migrated"
+      mkdir -p "$(dirname "$CPU_ISOLATION_REBOOT_MARKER")"
+      printf 'cmdline migration applied at %s — reboot to pick it up\n' \
+        "$(date -u +%FT%TZ)" > "$CPU_ISOLATION_REBOOT_MARKER"
+      info "REBOOT REQUIRED to activate the new kernel cmdline"
+    else
+      fail "manage_cpusets.sh migrate-cmdline failed"
+    fi
+  else
+    skip "cpuIsolation.migrateCmdline=false — cmdline left untouched"
+  fi
+
+  # Clear stale reboot marker if the cmdline is already clean.
+  if [ -f "$CPU_ISOLATION_REBOOT_MARKER" ] && \
+     ! grep -q 'isolcpus=' /proc/cmdline 2>/dev/null; then
+    rm -f "$CPU_ISOLATION_REBOOT_MARKER"
+    info "cleared stale reboot marker — cmdline already migrated"
+  fi
+}
+
+# ---- phase 8: install dma-ethercat (gates phase 9) -------------------
 
 # Install the dma-ethercat .deb baked into the foundationbot/dma-ethercat
 # container image, then enable+start the bare-metal service. Runs strictly
-# BEFORE phase 8 (gitops) — the realtime stack must be up before
+# BEFORE phase 9 (gitops) — the realtime stack must be up before
 # positronic-control / dma-video / nimbus pods come up because they read
 # EtherCAT shared memory via hostIPC.
 #
@@ -1360,10 +1551,10 @@ DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-inst
 
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
-    phase "phase 7: install dma-ethercat  (skipped — --skip-ethercat-install)"
+    phase "phase 8: install dma-ethercat  (skipped — --skip-ethercat-install)"
     return
   fi
-  phase "phase 7: install dma-ethercat (gates phase 8)"
+  phase "phase 8: install dma-ethercat (gates phase 9)"
 
   if [ ! -f "$DMA_ETHERCAT_TEMPLATE" ]; then
     fail "$DMA_ETHERCAT_TEMPLATE missing"
@@ -1667,7 +1858,7 @@ configure_dma_ethercat_env() {
   pass "wrote DMA_CONFIG to $DMA_ETHERCAT_ENV_FILE"
 }
 
-# ---- phase 8: gitops ----------------------------------------------------
+# ---- phase 9: gitops ----------------------------------------------------
 
 # Phase 6 has two pieces:
 #   6a. terraform install of argocd Helm chart
@@ -1793,8 +1984,8 @@ _gitops_render_app() {
 }
 
 gitops() {
-  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 8: gitops  (skipped)"; return; fi
-  phase "phase 8: gitops (install argocd + apply per-host Application)"
+  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 9: gitops  (skipped)"; return; fi
+  phase "phase 9: gitops (install argocd + apply per-host Application)"
 
   if [ ! -d "$REPO_ROOT/terraform" ]; then
     fail "terraform/ not found at $REPO_ROOT/terraform"; return
@@ -1948,7 +2139,7 @@ PY
   # place. The validate phase confirms Healthy.
 }
 
-# ---- phase 10: kustomize image overrides (per-host, per-stack) ---------
+# ---- phase 11: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
 # Bootstrap discovers the mapping by running kustomize on each enabled
@@ -2048,8 +2239,8 @@ _stack_for_image() {
 }
 
 image_overrides() {
-  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 10: image overrides  (skipped)"; return; fi
-  phase "phase 10: image overrides (inject kustomize.images per stack)"
+  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 11: image overrides  (skipped)"; return; fi
+  phase "phase 11: image overrides (inject kustomize.images per stack)"
 
   # In dry-run before --host-config has actually been installed, fall
   # back to the input path the operator passed.
@@ -2116,7 +2307,7 @@ for line in mapping_raw.splitlines():
 # Job) and intentionally don't route to a stack's kustomize.images.
 # Skip silently rather than warn.
 NON_STACK_IMAGES = {
-    "foundationbot/dma-ethercat",  # phase 7 install_dma_ethercat
+    "foundationbot/dma-ethercat",  # phase 8 install_dma_ethercat
 }
 
 per_stack: dict[str, list[str]] = {}
@@ -2198,7 +2389,7 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
   done <<< "$stacks_with_overrides"
 }
 
-# ---- phase 11: dev hostPath mounts (per-host) --------------------------
+# ---- phase 12: dev hostPath mounts (per-host) --------------------------
 
 # Inject strategic-merge patches derived from
 # /etc/phantomos/host-config.yaml's `deployments:` block into the live
@@ -2213,8 +2404,8 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
 # fewer mounts in host-config reverts the cluster to that smaller set.
 
 deployments_phase() {
-  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 11: deployments  (skipped)"; return; fi
-  phase "phase 11: deployments (inject kustomize.patches per stack)"
+  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 12: deployments  (skipped)"; return; fi
+  phase "phase 12: deployments (inject kustomize.patches per stack)"
 
   # Same dry-run/canonical fallback as image_overrides.
   local hc="$HOST_CONFIG_FILE"
@@ -2311,7 +2502,7 @@ PY
   done <<< "$entries"
 }
 
-# ---- phase 9: argocd admin (install CLI + reset password) -------------
+# ---- phase 10: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
 # the admin password by writing a bcrypt hash into argocd-secret. Done
@@ -2329,8 +2520,8 @@ PY
 _argocd_default_password="1984"
 
 argocd_admin() {
-  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 9: argocd admin  (skipped)"; return; fi
-  phase "phase 9: argocd admin (install CLI + set admin password)"
+  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 10: argocd admin  (skipped)"; return; fi
+  phase "phase 10: argocd admin (install CLI + set admin password)"
 
   # 1) install argocd CLI if missing
   #
@@ -2458,11 +2649,11 @@ argocd_admin() {
   fi
 }
 
-# ---- phase 12: setup-positronic (optional) --------------------------------
+# ---- phase 13: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
   if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 12: setup-positronic"
+  phase "phase 13: setup-positronic"
 
   if [ -z "$POSITRONIC_IMAGE" ]; then
     fail "--setup-positronic requires --positronic-image <image>"
@@ -2515,11 +2706,11 @@ setup_positronic() {
   fi
 }
 
-# ---- phase 13: validate --------------------------------------------------
+# ---- phase 14: validate --------------------------------------------------
 
 validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 13: validate  (skipped)"; return; fi
-  phase "phase 13: validate"
+  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 14: validate  (skipped)"; return; fi
+  phase "phase 14: validate"
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
@@ -2583,13 +2774,14 @@ print_plan() {
   _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase  4  host config"                  "--host not selected"
   _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase  5  seed pull secrets"            "--seed-pull-secrets not selected"
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
-  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  7  install dma-ethercat (gates 8)" "--install-dma-ethercat not selected"
-  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase  8  gitops"                       "--gitops not selected"
-  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase  9  argocd-admin"                 "--argocd-admin not selected"
-  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 10  image-overrides"              "--image-overrides not selected"
-  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 11  deployments"                  "--deployments not selected"
-  _step "$SETUP_POSITRONIC"                                         "phase 12  setup-positronic"             "--setup-positronic not set"
-  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 13  validate"                     "--validate not selected"
+  _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  7  cpu-isolation (gates 8)"      "--skip-cpu-isolation"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  8  install dma-ethercat (gates 9)" "--install-dma-ethercat not selected"
+  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase  9  gitops"                       "--gitops not selected"
+  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 10  argocd-admin"                 "--argocd-admin not selected"
+  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 11  image-overrides"              "--image-overrides not selected"
+  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 12  deployments"                  "--deployments not selected"
+  _step "$SETUP_POSITRONIC"                                         "phase 13  setup-positronic"             "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 14  validate"                     "--validate not selected"
   printf '\n'
 }
 
@@ -2644,6 +2836,7 @@ cluster            ; guard
 host_config        ; guard
 seed_pull_secrets  ; guard
 operator_ui_config ; guard
+cpu_isolation      ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
 argocd_admin       ; guard

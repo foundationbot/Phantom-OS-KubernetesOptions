@@ -15,7 +15,7 @@
 #   manage_cpusets.sh run <name> -- <cmd...>
 #   manage_cpusets.sh apply <config-file> [--yes]
 #   manage_cpusets.sh verify [<name>]
-#   manage_cpusets.sh ethercat-rt <name> [--nic <iface>]
+#   manage_cpusets.sh ethercat-rt <name> [--nic <iface>] [--rt-core <N>]
 #   manage_cpusets.sh install-service [<config-file>]
 #   manage_cpusets.sh uninstall-service
 #   manage_cpusets.sh install-affinity-defaults
@@ -671,10 +671,11 @@ cmd_apply() {
 
 # ---------- Subcommand: ethercat-rt ---------------------------------------
 cmd_ethercat_rt() {
-    local name="" nic=""
+    local name="" nic="" rt_core=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --nic) nic="$2"; shift 2 ;;
+            --rt-core) rt_core="$2"; shift 2 ;;
             -*) die "Unknown flag: $1" ;;
             *)
                 [[ -z "$name" ]] && { name="$1"; shift; continue; }
@@ -683,7 +684,8 @@ cmd_ethercat_rt() {
         esac
     done
 
-    [[ -z "$name" ]] && die "Usage: ethercat-rt <partition> [--nic <iface>]"
+    [[ -z "$name" ]] && \
+        die "Usage: ethercat-rt <partition> [--nic <iface>] [--rt-core <N>]"
 
     require_root
 
@@ -704,8 +706,20 @@ cmd_ethercat_rt() {
     fi
 
     info "Running EtherCAT RT setup for partition '$name' on $nic..."
-    if ! select_rt_core; then
-        die "Core selection aborted"
+    if [[ -n "$rt_core" ]]; then
+        # Non-interactive path used by Phantom-OS-KubernetesOptions
+        # bootstrap (FIR-269). Validate the operator-supplied core lies
+        # inside the partition before short-circuiting select_rt_core.
+        # cpu_utils.sh already provides cpu_list_contains.
+        if ! cpu_list_contains "$cpus" "$rt_core"; then
+            die "--rt-core $rt_core is not in partition '$name' cpus ($cpus)"
+        fi
+        export RT_CORE="$rt_core"
+        info "RT core selected non-interactively: $RT_CORE"
+    else
+        if ! select_rt_core; then
+            die "Core selection aborted"
+        fi
     fi
 
     local irqs
