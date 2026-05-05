@@ -125,8 +125,11 @@ require_root() {
 }
 
 preflight_cgroup_v2() {
-    if ! mount | grep -q 'cgroup2 on /sys/fs/cgroup'; then
-        die "cgroup v2 is not mounted at /sys/fs/cgroup. This tool requires cgroup v2."
+    # Detect via the kernel's own marker file rather than parsing
+    # `mount` output — the latter varies between busybox / util-linux /
+    # Jetson and was producing false negatives on Phantom-OS hosts.
+    if [[ ! -f "$CGROUP_ROOT/cgroup.controllers" ]]; then
+        die "cgroup v2 is not mounted at $CGROUP_ROOT. This tool requires cgroup v2."
     fi
 
     local controllers
@@ -758,7 +761,7 @@ cmd_verify() {
 
     # Phase 0: preconditions
     echo "[Phase 0] Preconditions"
-    if mount | grep -q 'cgroup2 on /sys/fs/cgroup'; then
+    if [[ -f "$CGROUP_ROOT/cgroup.controllers" ]]; then
         success "  cgroup v2 mounted"
     else
         error "  cgroup v2 NOT mounted"; fail=1

@@ -1550,8 +1550,11 @@ cpu_isolation() {
   fi
   phase "phase 8: cpu-isolation (gates phase 9)"
 
-  # Sanity: cgroup v2 + manage_cpusets.sh present.
-  if ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
+  # Sanity: cgroup v2 + manage_cpusets.sh present. The kernel writes
+  # /sys/fs/cgroup/cgroup.controllers iff the unified hierarchy is
+  # mounted at that path — more reliable than parsing mount output,
+  # which formats differently between busybox, util-linux, and Jetson.
+  if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
     fail "cgroup v2 not mounted at /sys/fs/cgroup"
     info "kernel must be booted with unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1, default on modern distros)"
     return
