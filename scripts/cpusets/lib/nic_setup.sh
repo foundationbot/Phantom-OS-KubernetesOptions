@@ -364,3 +364,57 @@ nic_apply_udev() {
     echo "nic_apply_udev: timed out waiting for $iface" >&2
     return 1
 }
+
+# nic_apply_iface <iface> <mac>
+#
+# Higher-level apply: ensure the iface named <iface> exists and has
+# MAC <mac>. Three cases handled:
+#
+#   1. an iface with <mac> is already named <iface> — return 0
+#      (caller should also have checked nic_udev_rule_present for
+#      reboot persistence)
+#   2. an iface with <mac> exists under a different name — rename it
+#      in-kernel via `ip link set <old> down; set name <iface>; set up`
+#      (udev rules rename only on hotplug add, not on `udevadm trigger
+#      --action=change`, so a manual rename is required for the live
+#      kernel to pick up our rule's intent)
+#   3. no iface currently presents <mac> — reload+trigger udev and
+#      wait up to 10s for the kernel to hotplug + rename
+#
+# Returns 0 once the iface is present and named correctly, 1 on
+# timeout / rename failure / missing args.
+nic_apply_iface() {
+    local iface="${1:-}" mac="${2:-}"
+    if [[ -z "$iface" || -z "$mac" ]]; then
+        echo "nic_apply_iface: usage: nic_apply_iface <iface> <mac>" >&2
+        return 1
+    fi
+    mac="${mac,,}"
+
+    # Case 1: already correctly named.
+    if nic_already_named "$iface" "$mac"; then
+        return 0
+    fi
+
+    # Case 2: iface with this MAC exists under a different name.
+    local current
+    current="$(nic_match_by_mac "$mac" 2>/dev/null || true)"
+    if [[ -n "$current" && "$current" != "$iface" ]]; then
+        # Reload rules first so the rename's eventual `ip link up`
+        # doesn't lose any operator-managed flags. Best-effort.
+        $NIC_SUDO udevadm control --reload-rules >/dev/null 2>&1 || true
+        if ! $NIC_SUDO ip link set "$current" down; then
+            echo "nic_apply_iface: failed to bring $current down" >&2
+            return 1
+        fi
+        if ! $NIC_SUDO ip link set "$current" name "$iface"; then
+            echo "nic_apply_iface: failed to rename $current -> $iface" >&2
+            return 1
+        fi
+        $NIC_SUDO ip link set "$iface" up >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Case 3: no iface currently presents this MAC. Hotplug-wait.
+    nic_apply_udev "$iface"
+}

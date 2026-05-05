@@ -1538,12 +1538,18 @@ ecat_interface() {
   pass "udev rule installed"
 
   # --- Step 4: apply --------------------------------------------------
-  note "applying udev rule (reload+trigger, waiting for $iface)..."
-  if nic_apply_udev "$iface"; then
+  # nic_apply_iface handles all three cases: already correct (no-op),
+  # current iface has the right MAC under a different name (in-kernel
+  # rename), or hot-plug wait. The library's nic_apply_udev alone is
+  # not enough — udevadm trigger --action=change does not re-fire
+  # rename rules, only hotplug add does.
+  note "applying iface $iface (in-kernel rename or udev hotplug-wait)..."
+  if nic_apply_iface "$iface" "$mac"; then
     pass "iface $iface up"
   else
-    fail "iface $iface did not appear within 10s"
-    info "check 'ip -br link' for the actual name and 'journalctl -u systemd-udevd' for errors"
+    fail "iface $iface did not appear / could not be renamed"
+    info "check 'ip -br link' for the actual name + MAC, and"
+    info "'journalctl -u systemd-udevd' for udev errors"
     return
   fi
 }
