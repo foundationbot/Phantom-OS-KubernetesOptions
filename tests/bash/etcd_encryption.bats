@@ -39,3 +39,10 @@ setup() {
   after=$(sha256sum "$ETCD_ENCRYPTION_CONFIG_PATH" | awk '{print $1}')
   [ "$before" = "$after" ]
 }
+
+@test "deps() phase contains _ensure_etcd_encryption_config call" {
+  grep -q '_ensure_etcd_encryption_config' "$REPO_ROOT/scripts/bootstrap-robot.sh"
+  # Confirm it appears inside the deps() function body.
+  awk '/^deps\(\) \{/,/^\}/' "$REPO_ROOT/scripts/bootstrap-robot.sh" \
+    | grep -q '_ensure_etcd_encryption_config'
+}
