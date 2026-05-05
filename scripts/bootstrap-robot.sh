@@ -578,7 +578,7 @@ if [ "$RESET" = 0 ] && [ "$_needs_robot" = 1 ]; then
 fi
 unset _needs_robot
 
-if [ "$DRY_RUN" = 0 ] && [ "$(id -u)" -ne 0 ]; then
+if [ "${BOOTSTRAP_LIB_ONLY:-0}" != "1" ] && [ "$DRY_RUN" = 0 ] && [ "$(id -u)" -ne 0 ]; then
   die "must run as root (try: sudo bash $0 --robot ${ROBOT:-<name>} ...)"
 fi
 
@@ -3934,6 +3934,12 @@ print_plan() {
   _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 15  validate"                     "--validate not selected"
   printf '\n'
 }
+
+# Allow sourcing for unit tests without running every phase.
+# When BOOTSTRAP_LIB_ONLY=1, just load function definitions and return.
+if [ "${BOOTSTRAP_LIB_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 print_plan
 
