@@ -292,12 +292,16 @@ compute_housekeeping_list() {
 }
 
 # Read the union of cpus from the manage_cpusets state file, or
-# empty when the file is absent / unreadable.
+# empty when the file is absent / unreadable. State file format is
+# 'name|cpus|<extra-fields>' (extra fields like creation timestamp
+# may be appended over time). Read all three+ explicitly so the cpus
+# field doesn't capture trailing fields when it's the second
+# rather than the last column.
 _read_state_managed_cpus() {
     local state_file="${MANAGE_CPUSETS_STATE_FILE:-/var/lib/manage_cpusets/state}"
-    local combined="" line cpus
+    local combined="" name cpus rest
     [[ -r "$state_file" ]] || { echo ""; return 0; }
-    while IFS='|' read -r _name cpus; do
+    while IFS='|' read -r name cpus rest; do
         [[ -z "$cpus" ]] && continue
         combined=$(cpu_list_union "$combined" "$cpus")
     done < "$state_file"
