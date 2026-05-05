@@ -38,6 +38,13 @@ spec:
       hostNetwork: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
+      # dockerhub-creds is seeded by bootstrap phase 5 (seed-pull-secrets).
+      # Required when an image override swaps either container's image
+      # to a foundationbot/* (private DockerHub) ref. Harmless when the
+      # local-registry default is in effect — kubelet ignores the auth
+      # token for unauthenticated registries.
+      imagePullSecrets:
+        - name: dockerhub-creds
       # GPU access flows through the nvidia container runtime registered
       # in containerd by scripts/configure-k0s-nvidia-runtime.sh. The
       # named RuntimeClass lives in manifests/base/runtime-classes/nvidia.yaml.

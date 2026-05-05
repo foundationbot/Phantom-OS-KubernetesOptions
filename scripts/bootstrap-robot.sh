@@ -288,7 +288,7 @@ SELECTED_PHASES=()
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
 # `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom)
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic)
 PULL_SECRET_NAME="dockerhub-creds"
 
 # Host-systemd services to stop + disable before bringing up the cluster.
