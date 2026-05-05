@@ -1,9 +1,20 @@
 # RFC 0003 — Teach kubelet about isolated CPUs
 
-**Status:** Draft
+**Status:** Superseded by [RFC 0004](./0004-cpu-isolation-via-isolcpus.md)
+(kernel cmdline `isolcpus=` + systemd `CPUAffinity=`). The cgroup-v2
+cpuset partition + kubelet integration approach proposed here was
+implemented experimentally but hit a chain of Jetson + k0s + kubelet
+issues that made the cost/benefit ratio unfavorable. RFC 0004 trades
+runtime cgroup flexibility for a reboot, and gets a much smaller +
+more reliable system.
+
+This RFC is preserved as the historical record of WHY we abandoned
+cgroup partitions. See [Implementation findings (2026-05-05)](#implementation-findings-2026-05-05)
+for the full chain of experiments and root-cause analysis.
 **JIRA:** FIR-282
 **Author:** TBD
 **Created:** 2026-05-04
+**Last updated:** 2026-05-05
 
 ## Problem
 
@@ -377,3 +388,255 @@ Before implementing:
 - [ ] Agree on a profile-naming convention.
 - [ ] Schedule drain windows for the existing robots that need the
       `cpu_manager_state` reset.
+
+---
+
+## Implementation findings (2026-05-05)
+
+Four experiments run on `mk11000011` (Jetson Thor, 14 logical CPUs, k0s
+v1.35.3, kernel 6.8.12-tegra). Each entry below names what we changed,
+what kubelet did with it, and the root cause that surfaced.
+
+### Design intent (clarified during the experiment)
+
+Originally I treated `cpuIsolation.partitions` as "cpus reserved away
+from k8s" and the inverse as "kubepods pool". On a 14-CPU Jetson with
+`partitions: [{cpus: "11-13"}]` that gives:
+
+```
+cpu  0   ─ host kernel scheduler / housekeeping (NOT k8s)
+cpu  1-10 ─ k0s / kubelet / kubepods
+cpu 11-13 ─ host real-time apps (EtherCAT loop), cgroup partition
+```
+
+Three CPU groups, not two. The bootstrap renderer originally collapsed
+0 and 1-10 into one "housekeeping" range; the kubelet config we want
+is closer to "kubepods covers exactly 1-10". None of the kubelet knobs
+we tried (`reservedSystemCPUs`, `kubeReservedCgroup`, static-policy
+allocation) directly produces that shape.
+
+### Experiment 1 — `workerProfiles` written, kubelet ignored it
+
+**Change.** Bootstrap renders `/etc/k0s/k0s.yaml` with:
+```yaml
+spec:
+  workerProfiles:
+    - name: default
+      values:
+        cpuManagerPolicy: static
+        reservedSystemCPUs: 0-10        # WRONG semantic, see Exp 3
+```
+No node label.
+
+**Observed.** Kubelet `Container Manager` log:
+```
+nodeConfig={"CPUManagerPolicy":"none","ReservedSystemCPUs":{}, ...}
+```
+`kubepods.cpuset.cpus = 0-13`. WorkerProfile completely ignored.
+
+**Root cause.** k0s applies `spec.workerProfiles[N]` only to nodes
+labeled `k0sproject.io/worker-profile=N`. There is no implicit
+"profile named `default` applies to all nodes." k0s's
+`k0s controller --help` documents `--profile string  worker profile to
+use on the node (default "default")` — but this CLI default selects
+which ConfigMap to fetch, not which nodes the profile applies to. The
+match is two-sided: node label + `--profile` flag must agree.
+
+**Fix that came out of this.** Bootstrap step that runs after
+`node Ready`: `kubectl label node $hostname
+k0sproject.io/worker-profile=default --overwrite`, then restart
+k0scontroller.
+
+### Experiment 2 — node labeled, kubelet entered crashloop
+
+**Change.** Same workerProfile, plus the post-install label step.
+
+**Observed.** Kubelet startup error:
+```
+"command failed" err="failed to validate kubelet configuration, error:
+ invalid configuration: can't use reservedSystemCPUs (--reserved-cpus)
+ with systemReservedCgroup (--system-reserved-cgroup)
+ or kubeReservedCgroup (--kube-reserved-cgroup)"
+```
+Kubelet exited every 5 seconds. The previously-running kubelet kept
+serving the old `policy=none` config until it was killed by the
+restart attempts. Verification scripts that hit the dead-but-not-yet-
+removed live state showed `policy=none` and confused us into thinking
+the workerProfile still wasn't being applied.
+
+**Root cause.** k0s's default `kubeletConfiguration` sets
+`kubeReservedCgroup: system.slice`. Kubernetes ≥ 1.32 explicitly
+rejects the combination of (`kubeReservedCgroup` OR
+`systemReservedCgroup`) with `reservedSystemCPUs`. Our workerProfile
+override added `reservedSystemCPUs` but didn't clear the
+inherited-default `kubeReservedCgroup`.
+
+**Fix that came out of this.** Add `kubeReservedCgroup: ""` to the
+workerProfile values to explicitly clear k0s's default.
+
+### Experiment 3 — config validates, but `/run` snapshot was stale
+
+**Change.** Added `kubeReservedCgroup: ""` to the workerProfile.
+Also corrected `reservedSystemCPUs` semantics — see "Inverted
+semantics" below.
+
+**Observed.** Three layers, three different states:
+
+| Layer | reservedSystemCPUs | kubeReservedCgroup | cpuManagerPolicy |
+|---|---|---|---|
+| `/etc/k0s/k0s.yaml` (we wrote) | `11-13` ✅ | `""` ✅ | `static` ✅ |
+| `worker-config-default-1.35` ConfigMap (k0s rendered) | `11-13` ✅ | absent ✅ | `static` ✅ |
+| `/run/k0s/kubelet/config.yaml` (kubelet's live config) | `0-10` ❌ | `system.slice` ❌ | `static` ✅ |
+
+The k0s rendering pipeline produced the correct ConfigMap; the on-disk
+file kubelet *actually* reads was stale. `systemctl restart
+k0scontroller` did not regenerate it.
+
+**Root cause.** k0s logs `Found previous worker profile "default"` on
+every restart and reuses `/run/k0s/kubelet/config.yaml` as a
+checkpoint. If the file exists, kubelet loads it directly without
+re-reading the live ConfigMap. The cache invalidation logic
+apparently keys on profile *name* changes only, not content changes.
+
+**Fix that came out of this.** `rm -f /run/k0s/kubelet/config.yaml`
+before `systemctl restart k0scontroller` whenever the workerProfile
+content has changed.
+
+#### Inverted semantics — `reservedSystemCPUs` direction
+
+Per Kubernetes docs:
+
+> CPUs in [reservedSystemCPUs] are not eligible to be assigned to any
+> containers' cpuset.cpus.
+
+So `reservedSystemCPUs: 0-10` means cpus 0-10 are kept *off* container
+cpusets — the inverse of what I had assumed. The right value is the
+union of `cpuIsolation.partitions[].cpus` (`11-13`), so pods land on
+the inverse housekeeping pool. The bootstrap helper
+`compute-reserved-cpus` originally returned housekeeping; corrected
+to return the managed-partition union.
+
+### Experiment 4 — kubelet starts cleanly, but doesn't shrink kubepods
+
+**Change.** Force-regenerated `/run/k0s/kubelet/config.yaml` (`rm` +
+restart). All three layers now agree: `policy=static`,
+`reservedSystemCPUs=11-13`, no `kubeReservedCgroup`.
+
+**Observed (positive).** Kubelet startup log:
+```
+"Option --reserved-cpus is specified, it will overwrite the cpu setting
+ in KubeReserved and SystemReserved" kubeReserved=null systemReserved=null
+"After cpu setting is overwritten" kubeReserved=null systemReserved={"cpu":"3"}
+"Reserved CPUs not available for exclusive assignment"
+   reservedSize=3 reserved="11-13" reservedPhysicalCPUs="0-13"
+"Starting" policy="static"
+```
+`cpu_manager_state` written for the first time:
+```json
+{"policyName":"static",
+ "defaultCpuSet":"8-13",
+ "entries":{"<positronic-control-pod>":
+    {"load-models":"0","positronic-control":"0-7"}}}
+```
+
+**Observed (negative).** Live kernel state:
+```
+kubepods.cpuset.cpus           = 0-13   (kubelet wrote all CPUs)
+kubepods.cpuset.cpus.effective = 0-13
+ecat1.cpuset.cpus.partition    = isolated invalid
+```
+
+Kubelet acknowledges `reservedSystemCPUs=11-13` and runs the static
+policy, but doesn't constrain the `kubepods` cgroup root.
+
+**Three independent issues surfaced:**
+
+1. **Jetson topology metadata is wrong.** Kubelet's `Detected CPU
+   topology` reports:
+   ```
+   "NumCPUs":14, "NumCores":1, "NumNUMANodes":1,
+   "CPUDetails":{"0":{"CoreID":0}, "1":{"CoreID":0}, ..., "13":{"CoreID":0}}
+   ```
+   All 14 logical CPUs claim `CoreID=0` — they all think they're SMT
+   siblings of a single physical core. Kubelet's static-policy
+   "full-pcpus-only" rule then computes
+   `reservedPhysicalCPUs="0-13"`: reserving any logical CPU implies
+   reserving the entire single "physical core" (which contains all
+   14 cpus). This is a kernel/firmware metadata bug on Jetson Thor
+   surfacing through `/sys/devices/system/cpu/cpu*/topology/`. We
+   can't fix it from k0s/kubelet config.
+
+2. **positronic-control pre-empted the static allocation.** The
+   `positronic-control` Deployment has integer CPU requests in
+   Guaranteed QoS. Static policy allocated `0-7` exclusively to it
+   *before* reconciling against the topology data, so we ended up
+   with `defaultCpuSet=8-13` (the leftovers). The order of operations
+   in kubelet means existing-pod assignments take precedence over
+   reservation enforcement.
+
+3. **`reservedSystemCPUs` doesn't shrink the kubepods cgroup root.**
+   This is the killer. The mechanism that constrains
+   `kubepods.cpuset.cpus` is `--enforce-node-allocatable=pods`
+   combined with correctly-computed Allocatable resources, *not*
+   `reservedSystemCPUs` directly. Live nodeConfig shows
+   `EnforceNodeAllocatable: {"pods":{}}` — the field is present but
+   the value is an empty object, not the list `["pods"]`. Whether
+   kubelet treats that as "enforce" vs "don't enforce" is the
+   question I haven't answered. Either way, the observed state is
+   `kubepods.cpuset.cpus = 0-13` — no enforcement.
+
+### Combined diagnosis
+
+Three independent failure modes, in the order they bite:
+
+| # | Failure | Fixable? |
+|---|---|---|
+| 1 | `/run/k0s/kubelet/config.yaml` cached across restarts | Yes — `rm` before restart |
+| 2 | Jetson topology says 14 cpus = 1 physical core | No (kernel/firmware bug) |
+| 3 | `reservedSystemCPUs` doesn't constrain kubepods root cgroup | Maybe — needs `EnforceNodeAllocatable` work |
+
+Issue (1) is a bootstrap bug we can patch. Issue (2) is upstream and
+forces us to think about kubelet config interactions on a topology
+that pretends every cpu is an SMT sibling. Issue (3) is the actual
+goal — making `kubepods` *not* land on cpus 11-13 — and the kubelet
+config we shipped didn't achieve it.
+
+### What we have NOT yet tried
+
+- Setting `enforceNodeAllocatable: ["pods"]` as an explicit list
+  (currently rendering as `{}`) so kubelet actively shrinks
+  `kubepods.cpuset.cpus` to `Allocatable.cpu`.
+- Disabling `cpuManagerPolicy: static` and using only `kubelet-cgroups`
+  / `runtime-cgroups` settings to constrain kubepods directly without
+  invoking the static-policy allocator at all (which is the source of
+  the topology interaction).
+- `kubelet-extra-args` to pass `--cpus=1-10` directly, bypassing
+  k0s's workerProfile rendering.
+- Annotating `positronic-control` to drop integer CPU requests so
+  static policy doesn't pre-empt the reservation.
+
+### Decision
+
+Park FIR-282 native kubelet integration. Ship the cpu-isolation-
+bootstrap PR's runtime mitigation (`MANAGED_SLICES` includes
+`kubepods`/`kubepods.slice`, `cmd_apply` re-runs on `isolated
+invalid`, `cpusets.service` ordered before `k0scontroller`). The
+race window between cpusets.service and k0s creating kubepods is
+small and the mitigation reliably catches it on every reboot.
+
+Investigation log preserved here for whoever picks this up next —
+likely needed once we move off Jetson Thor, or when the Thor
+kernel fixes its topology reporting.
+
+### Open follow-ups
+
+- [ ] Test `enforceNodeAllocatable: [pods]` on a non-Jetson host
+      (x86 ak-007) where topology metadata is sane, to isolate
+      issue (3) from issue (2).
+- [ ] File upstream Jetson kernel bug for the
+      `/sys/devices/system/cpu/cpu*/topology/core_id == 0`
+      reporting.
+- [ ] Investigate whether containerd's CRI implementation matters
+      — kubelet logged `"CRI implementation should be updated to
+      support RuntimeConfig. Falling back to using cgroupDriver
+      from kubelet config."` which may affect cpuset enforcement.
