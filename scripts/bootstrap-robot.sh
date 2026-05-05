@@ -128,63 +128,109 @@
 #   sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets   # re-seed creds
 #   sudo bash scripts/bootstrap-robot.sh --image-overrides     # push tag changes
 #   sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
+#   sudo bash scripts/bootstrap-robot.sh --ecat-interface --cpu-isolation
+#                                                              # rerun realtime setup only
+#   sudo bash scripts/bootstrap-robot.sh --skip-cpu-isolation --skip-ecat-interface
+#                                                              # full bootstrap, skip RT setup
 #
 #   -h, --help         this help
 #
-# Phases:
-#   1. preflight    OS / arch / kernel / disk / sudo / port collisions
-#   2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
-#                   pciutils, unzip; k0s binary; terraform binary
-#   3. cluster      k0s install controller --single --enable-worker;
-#                   systemctl enable --now k0scontroller; wait Ready;
-#                   write /root/.kube/config from `k0s kubeconfig admin`
-#                   (so kubectl + terraform have a config to read).
-#                   Runs BEFORE host config because the host-config scripts
-#                   edit /etc/k0s/containerd.toml, which only exists after
-#                   k0s has started at least once.
-#   4. host config  configure-k0s-containerd-mirror.sh +
-#                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
-#                   via lspci or /dev/nvidia0). Restarts k0s; waits for
-#                   node Ready before returning so later phases don't race.
-#   5. seed pull secrets
-#                   ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
-#                   exists in `argus`, `dma-video`, `nimbus` so private
-#                   foundationbot/* images can be pulled. Source order:
-#                   --dockerhub-secret-file, then ~/.docker/config.json
-#                   (default), then existing Secret in the `phantom`
-#                   namespace, then no-op if already present in every
-#                   target namespace. Creates the namespace if it doesn't
-#                   exist yet. Idempotent.
-#   5.5 operator-ui-config
-#                   create/refresh the operator-ui-pairing ConfigMap in
-#                   the `argus` namespace from
-#                   /etc/phantomos/operator-ui-pairing.yaml. The base
-#                   operator-ui Deployment reads AI_PC_URL via
-#                   configMapKeyRef. On first bringup --ai-pc-url is
-#                   required; subsequent runs without the flag re-apply
-#                   the existing local file. Rolls out operator-ui if
-#                   the value changed.
-#   6. gitops       cd terraform && terraform init && terraform apply
-#                   (installs ArgoCD via the official Helm chart). Then
-#                   render the per-host Application CR from
-#                   host-config-templates/_template/phantomos-app.yaml.tpl
-#                   into /etc/phantomos/phantomos-app.yaml using the
-#                   resolved robot identity, repo URL, and
-#                   targetRevision (from host-config.yaml, default
-#                   'main'), and kubectl-apply it. Migrates away from
-#                   any pre-existing root-app + child-app topology
-#                   without pruning workload state. The repo carries no
-#                   per-robot Application files; that data is per-host.
-#   6.5 argocd admin install argocd CLI (latest release) under
-#                   /usr/local/bin/argocd and reset the admin password
-#                   to "1984" by patching argocd-secret with a bcrypt
-#                   hash. Idempotent (always rewrites the hash). Also
-#                   removes argocd-initial-admin-secret since it is no
-#                   longer authoritative.
-#   7. setup-positronic (optional, --setup-positronic)
-#                   Push positronic-control image to local registry,
-#                   build phantom-models, and redeploy the pod.
-#   8. validate     bash scripts/validate-local-registry.sh
+# Phases (bootstrap runs all of them in order; --<phase> selects one):
+#   pre-phases (run before phase 1; default-on, opt out via --skip-*):
+#     stop docker containers     (--skip-docker-stop)
+#     stop system services       (--skip-stop-services)
+#     uninstall dma-ethercat     (--skip-ethercat-uninstall)
+#
+#    1. preflight    OS / arch / kernel / disk / sudo / port collisions
+#    2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
+#                    pciutils, unzip; k0s binary; terraform binary
+#    3. cluster      k0s install controller --single --enable-worker;
+#                    systemctl enable --now k0scontroller; wait Ready;
+#                    write /root/.kube/config from `k0s kubeconfig admin`
+#                    (so kubectl + terraform have a config to read).
+#                    Runs BEFORE host config because the host-config scripts
+#                    edit /etc/k0s/containerd.toml, which only exists after
+#                    k0s has started at least once.
+#    4. host config  configure-k0s-containerd-mirror.sh +
+#                    configure-k0s-nvidia-runtime.sh (if a GPU is detected
+#                    via lspci or /dev/nvidia0). Restarts k0s; waits for
+#                    node Ready before returning so later phases don't race.
+#    5. seed pull secrets
+#                    ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
+#                    exists in `argus`, `dma-video`, `nimbus`, `phantom` so
+#                    private foundationbot/* images can be pulled. Source
+#                    order: --dockerhub-secret-file, then ~/.docker/config.json
+#                    (default), then existing Secret in the `phantom`
+#                    namespace, then no-op if already present in every
+#                    target namespace. Idempotent.
+#    6. operator-ui-config
+#                    create/refresh the operator-ui-pairing ConfigMap in
+#                    the `argus` namespace from
+#                    /etc/phantomos/operator-ui-pairing.yaml. The base
+#                    operator-ui Deployment reads AI_PC_URL via
+#                    configMapKeyRef. On first bringup --ai-pc-url is
+#                    required; subsequent runs without the flag re-apply
+#                    the existing local file. Rolls out operator-ui if
+#                    the value changed.
+#    7. ecat-interface (gates phase 8)
+#                    resolve the EtherCAT NIC adapter and rename it to
+#                    cpuIsolation.nic.iface via a persistent udev rule
+#                    (/etc/udev/rules.d/70-ecat.rules). Driven by
+#                    cpuIsolation.nic.selector (mac/pci/driver+index) in
+#                    host-config.yaml; falls back to the vendored
+#                    interactive picker on a TTY. Idempotent — fast-paths
+#                    when `ip link show <iface>` already succeeds.
+#                    See docs/cpu-isolation.md.
+#    8. cpu-isolation (gates phase 9)
+#                    activate cgroup v2 cpuset partitions; install
+#                    cpusets.service so they reactivate at boot
+#                    (ordered Before docker / user@ / k0scontroller /
+#                    k0sworker); write systemd CPUAffinity drop-in;
+#                    pin EtherCAT NIC IRQs to cpuIsolation.nic.irqCore;
+#                    optionally migrate kernel cmdline (--migrateCmdline).
+#                    Default-on: missing cpuIsolation: block prompts on
+#                    a TTY and persists answers. enabled: false skips.
+#                    See docs/cpu-isolation.md.
+#    9. install dma-ethercat (gates phase 10)
+#                    render the bootstrap-managed installer Job from the
+#                    foundationbot/dma-ethercat tag in host-config images:,
+#                    apply, dpkg-i the .deb extracted to the host, then
+#                    write DMA_CONFIG / INTERFACE / DMA_CPU_AFFINITY /
+#                    DMA_RT_CPU into /etc/dma/dma-ethercat.env (preserving
+#                    operator edits) and `systemctl enable --now
+#                    dma-ethercat.service`. ANY failure halts bootstrap;
+#                    --skip-ethercat-install bypasses.
+#   10. gitops       cd terraform && terraform init && terraform apply
+#                    (installs ArgoCD via the official Helm chart). Then
+#                    render per-host Application CRs (one per enabled
+#                    stack — phantomos-<robot>-core, phantomos-<robot>-operator)
+#                    from host-config-templates/_template/phantomos-app.yaml.tpl
+#                    into /etc/phantomos/phantomos-app-<stack>.yaml and
+#                    kubectl-apply each. Migrates from any pre-existing
+#                    root-app + child-app topology without pruning workload
+#                    state.
+#   11. argocd admin install argocd CLI (latest release) under
+#                    /usr/local/bin/argocd and reset the admin password
+#                    to "1984" by patching argocd-secret with a bcrypt
+#                    hash. Idempotent (always rewrites the hash). Also
+#                    removes argocd-initial-admin-secret since it is no
+#                    longer authoritative.
+#   12. image overrides
+#                    inject host-config.yaml's images: list into the live
+#                    per-stack Argo Applications via
+#                    spec.source.kustomize.images. Filtered per stack —
+#                    each Application only sees images its manifests
+#                    actually reference. foundationbot/dma-ethercat is
+#                    NOT routed (consumed directly by phase 9).
+#   13. deployments  inject host-config.yaml's deployments: block as
+#                    strategic-merge patches into the live per-stack
+#                    Applications via spec.source.kustomize.patches.
+#                    Currently routes positronic-control + phantomos-api-server
+#                    mounts onto the core stack. Alias: --dev-mounts.
+#   14. setup-positronic (optional, --setup-positronic)
+#                    push positronic-control image to local registry,
+#                    build phantom-models, and redeploy the pod.
+#   15. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
