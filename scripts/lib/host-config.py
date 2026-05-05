@@ -279,9 +279,14 @@ def _managed_cpus_from_block(ci: dict) -> set[int]:
 
 
 def cmd_compute_reserved_cpus(cfg: dict) -> int:
-    """Echo the housekeeping cpu-list (online minus cpuIsolation
-    partitions) — the value to plug into kubelet's
-    --reserved-cpus / KubeletConfiguration.reservedSystemCPUs.
+    """Echo the cpu-list to plug into kubelet's --reserved-cpus /
+    KubeletConfiguration.reservedSystemCPUs. Per kubernetes docs,
+    'CPUs in this set are not eligible to be assigned to any
+    containers' cpuset.cpus'. So the right value is the union of
+    cpuIsolation.partitions cpus — the cores we want kept OFF kubepods
+    (e.g. the EtherCAT RT cores). Pods then land on the inverse
+    (housekeeping) automatically.
+
     Exit 1 when cpuIsolation isn't configured (caller should skip
     kubelet override). Exit 2 on schema errors."""
     ci = cfg.get("cpuIsolation")
@@ -300,7 +305,7 @@ def cmd_compute_reserved_cpus(cfg: dict) -> int:
     if not housekeeping:
         print("error: every online cpu is partitioned — no housekeeping", file=sys.stderr)
         return 2
-    print(_compress_cpu_list(housekeeping))
+    print(_compress_cpu_list(managed))
     return 0
 
 
@@ -335,6 +340,15 @@ def cmd_render_k0s_worker_profile(cfg: dict) -> int:
         "values": {
             "cpuManagerPolicy": "static",
             "reservedSystemCPUs": reserved,
+            # Clear k0s's default kubeReservedCgroup ("system.slice").
+            # k8s >= 1.32 rejects the combination of reservedSystemCPUs
+            # with either kubeReservedCgroup or systemReservedCgroup
+            # ("invalid configuration: can't use reservedSystemCPUs ...
+            # with systemReservedCgroup or kubeReservedCgroup"). The
+            # empty string clears the inherited default; kubelet's
+            # own resource enforcement still works without a dedicated
+            # cgroup target.
+            "kubeReservedCgroup": "",
         },
     }]
     print(yaml.safe_dump({"workerProfiles": profile}, sort_keys=False).rstrip())

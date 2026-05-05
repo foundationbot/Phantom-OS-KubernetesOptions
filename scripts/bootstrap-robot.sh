@@ -1307,6 +1307,10 @@ managed = {
     "values": {
         "cpuManagerPolicy": "static",
         "reservedSystemCPUs": reserved,
+        # Clear k0s's default kubeReservedCgroup ("system.slice"); k8s
+        # rejects the combination with reservedSystemCPUs (validation
+        # error: can't use reservedSystemCPUs with kubeReservedCgroup).
+        "kubeReservedCgroup": "",
     },
 }
 new_profiles = [p for p in profiles if not (isinstance(p, dict) and p.get("name") == "default")]
@@ -1446,9 +1450,28 @@ except Exception:
 ' /run/k0s/kubelet/config.yaml 2>/dev/null)"
   fi
 
-  if [ "$live_reserved" != "$reserved" ] || [ "$live_policy" != "static" ]; then
+  # kubeReservedCgroup must also be cleared. k0s defaults it to
+  # "system.slice" and kubelet validation rejects the combo with
+  # reservedSystemCPUs ("can't use reservedSystemCPUs with
+  # kubeReservedCgroup"). The empty-string override in the
+  # workerProfile is the only thing that lets kubelet start.
+  local live_kubereserved
+  if [ -r /run/k0s/kubelet/config.yaml ]; then
+    live_kubereserved="$(python3 -c '
+import yaml, sys
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+    print(d.get("kubeReservedCgroup", ""))
+except Exception:
+    pass
+' /run/k0s/kubelet/config.yaml 2>/dev/null)"
+  fi
+
+  if [ "$live_reserved" != "$reserved" ] \
+     || [ "$live_policy" != "static" ] \
+     || [ -n "$live_kubereserved" ]; then
     needs_restart=1
-    info "live kubelet config doesn't match desired (reservedSystemCPUs=$live_reserved policy=$live_policy)"
+    info "live kubelet config doesn't match desired (reservedSystemCPUs=$live_reserved policy=$live_policy kubeReservedCgroup=$live_kubereserved)"
   fi
 
   if [ "$needs_restart" = 1 ]; then
