@@ -656,12 +656,26 @@ cmd_apply() {
 
     for n in "${names[@]}"; do
         local cpus="${cpus_by_name[$n]}"
-        # If it already exists with same cpus, skip (idempotent).
-        local current
+        # Idempotency check: same cpus + cgroup present + partition
+        # state actually 'isolated' (not 'isolated invalid'). If a
+        # sibling cgroup like kubepods (created post-boot by k0s)
+        # has stolen one of the partition's CPUs, state will be
+        # 'isolated invalid' and we MUST re-apply (re-shrink siblings
+        # + re-activate) — silently skipping leaves the partition
+        # broken. Reading cpuset.cpus.partition is cheap and
+        # authoritative.
+        local current part_state=""
         current=$(state_get_cpus "$n")
-        if [[ "$current" == "$cpus" && -d "$CGROUP_ROOT/$n" ]]; then
+        if [[ -f "$CGROUP_ROOT/$n/cpuset.cpus.partition" ]]; then
+            part_state=$(cat "$CGROUP_ROOT/$n/cpuset.cpus.partition" 2>/dev/null)
+        fi
+        if [[ "$current" == "$cpus" && -d "$CGROUP_ROOT/$n" \
+              && "$part_state" == "isolated" ]]; then
             info "[$n] already active on $cpus — skipping"
             continue
+        fi
+        if [[ "$part_state" == "isolated invalid" ]]; then
+            warn "[$n] is 'isolated invalid' (sibling cgroup stole CPUs) — re-applying"
         fi
 
         validate_requested_cpus "$n" "$cpus"
