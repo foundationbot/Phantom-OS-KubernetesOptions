@@ -1,26 +1,28 @@
 #!/bin/bash
 #
-# setup_ethercat_interface.sh — Configure an Ethernet adapter for EtherCAT.
+# setup_ethercat_interface.sh — thin CLI wrapper around lib/nic_setup.sh.
 #
 # Vendored and adapted from DMA.ethercat
 # (scripts/setup_ethercat_interface.sh, SHA fd854dabcbbaba864a16c9e42fda98dfe386ab6a).
 #
+# All NIC selection / udev rule / rename logic lives in
+#   - lib/nic_discovery.sh   (selector resolution)
+#   - lib/nic_setup.sh       (rule writing, idempotency predicates,
+#                             udev apply, interactive picker)
+# This script is just argv parsing and a top-level state machine that
+# composes those library functions. Bootstrap phase 7 sources nic_setup.sh
+# directly and drives the same workflow without spawning this script.
+#
 # Local divergence vs upstream:
-#   - Adds a non-interactive selector path driven by --iface plus exactly one
-#     of --mac, --pci, or --driver+--index. This is what the bootstrap phase
-#     uses to bring a brand-new robot from "factory NIC" to "named ecatN"
-#     without operator input.
-#   - The upstream script is hardcoded to ecat0; this version supports any
-#     valid kernel iface name via --iface (default ecat0 for the interactive
-#     path, preserving upstream behaviour).
-#   - Idempotent on re-run: if `ip link show <iface>` succeeds AND the udev
-#     rule already names that NIC, the script exits 0 without rewriting.
-#   - Writes /etc/udev/rules.d/70-ecat.rules instead of upstream's
-#     /etc/udev/rules.d/99-ethercat.rules. The 70- prefix orders the rule
-#     before systemd's net.link rules at 80- and the persistent-net rules
-#     typically deployed at 75-/76- so the rename wins deterministically.
-#   - set -u (no -e); explicit error handling via die(), matching the
-#     manage_cpusets.sh convention in this directory.
+#   - Adds non-interactive selector mode (--mac / --pci / --driver+--index).
+#   - Supports any kernel iface name via --iface (default ecat0).
+#   - Idempotent: re-runs are no-ops when the iface already names the
+#     desired MAC and the udev rule is already in place.
+#   - Writes /etc/udev/rules.d/70-ecat.rules (vs upstream 99-ethercat.rules);
+#     the 70- prefix orders the rule before systemd's net.link rules at 80-.
+#   - Preserves unrelated rules in the file (nic_write_udev_rule rewrites
+#     only the lines that bind to our target iface or MAC).
+#   - set -u, no -e; explicit error handling, matching manage_cpusets.sh.
 #
 # Usage:
 #   Interactive (TTY):
@@ -32,10 +34,6 @@
 #     ./setup_ethercat_interface.sh --iface ecat0 --mac aa:bb:cc:dd:ee:ff --yes
 #     ./setup_ethercat_interface.sh --iface ecat1 --pci 0000:01:00.0 --yes
 #     ./setup_ethercat_interface.sh --iface ecat0 --driver igc --index 0 --yes
-#
-# Selector precedence: exactly one of --mac, --pci, or (--driver + --index)
-# must be supplied in non-interactive mode. They are mutually exclusive. The
-# script fails fast if zero or multiple selectors are provided.
 
 set -u  # explicit error handling via die(); no -e (matches manage_cpusets.sh)
 
@@ -53,7 +51,9 @@ SERVICE_FILE="/etc/systemd/system/ethercat-irq-affinity.service"
 IRQ_SCRIPT_FILE="/usr/local/bin/ethercat-irq-affinity.sh"
 IRQBALANCE_CONF="/etc/default/irqbalance"
 TUNING_DISPATCHER_DIR="/etc/networkd-dispatcher/routable.d"
-# TUNING_DISPATCHER_FILE is computed per-iface inside run_rt_setup.
+
+# Honoured by lib/nic_setup.sh.
+export NIC_UDEV_RULE_FILE="$UDEV_RULE_FILE"
 
 # ---------- Sudo -----------------------------------------------------------
 if [[ $EUID -eq 0 ]]; then
@@ -61,15 +61,10 @@ if [[ $EUID -eq 0 ]]; then
 else
     SUDO="sudo"
 fi
+export NIC_SUDO="$SUDO"
 
-die() {
-    echo -e "${RED}ERROR: $*${NC}" >&2
-    exit 1
-}
-
-warn() {
-    echo -e "${YELLOW}$*${NC}" >&2
-}
+die() { echo -e "${RED}ERROR: $*${NC}" >&2; exit 1; }
+warn() { echo -e "${YELLOW}$*${NC}" >&2; }
 
 # ---------- Source libraries ----------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +79,8 @@ source "$LIB_DIR/nic_rt.sh"
 source "$LIB_DIR/systemd_units.sh"
 # shellcheck source=./lib/nic_discovery.sh
 source "$LIB_DIR/nic_discovery.sh"
+# shellcheck source=./lib/nic_setup.sh
+source "$LIB_DIR/nic_setup.sh"
 
 # ---------- Argument parsing -----------------------------------------------
 LIST_ONLY=false
@@ -105,27 +102,26 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Modes:
-  Interactive (no selector flags, stdin is a TTY): the original DMA.ethercat
-  flow — list adapters, prompt for selection, write udev rule, optionally
-  configure RT pinning.
+  Interactive (no selector flags, stdin is a TTY): list adapters, prompt
+  for selection, write udev rule, optionally configure RT pinning.
 
-  Non-interactive: pass --iface <name> plus exactly one of --mac, --pci, or
-  (--driver + --index). --yes is required to skip confirmation.
+  Non-interactive: pass --iface <name> plus exactly one of --mac, --pci,
+  or (--driver + --index). --yes is required to skip confirmation.
 
 Selector flags (non-interactive):
   --iface <name>      Target interface name (default ecat0)
   --mac <addr>        Select adapter by MAC address (case-insensitive)
   --pci <BDF>         Select adapter by PCI BDF (e.g. 0000:01:00.0)
   --driver <name>     Select adapter by kernel driver (use with --index)
-  --index <N>         Zero-based index within driver-matched set, sorted by PCI BDF
+  --index <N>         Zero-based index within driver-matched set
   --yes               Skip confirmation prompts
 
 Existing operator subcommands (preserved from upstream):
   --list, -l          List available Ethernet adapters
   --remove, -r        Remove the udev rule
-  --rt-setup, -rt     Configure RT IRQ/core pinning only (iface must exist)
+  --rt-setup, -rt     Configure RT IRQ/core pinning only
   --rt-remove         Remove RT pinning systemd service
-  --nic-tune          Apply ethtool NIC tuning for low-latency EtherCAT
+  --nic-tune          Apply ethtool NIC tuning
   --nic-tune-remove   Remove persistent NIC tuning dispatcher script
   -h, --help          Show this help message
 EOF
@@ -150,124 +146,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---------- Helpers --------------------------------------------------------
-
-# Returns 0 if the given udev rule file already exists AND already names the
-# NIC currently visible as $iface (i.e. matches its MAC). Used for idempotent
-# early-exit when the host has already been configured.
-udev_rule_already_targets() {
-    local iface="$1"
-    local rule_file="$2"
-
-    [[ -f "$rule_file" ]] || return 1
-
-    local current_mac
-    current_mac=$(cat "/sys/class/net/$iface/address" 2>/dev/null || echo "")
-    [[ -n "$current_mac" ]] || return 1
-
-    if grep -Fq "NAME=\"$iface\"" "$rule_file" 2>/dev/null && \
-       grep -iFq "$current_mac" "$rule_file" 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
-
-# Resolves the requested selector to a current ifname; sets RESOLVED_IFACE.
-# Returns 1 if no selector flags supplied (caller falls back to interactive).
-# Calls die() on conflicting / malformed selectors.
-resolve_selector() {
-    local count=0
-    [[ -n "$OPT_MAC" ]]    && ((count++))
-    [[ -n "$OPT_PCI" ]]    && ((count++))
-    [[ -n "$OPT_DRIVER" ]] && ((count++))
-
-    if (( count == 0 )); then
-        return 1
-    fi
-    if (( count > 1 )); then
-        die "exactly one of --mac, --pci, or --driver may be supplied (got $count)"
-    fi
-
-    if [[ -n "$OPT_DRIVER" ]]; then
-        [[ -n "$OPT_INDEX" ]] || die "--driver requires --index"
-        RESOLVED_IFACE=$(nic_match_by_driver "$OPT_DRIVER" "$OPT_INDEX") || \
-            die "could not resolve --driver $OPT_DRIVER --index $OPT_INDEX to a NIC"
-    elif [[ -n "$OPT_MAC" ]]; then
-        [[ -z "$OPT_INDEX" ]] || die "--index is only valid with --driver"
-        RESOLVED_IFACE=$(nic_match_by_mac "$OPT_MAC") || \
-            die "could not resolve --mac $OPT_MAC to a NIC"
-    elif [[ -n "$OPT_PCI" ]]; then
-        [[ -z "$OPT_INDEX" ]] || die "--index is only valid with --driver"
-        RESOLVED_IFACE=$(nic_match_by_pci "$OPT_PCI") || \
-            die "could not resolve --pci $OPT_PCI to a NIC"
-    fi
-    return 0
-}
-
-# Non-interactive flow: write udev rule for $target_iface using current MAC of
-# $current_iface, trigger udev, and (if not already named) rename online.
-run_non_interactive() {
-    local target_iface="$1"
-    local current_iface="$2"
-
-    nic_validate_iface_name "$target_iface" || \
-        die "invalid kernel iface name: $target_iface"
-
-    # Idempotent fast path.
-    if ip link show "$target_iface" &>/dev/null && \
-       udev_rule_already_targets "$target_iface" "$UDEV_RULE_FILE"; then
-        echo -e "${GREEN}$target_iface already exists and udev rule is in place — nothing to do.${NC}"
-        exit 0
-    fi
-
-    local current_mac driver description
-    current_mac=$(cat "/sys/class/net/$current_iface/address" 2>/dev/null || echo "")
-    [[ -n "$current_mac" ]] || die "could not read MAC for $current_iface"
-
-    # Best-effort driver and description for the rule comment.
-    driver=$(udevadm info -q property -p "/sys/class/net/$current_iface" 2>/dev/null | \
-             grep "ID_NET_DRIVER=" | cut -d= -f2)
-    [[ -z "$driver" ]] && driver=$(basename "$(readlink -f "/sys/class/net/$current_iface/device/driver")" 2>/dev/null || echo "unknown")
-    description="non-interactive bootstrap (selector: ${OPT_MAC:+mac=$OPT_MAC }${OPT_PCI:+pci=$OPT_PCI }${OPT_DRIVER:+driver=$OPT_DRIVER index=$OPT_INDEX})"
-
-    if [[ "$ASSUME_YES" != true ]]; then
-        echo "About to rename $current_iface (MAC $current_mac) -> $target_iface"
-        echo "  udev rule: $UDEV_RULE_FILE"
-        if [[ ! -t 0 ]]; then
-            die "non-interactive mode requires --yes when stdin is not a TTY"
-        fi
-        read -p "Proceed? [y/N] " -n 1 -r
-        echo
-        [[ "$REPLY" =~ ^[Yy]$ ]] || die "aborted by operator"
-    fi
-
-    create_udev_rule_mac "$current_mac" "$driver" "$description" \
-        "$UDEV_RULE_FILE" "$target_iface"
-
-    # Trigger udev to apply on currently-bound devices.
-    $SUDO udevadm control --reload-rules
-    $SUDO udevadm trigger --subsystem-match=net --action=change 2>/dev/null || true
-
-    # If the kernel didn't rename via trigger (it usually doesn't for already-
-    # present devices), do it explicitly.
-    if ip link show "$target_iface" &>/dev/null; then
-        echo -e "${GREEN}  $target_iface is up.${NC}"
-    else
-        echo "Renaming $current_iface -> $target_iface online..."
-        $SUDO ip link set "$current_iface" down || die "failed to bring $current_iface down"
-        $SUDO ip link set "$current_iface" name "$target_iface" || \
-            die "failed to rename $current_iface to $target_iface"
-        $SUDO ip link set "$target_iface" up || warn "failed to bring $target_iface up"
-    fi
-
-    echo ""
-    echo -e "${GREEN}$target_iface configured.${NC}"
-    echo "Persistence: $UDEV_RULE_FILE (applies on next boot too)."
-}
-
-# ---------- Higher-level orchestration -------------------------------------
-# Carried across mostly verbatim from upstream so --rt-setup and the legacy
-# interactive path keep working. Only the iface argument is now parameterised.
+# ---------- Helpers (RT subcommand orchestration, unchanged) --------------
 run_rt_setup() {
     local nic="${1:-ecat0}"
     local tuning_dispatcher_file="$TUNING_DISPATCHER_DIR/${nic}-tuning.sh"
@@ -289,15 +168,12 @@ run_rt_setup() {
     fi
 
     echo ""
-
     local irqs
     irqs=$(find_nic_irqs "$nic")
-
     if [[ -z "$irqs" ]]; then
         echo -e "${RED}No IRQs found for $nic. Is the interface up?${NC}"
         return 1
     fi
-
     echo -e "${BLUE}Found IRQs for $nic: $irqs${NC}"
     echo ""
 
@@ -326,7 +202,6 @@ run_rt_setup() {
 remove_rt_setup() {
     echo -e "${BLUE}Removing RT pinning setup...${NC}"
     remove_ethercat_rt_service "$SERVICE_FILE" "$IRQ_SCRIPT_FILE"
-
     if [[ -f "$IRQBALANCE_CONF" ]] && grep -q "^IRQBALANCE_BANNED_IRQS" "$IRQBALANCE_CONF" 2>/dev/null; then
         $SUDO sed -i '/^IRQBALANCE_BANNED_IRQS/d' "$IRQBALANCE_CONF"
         echo -e "${GREEN}  Cleaned irqbalance config${NC}"
@@ -334,9 +209,102 @@ remove_rt_setup() {
             $SUDO systemctl restart irqbalance
         fi
     fi
-
     remove_nic_tuning_dispatcher "${TUNING_DISPATCHER_FILE:-$TUNING_DISPATCHER_DIR/ecat0-tuning.sh}"
     echo -e "${GREEN}RT pinning setup removed.${NC}"
+}
+
+# Selector validation. Sets global SELECTOR_KIND to one of
+# "mac" / "pci" / "driver" / "" (empty when no flags supplied). Calls
+# die() on conflicting flags. Run BEFORE any subshell capture so die()
+# actually terminates the script.
+SELECTOR_KIND=""
+validate_selector() {
+    local count=0
+    [[ -n "$OPT_MAC" ]]    && ((count++))
+    [[ -n "$OPT_PCI" ]]    && ((count++))
+    [[ -n "$OPT_DRIVER" ]] && ((count++))
+
+    if (( count == 0 )); then
+        SELECTOR_KIND=""
+        return 0
+    fi
+    if (( count > 1 )); then
+        die "exactly one of --mac, --pci, or --driver may be supplied (got $count)"
+    fi
+    if [[ -n "$OPT_DRIVER" ]]; then
+        [[ -n "$OPT_INDEX" ]] || die "--driver requires --index"
+        SELECTOR_KIND=driver
+    elif [[ -n "$OPT_MAC" ]]; then
+        [[ -z "$OPT_INDEX" ]] || die "--index is only valid with --driver"
+        SELECTOR_KIND=mac
+    else
+        [[ -z "$OPT_INDEX" ]] || die "--index is only valid with --driver"
+        SELECTOR_KIND=pci
+    fi
+}
+
+# Resolve the selector to a target MAC. Echoes MAC on stdout.
+resolve_selector_mac() {
+    local kind="$1"
+    case "$kind" in
+        mac)    nic_resolve_target_mac --mac    "$OPT_MAC" ;;
+        pci)    nic_resolve_target_mac --pci    "$OPT_PCI" ;;
+        driver) nic_resolve_target_mac --driver "$OPT_DRIVER" --index "$OPT_INDEX" ;;
+        *)      return 1 ;;
+    esac
+}
+
+# Drive the named-iface workflow given the target MAC. Honors the
+# idempotency invariant: short-circuits when iface+rule already match.
+apply_named_iface() {
+    local iface="$1"
+    local mac="$2"
+
+    nic_validate_iface_name "$iface" || die "invalid iface name: $iface"
+
+    local need_rule=1 need_apply=1
+    if nic_already_named "$iface" "$mac"; then
+        need_apply=0
+    fi
+    if nic_udev_rule_present "$iface" "$mac"; then
+        need_rule=0
+    fi
+
+    if (( need_rule == 0 && need_apply == 0 )); then
+        echo -e "${GREEN}$iface already exists and udev rule is in place — nothing to do.${NC}"
+        return 0
+    fi
+
+    if (( need_rule )); then
+        echo -e "${BLUE}Writing udev rule for $iface -> $mac in $UDEV_RULE_FILE${NC}"
+        nic_write_udev_rule "$iface" "$mac" || die "failed to write udev rule"
+    fi
+
+    if (( need_apply )); then
+        # If an iface with the requested MAC exists under a different
+        # name, rename it online so we don't have to wait for hotplug.
+        local current_iface=""
+        current_iface=$(nic_match_by_mac "$mac" 2>/dev/null || true)
+
+        # Reload rules so the kernel picks them up for future hotplugs.
+        nic_apply_udev "${current_iface:-$iface}" >/dev/null 2>&1 || true
+
+        if [[ -n "$current_iface" && "$current_iface" != "$iface" ]]; then
+            echo "Renaming $current_iface -> $iface online..."
+            $SUDO ip link set "$current_iface" down || die "failed to bring $current_iface down"
+            $SUDO ip link set "$current_iface" name "$iface" \
+                || die "failed to rename $current_iface to $iface"
+            $SUDO ip link set "$iface" up || warn "failed to bring $iface up"
+        elif ! ip link show "$iface" >/dev/null 2>&1; then
+            # No NIC currently presents this MAC — fall back to
+            # waiting on udev to hotplug it.
+            nic_apply_udev "$iface" || die "iface $iface did not appear after udev apply"
+        fi
+    fi
+
+    echo ""
+    echo -e "${GREEN}$iface configured.${NC}"
+    echo "Persistence: $UDEV_RULE_FILE (applies on next boot too)."
 }
 
 # ---------- Main flow ------------------------------------------------------
@@ -344,31 +312,17 @@ echo -e "${BLUE}======================================${NC}"
 echo -e "${BLUE}  EtherCAT Interface Setup           ${NC}"
 echo -e "${BLUE}======================================${NC}"
 
-# Subcommand dispatch (these short-circuit before the selector / interactive
-# logic, matching upstream behaviour).
-if $RT_REMOVE; then
-    remove_rt_setup
-    exit 0
-fi
-
-if $REMOVE_RULE; then
-    remove_udev_rule "$UDEV_RULE_FILE"
-    exit 0
-fi
-
-if $RT_SETUP_ONLY; then
-    run_rt_setup "${OPT_IFACE:-ecat0}"
-    exit $?
-fi
-
-if $NIC_TUNE_ONLY; then
+# Subcommand dispatch (short-circuits before selector / interactive logic).
+if $RT_REMOVE;       then remove_rt_setup; exit 0; fi
+if $REMOVE_RULE;     then remove_udev_rule "$UDEV_RULE_FILE"; exit 0; fi
+if $RT_SETUP_ONLY;   then run_rt_setup "${OPT_IFACE:-ecat0}"; exit $?; fi
+if $NIC_TUNE_ONLY;   then
     iface="${OPT_IFACE:-ecat0}"
     apply_nic_tuning "$iface"
     echo ""
     create_nic_tuning_dispatcher "$iface"
     exit $?
 fi
-
 if $NIC_TUNE_REMOVE; then
     iface="${OPT_IFACE:-ecat0}"
     echo -e "${BLUE}Removing NIC tuning dispatcher script...${NC}"
@@ -377,12 +331,26 @@ if $NIC_TUNE_REMOVE; then
 fi
 
 # ---------- Selector resolution (non-interactive path) --------------------
-RESOLVED_IFACE=""
-if resolve_selector; then
-    target="${OPT_IFACE:-ecat0}"
-    nic_validate_iface_name "$target" || die "invalid --iface: $target"
-    echo "Selector resolved: $RESOLVED_IFACE -> $target"
-    run_non_interactive "$target" "$RESOLVED_IFACE"
+validate_selector
+TARGET_IFACE="${OPT_IFACE:-ecat0}"
+
+if [[ -n "$SELECTOR_KIND" ]]; then
+    nic_validate_iface_name "$TARGET_IFACE" || die "invalid --iface: $TARGET_IFACE"
+    target_mac=$(resolve_selector_mac "$SELECTOR_KIND") \
+        || die "could not resolve selector to a NIC"
+
+    if [[ "$ASSUME_YES" != true ]]; then
+        if [[ ! -t 0 ]]; then
+            die "non-interactive mode requires --yes when stdin is not a TTY"
+        fi
+        echo "About to bind iface $TARGET_IFACE to MAC $target_mac"
+        echo "  udev rule: $UDEV_RULE_FILE"
+        read -p "Proceed? [y/N] " -n 1 -r
+        echo
+        [[ "$REPLY" =~ ^[Yy]$ ]] || die "aborted by operator"
+    fi
+
+    apply_named_iface "$TARGET_IFACE" "$target_mac"
     exit 0
 fi
 
@@ -391,136 +359,48 @@ if [[ ! -t 0 ]]; then
     die "no selector flags supplied and stdin is not a TTY. Pass --mac, --pci, or --driver+--index, or run from a terminal."
 fi
 
-# Find all adapters for interactive mode (uses globals from nic_rt.sh).
-find_usb_ethernet
-find_native_ethernet
-
 if $LIST_ONLY; then
+    find_usb_ethernet
+    find_native_ethernet
     display_all_adapters
     exit 0
 fi
 
-# Interactive iface name (default ecat0, preserves upstream behaviour).
-INTERACTIVE_IFACE="${OPT_IFACE:-ecat0}"
-nic_validate_iface_name "$INTERACTIVE_IFACE" || die "invalid --iface: $INTERACTIVE_IFACE"
+nic_validate_iface_name "$TARGET_IFACE" || die "invalid --iface: $TARGET_IFACE"
 
-# Existing udev rule prompt.
+# Existing-rule-file prompt (preserves upstream UX).
 if [[ -f "$UDEV_RULE_FILE" ]]; then
     echo ""
-    echo -e "${YELLOW}Existing udev rule found:${NC}"
+    echo -e "${YELLOW}Existing udev rule file:${NC}"
     cat "$UDEV_RULE_FILE"
     echo ""
     if [[ "$ASSUME_YES" == true ]]; then
         REPLY="y"
     else
-        read -p "Do you want to replace it? [y/N] " -n 1 -r
+        read -p "Do you want to add/replace the rule for $TARGET_IFACE? [y/N] " -n 1 -r
         echo
     fi
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
         echo "Keeping existing rule."
-        if ip link show "$INTERACTIVE_IFACE" &>/dev/null; then
+        if ip link show "$TARGET_IFACE" &>/dev/null; then
             echo ""
             read -p "Configure IRQ and CPU core pinning for real-time? [Y/n] " -n 1 -r
             echo
-            if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
-                run_rt_setup "$INTERACTIVE_IFACE"
-            fi
+            [[ ! "$REPLY" =~ ^[Nn]$ ]] && run_rt_setup "$TARGET_IFACE"
         fi
         exit 0
     fi
 fi
 
-if ip link show "$INTERACTIVE_IFACE" &>/dev/null; then
-    echo ""
-    echo -e "${GREEN}  $INTERACTIVE_IFACE interface already exists${NC}"
-    ip link show "$INTERACTIVE_IFACE"
-    echo ""
-    read -p "Do you want to reconfigure it? [y/N] " -n 1 -r
-    echo
-    if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-        echo ""
-        read -p "Configure IRQ and CPU core pinning for real-time? [Y/n] " -n 1 -r
-        echo
-        if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
-            run_rt_setup "$INTERACTIVE_IFACE"
-        fi
-        exit 0
-    fi
-fi
-
-if ! display_all_adapters; then
-    echo ""
-    echo "Make sure your Ethernet adapter is connected."
-    echo "You can check with: lsusb (USB) or lspci (PCI)"
-    exit 1
-fi
-
-total=$((${#USB_ADAPTERS[@]} + ${#NATIVE_ADAPTERS[@]}))
-
-if [[ $total -eq 1 ]]; then
-    selection=1
-    echo "Only one adapter found, selecting it automatically."
-else
-    read -p "Select adapter to use for EtherCAT [1-$total]: " selection
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [[ "$selection" -lt 1 ]] || [[ "$selection" -gt $total ]]; then
-        die "Invalid selection."
-    fi
-fi
-
-if [[ "$selection" -le ${#USB_ADAPTERS[@]} ]]; then
-    selected="${USB_ADAPTERS[$((selection-1))]}"
-    IFS='|' read -r iface vendor product driver manufacturer product_name mac <<< "$selected"
-
-    echo ""
-    echo -e "${BLUE}Selected: $iface ($manufacturer $product_name) [USB]${NC}"
-    echo ""
-
-    create_udev_rule_usb "$vendor" "$product" "$driver" \
-        "$manufacturer $product_name" "$UDEV_RULE_FILE" "$INTERACTIVE_IFACE"
-else
-    native_idx=$((selection - ${#USB_ADAPTERS[@]} - 1))
-    selected="${NATIVE_ADAPTERS[$native_idx]}"
-    IFS='|' read -r iface driver mac bus_info description speed <<< "$selected"
-
-    echo ""
-    echo -e "${BLUE}Selected: $iface ($description, $driver) [NIC]${NC}"
-    echo ""
-
-    create_udev_rule_mac "$mac" "$driver" "$description" \
-        "$UDEV_RULE_FILE" "$INTERACTIVE_IFACE"
-fi
-
-echo ""
-read -p "Rename $iface to $INTERACTIVE_IFACE now? [Y/n] " -n 1 -r
-echo
-if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
-    echo "Renaming $iface -> $INTERACTIVE_IFACE..."
-    $SUDO ip link set "$iface" down
-    $SUDO ip link set "$iface" name "$INTERACTIVE_IFACE"
-    $SUDO ip link set "$INTERACTIVE_IFACE" up
-
-    sleep 1
-
-    if ip link show "$INTERACTIVE_IFACE" &>/dev/null; then
-        echo ""
-        echo -e "${GREEN}  $INTERACTIVE_IFACE interface is now available!${NC}"
-        ip link show "$INTERACTIVE_IFACE"
-    else
-        echo ""
-        echo -e "${RED}  Rename failed.${NC}"
-        echo "  The udev rule will apply the rename on next reboot."
-    fi
-else
-    echo ""
-    echo -e "${YELLOW}The udev rule will rename the interface on next reboot.${NC}"
-fi
+# Drive the picker via the library; it echoes the chosen MAC.
+target_mac=$(nic_resolve_target_mac_interactive "$TARGET_IFACE") \
+    || die "no adapter selected"
+apply_named_iface "$TARGET_IFACE" "$target_mac"
 
 echo ""
 read -p "Configure IRQ and CPU core pinning for real-time? [Y/n] " -n 1 -r
 echo
-if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
-    run_rt_setup "$INTERACTIVE_IFACE"
-fi
+[[ ! "$REPLY" =~ ^[Nn]$ ]] && run_rt_setup "$TARGET_IFACE"
 
 echo ""
 echo -e "${GREEN}Setup complete!${NC}"

@@ -45,26 +45,42 @@ stacks:
     enabled: true
     # selfHeal: false       # uncomment to leave drift alone
 
-# Per-host kustomize image overrides. Bootstrap injects each entry
-# into the live Argo Application that owns the matching image. The
-# list overrides anything declared in manifests/stacks/<stack>/.
+# Per-host image overrides. Container-keyed: each entry names a known
+# container and supplies the full image ref (repo:tag) it should run.
+# Bootstrap looks up the container in CONTAINER_TARGETS
+# (scripts/lib/host-config.py) to find the image reference the BASE
+# manifest currently uses, then injects a kustomize.images entry that
+# rewrites every reference to that image in the rendered manifests.
 #
-# `name` is the image reference declared in the Deployment manifest;
-# `newTag` is the tag this robot should pull. `newName` is optional.
+#   - if your `image:` keeps the same repo as the base manifest, only
+#     the tag changes (typical for a local-registry build).
+#   - if your `image:` swaps the repo (e.g. localhost:5443/positronic-control
+#     -> foundationbot/phantom-cuda), bootstrap emits a
+#     "<base>=<your-image>" kustomize entry that renames AND retags in
+#     one step. No special host-config field needed — just write the
+#     full ref you want.
+#
+# Known containers (others are rejected at validate-time):
+#   positronic-control   core stack — manifest uses
+#                          localhost:5443/positronic-control
+#   phantom-models       core stack — manifest uses
+#                          localhost:5443/phantom-models
+#   operator-ui          operator stack — manifest uses
+#                          foundationbot/argus.operator-ui
+#   dma-ethercat         NOT stack-routed — bootstrap-managed installer
+#                          Job. Phase 9 reads images.dma-ethercat.image
+#                          directly. Tag convention:
+#                            *-latest-aarch64  Jetson / arm64 robots
+#                            *-latest-amd64    x86 robots
 images:
-  - name: localhost:5443/positronic-control
-    newTag: REPLACE-WITH-LOCAL-BUILD-TAG
-  - name: localhost:5443/phantom-models
-    newTag: REPLACE-WITH-MODEL-BUILD-DATE
-  - name: foundationbot/argus.operator-ui
-    newTag: REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
-  # dma-ethercat is special: NOT routed to a stack. Phase 5.7 reads
-  # this entry directly to render the bootstrap-managed installer Job.
-  # Tag convention:
-  #   *-latest-aarch64  Jetson / arm64 robots
-  #   *-latest-amd64    x86 robots
-  - name: foundationbot/dma-ethercat
-    newTag: main-latest-aarch64
+  positronic-control:
+    image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
+  phantom-models:
+    image: localhost:5443/phantom-models:REPLACE-WITH-MODEL-BUILD-DATE
+  operator-ui:
+    image: foundationbot/argus.operator-ui:REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
+  dma-ethercat:
+    image: foundationbot/dma-ethercat:main-latest-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

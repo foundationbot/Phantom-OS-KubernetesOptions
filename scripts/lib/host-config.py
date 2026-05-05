@@ -16,6 +16,7 @@ Usage:
   host-config.py <path> get-cpu-isolation-json
   host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-images-json
+  host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
@@ -249,37 +250,143 @@ def cmd_set_cpu_isolation_json(path: str, blob: str) -> int:
     return 0
 
 
+# Registry of known containers addressable from host-config.yaml's
+# `images:` block. Adding a new entry here is the entire change needed
+# to make a new workload's image host-configurable.
+#
+#   stack:           which Application stack owns the workload — used by
+#                    bootstrap to route the kustomize.images entry to
+#                    that stack's per-host Application. None means the
+#                    image is consumed directly by bootstrap (currently
+#                    only dma-ethercat for the .deb installer Job).
+#   manifest_image:  the image string the BASE manifest uses, sans tag.
+#                    This is the find-key kustomize.images uses to
+#                    locate and rewrite container references. The
+#                    operator's `image:` value in host-config is the
+#                    REPLACEMENT — bootstrap derives the kustomize
+#                    string by combining this find-key with the
+#                    operator's repo+tag.
+CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
+    "positronic-control": {
+        "stack": "core",
+        "manifest_image": "localhost:5443/positronic-control",
+    },
+    "phantom-models": {
+        "stack": "core",
+        "manifest_image": "localhost:5443/phantom-models",
+    },
+    "operator-ui": {
+        "stack": "operator",
+        "manifest_image": "foundationbot/argus.operator-ui",
+    },
+    "dma-ethercat": {
+        # Not stack-routed. Phase 9 reads images.dma-ethercat.image
+        # directly to render the bootstrap-managed installer Job.
+        "stack": None,
+        "manifest_image": "foundationbot/dma-ethercat",
+    },
+}
+
+
+def _split_image_ref(ref: str) -> tuple[str, str]:
+    """Split 'foo/bar:tag' or 'host:port/foo/bar:tag' into
+    (repo, tag). The tag is everything after the LAST colon, but only
+    when that colon comes after the last slash (otherwise it's a
+    registry port and there is no tag)."""
+    last_slash = ref.rfind("/")
+    last_colon = ref.rfind(":")
+    if last_colon < 0 or last_colon < last_slash:
+        raise ValueError(f"image ref {ref!r} has no tag")
+    return ref[:last_colon], ref[last_colon + 1 :]
+
+
+def _container_kustomize_string(cname: str, spec: dict) -> str:
+    """Build the kustomize.images string for one container.
+       repo == manifest_image (just retag) -> "manifest_image:tag"
+       repo != manifest_image (swap repo)  -> "manifest_image=repo:tag"
+    """
+    target = CONTAINER_TARGETS[cname]
+    manifest_image = target["manifest_image"]
+    repo, tag = _split_image_ref(spec["image"])
+    if repo == manifest_image:
+        return f"{manifest_image}:{tag}"
+    return f"{manifest_image}={repo}:{tag}"
+
+
+def _images_dict(cfg: dict) -> dict:
+    """Return the images: block as a dict, or {} if absent.
+    Raises ValueError with a migration hint if the legacy list shape
+    is detected. Callers should propagate the error string."""
+    images = cfg.get("images")
+    if images is None:
+        return {}
+    if isinstance(images, list):
+        raise ValueError(
+            "'images' is now a container-keyed mapping, not a list. "
+            "Migrate to: 'images: { <container>: { image: <ref:tag> } }'. "
+            "See host-config-templates/_template/host-config.yaml. "
+            "Known containers: " + ", ".join(sorted(CONTAINER_TARGETS))
+        )
+    if not isinstance(images, dict):
+        raise ValueError("'images' must be a mapping")
+    return images
+
+
 def cmd_get_images_json(cfg: dict) -> int:
-    """Emit the images list as a compact JSON array suitable for
-    `kubectl patch ... --type=merge -p '{"spec":{"source":{"kustomize":
-    {"images":[...]}}}}'`. Argo Application's kustomize.images expects
-    an array of strings of the form 'name=newName:newTag' OR the old
-    'name:tag' form. We emit 'name:newTag' pairs."""
-    images = cfg.get("images") or []
-    if not isinstance(images, list):
-        print("error: 'images' must be a list", file=sys.stderr)
+    """Emit ALL kustomize.images entries derived from the images:
+    block, as a compact JSON array. Container entries with stack=None
+    (bootstrap-managed, e.g. dma-ethercat) are skipped — they are not
+    routed to any Application's kustomize.images."""
+    try:
+        images = _images_dict(cfg)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     out: list[str] = []
-    for entry in images:
-        if not isinstance(entry, dict):
-            print(f"error: image entry not a mapping: {entry!r}", file=sys.stderr)
-            return 2
-        name = entry.get("name")
-        new_tag = entry.get("newTag")
-        new_name = entry.get("newName")
-        if not name or not new_tag:
+    for cname, spec in images.items():
+        if cname not in CONTAINER_TARGETS:
             print(
-                f"error: image entry needs 'name' and 'newTag': {entry!r}",
+                f"error: images.{cname}: unknown container "
+                f"(known: {', '.join(sorted(CONTAINER_TARGETS))})",
                 file=sys.stderr,
             )
             return 2
-        # Argo accepts "name=newName:newTag" or "name:newTag". Use the
-        # latter when newName is omitted (the common case).
-        if new_name:
-            out.append(f"{name}={new_name}:{new_tag}")
-        else:
-            out.append(f"{name}:{new_tag}")
+        if not isinstance(spec, dict) or not spec.get("image"):
+            continue
+        if CONTAINER_TARGETS[cname]["stack"] is None:
+            continue
+        try:
+            out.append(_container_kustomize_string(cname, spec))
+        except ValueError as exc:
+            print(f"error: images.{cname}: {exc}", file=sys.stderr)
+            return 2
     print(json.dumps(out))
+    return 0
+
+
+def cmd_get_image_for_container(cfg: dict, container: str) -> int:
+    """Echo the full image ref (repo:tag) for one container. Exit 1
+    when the container is not overridden in host-config (caller can
+    fall back to the manifest's default). Exit 2 on schema error."""
+    if container not in CONTAINER_TARGETS:
+        print(
+            f"error: unknown container {container!r} "
+            f"(known: {', '.join(sorted(CONTAINER_TARGETS))})",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        images = _images_dict(cfg)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    spec = images.get(container)
+    if not isinstance(spec, dict):
+        return 1
+    img = spec.get("image")
+    if not img:
+        return 1
+    print(img)
     return 0
 
 
@@ -551,25 +658,46 @@ def cmd_inject_kustomize_block(
         return 2
 
     # Filter host-config images to those owned by this stack.
-    raw_images = cfg.get("images") or []
-    if not isinstance(raw_images, list):
-        print("error: 'images' must be a list", file=sys.stderr)
+    # Container-keyed schema: each entry is keyed by container name and
+    # the registry tells us which stack it lives in. Cross-check
+    # against the rendered manifest's actual image references — a
+    # container whose manifest_image isn't found in the rendered output
+    # is a hint that CONTAINER_TARGETS is stale, surface a stderr
+    # warning so the operator notices.
+    try:
+        raw_images = _images_dict(cfg)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     images_block: list[str] = []
-    for entry in raw_images:
-        if not isinstance(entry, dict):
+    image_warnings: list[str] = []
+    for cname, spec in raw_images.items():
+        if cname not in CONTAINER_TARGETS:
+            image_warnings.append(
+                f"images.{cname}: unknown container — ignored "
+                f"(known: {', '.join(sorted(CONTAINER_TARGETS))})"
+            )
             continue
-        name = entry.get("name")
-        new_tag = entry.get("newTag")
-        new_name = entry.get("newName")
-        if not name or not new_tag:
+        target = CONTAINER_TARGETS[cname]
+        if target["stack"] != stack:
             continue
-        if name not in stack_images:
+        if not isinstance(spec, dict) or not spec.get("image"):
             continue
-        if new_name:
-            images_block.append(f"{name}={new_name}:{new_tag}")
-        else:
-            images_block.append(f"{name}:{new_tag}")
+        manifest_image = target["manifest_image"]
+        if manifest_image not in stack_images:
+            image_warnings.append(
+                f"images.{cname}: manifest_image={manifest_image!r} not "
+                f"referenced by any rendered {stack} manifest — registry "
+                f"is stale (CONTAINER_TARGETS in host-config.py)"
+            )
+            continue
+        try:
+            images_block.append(_container_kustomize_string(cname, spec))
+        except ValueError as exc:
+            print(f"error: images.{cname}: {exc}", file=sys.stderr)
+            return 2
+    for w in image_warnings:
+        print(f"warning: {w}", file=sys.stderr)
 
     # Build patches from `deployments:` filtered to this stack.
     patches_block: list[dict] = []
@@ -917,17 +1045,43 @@ def cmd_validate(cfg: dict) -> int:
                         "dmaEthercat.configPath: '..' not allowed in path components"
                     )
 
-    images = cfg.get("images") or []
-    if not isinstance(images, list):
-        errors.append("'images' must be a list")
-    for i, entry in enumerate(images if isinstance(images, list) else []):
-        if not isinstance(entry, dict):
-            errors.append(f"images[{i}]: not a mapping")
-            continue
-        if not entry.get("name"):
-            errors.append(f"images[{i}]: missing 'name'")
-        if not entry.get("newTag"):
-            errors.append(f"images[{i}]: missing 'newTag'")
+    # images: is the container-keyed override map. Operators name the
+    # container they want to retag/swap and supply the full image ref;
+    # bootstrap looks up CONTAINER_TARGETS to find the manifest-side
+    # name kustomize.images uses as its find-key.
+    images_raw = cfg.get("images")
+    if images_raw is not None:
+        if isinstance(images_raw, list):
+            errors.append(
+                "'images' is now a container-keyed mapping, not a list. "
+                "Migrate to: images: { <container>: { image: <ref:tag> } }. "
+                "Known containers: " + ", ".join(sorted(CONTAINER_TARGETS))
+            )
+        elif not isinstance(images_raw, dict):
+            errors.append("'images' must be a mapping")
+        else:
+            for cname, spec in images_raw.items():
+                if cname not in CONTAINER_TARGETS:
+                    errors.append(
+                        f"images.{cname}: unknown container "
+                        f"(known: {', '.join(sorted(CONTAINER_TARGETS))})"
+                    )
+                    continue
+                if spec is None:
+                    continue
+                if not isinstance(spec, dict):
+                    errors.append(f"images.{cname}: must be a mapping")
+                    continue
+                img = spec.get("image")
+                if not img:
+                    errors.append(f"images.{cname}.image: required")
+                elif not isinstance(img, str):
+                    errors.append(f"images.{cname}.image: must be a string")
+                else:
+                    try:
+                        _split_image_ref(img)
+                    except ValueError as exc:
+                        errors.append(f"images.{cname}.image: {exc}")
 
     # deployments is optional. Each key must be a known deployment.
     # Reject relative paths and '~' — bootstrap runs as root, so '~'
@@ -1017,6 +1171,14 @@ def main() -> int:
         return cmd_set_cpu_isolation_json(path, sys.argv[3])
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
+    if cmd == "get-image-for-container":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> get-image-for-container <container>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_get_image_for_container(cfg, sys.argv[3])
     if cmd == "get-dma-ethercat-config-set":
         return cmd_get_dma_ethercat_config_set(cfg)
     if cmd == "get-dma-ethercat-config-path":

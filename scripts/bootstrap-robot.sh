@@ -447,6 +447,14 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/lib/cpusets.sh
 . "$SCRIPT_DIR/lib/cpusets.sh"
 
+# EtherCAT NIC setup library — phase 7 sources these helpers and drives
+# the workflow directly rather than shelling out to
+# setup_ethercat_interface.sh (which kept its own decision tree). Lets
+# bootstrap make the idempotency call (rule already present + iface
+# already named -> no-op) BEFORE invoking the write path.
+# shellcheck source=scripts/cpusets/lib/nic_setup.sh
+. "$SCRIPT_DIR/cpusets/lib/nic_setup.sh"
+
 # host-config.yaml — single per-host source-of-truth. If --host-config
 # was passed, copy it to the canonical location so subsequent runs use
 # the same file. Then, if the file exists, harvest defaults for fields
@@ -1424,15 +1432,20 @@ operator_ui_config() {
 # Driven by host-config cpuIsolation.nic.{iface, selector}. Selector
 # block must contain exactly one of {mac, pci, {driver,index}};
 # validator enforces this. When selector is absent and stdin is a TTY,
-# bootstrap drives the vendored setup_ethercat_interface.sh in its
-# native interactive flow and persists the resulting choice back to
-# host-config.yaml so re-runs are non-interactive.
+# bootstrap drops to nic_resolve_target_mac_interactive (vendored
+# library) and persists the chosen MAC back to host-config so re-runs
+# are non-interactive.
 #
-# Idempotent: if `ip link show <iface>` already succeeds, the phase
-# is a no-op (the udev rule was previously installed and survived
-# reboots).
-ECAT_INTERFACE_SCRIPT="${ECAT_INTERFACE_SCRIPT:-$REPO_ROOT/scripts/cpusets/setup_ethercat_interface.sh}"
-
+# Workflow (sources scripts/cpusets/lib/nic_setup.sh — no shell-out):
+#   1. resolve target MAC: from selector (mac/pci/driver+index) OR
+#      interactive picker on TTY
+#   2. nic_already_named && nic_udev_rule_present  -> no-op
+#   3. nic_write_udev_rule   (idempotent line-scoped rewrite)
+#   4. nic_apply_udev        (reload+trigger+wait for iface)
+#
+# This explicit guard sequence is what fixes the prior bug where the
+# entire shell-out re-ran on every bootstrap and re-renamed an already
+# correctly-named interface.
 ecat_interface() {
   if [ "$SKIP_ECAT_INTERFACE" = 1 ]; then
     phase "phase 7: ecat-interface  (skipped — --skip-ecat-interface)"
@@ -1463,66 +1476,114 @@ ecat_interface() {
   fi
   phase "phase 7: ecat-interface (gates phase 8)"
 
-  # Idempotent fast-path: iface already exists.
-  if ip link show "$iface" >/dev/null 2>&1; then
-    pass "iface $iface already present — udev rule from a prior run"
-    return
-  fi
-
-  if [ ! -x "$ECAT_INTERFACE_SCRIPT" ]; then
-    fail "$ECAT_INTERFACE_SCRIPT not found or not executable"
-    info "this branch's setup_ethercat_interface.sh is being vendored from"
-    info "DMA.ethercat — see scripts/cpusets/VENDORED.md once it lands."
-    return
-  fi
-
-  # Selector args (built from cpuIsolation.nic.selector). Empty when
-  # the operator hasn't filled in a selector yet — script will fall
-  # back to its interactive flow if stdin is a TTY.
-  local sel_args
-  sel_args="$(_ecat_selector_args "$ci_json")"
+  # --- Step 1: resolve target MAC --------------------------------------
+  local mac="" sel_kind sel_value sel_index
+  read -r sel_kind sel_value sel_index < <(_ecat_selector_fields "$ci_json")
 
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  $ECAT_INTERFACE_SCRIPT --iface $iface $sel_args --yes"
+    if [ -n "$sel_kind" ]; then
+      info "DRY-RUN  resolve MAC via selector: $sel_kind=$sel_value${sel_index:+ (index=$sel_index)}"
+    else
+      info "DRY-RUN  resolve MAC via interactive picker (TTY) and persist to host-config"
+    fi
+    info "DRY-RUN  if iface $iface already exists with that MAC and udev rule binds it -> no-op"
+    info "DRY-RUN  else: write /etc/udev/rules.d/70-ecat.rules entry, udevadm reload+trigger, wait for iface"
     return
   fi
 
-  if [ -z "$sel_args" ] && { [ ! -t 0 ] || [ ! -t 2 ]; }; then
-    fail "no cpuIsolation.nic.selector and shell is not interactive"
-    info "add a selector (mac/pci/driver+index) to $hc or rerun on a TTY"
-    return
-  fi
-
-  note "renaming EtherCAT NIC to $iface..."
-  # shellcheck disable=SC2086
-  if "$ECAT_INTERFACE_SCRIPT" --iface "$iface" $sel_args --yes; then
-    pass "iface $iface set up"
+  if [ -n "$sel_kind" ]; then
+    case "$sel_kind" in
+      mac)    mac="$(nic_resolve_target_mac --mac "$sel_value")" ;;
+      pci)    mac="$(nic_resolve_target_mac --pci "$sel_value")" ;;
+      driver) mac="$(nic_resolve_target_mac --driver "$sel_value" --index "$sel_index")" ;;
+    esac
+    if [ -z "$mac" ]; then
+      fail "selector $sel_kind=$sel_value did not match any NIC"
+      info "check 'ip -br link' output and update cpuIsolation.nic.selector in $hc"
+      return
+    fi
+    pass "selector $sel_kind=$sel_value resolves to MAC $mac"
   else
-    fail "setup_ethercat_interface.sh failed"
-    info "check the selector resolves to a real adapter, or rerun the"
-    info "script standalone for the interactive picker:"
-    info "  sudo $ECAT_INTERFACE_SCRIPT --iface $iface"
+    if [ ! -t 0 ] || [ ! -t 2 ]; then
+      fail "no cpuIsolation.nic.selector and shell is not interactive"
+      info "add a selector (mac/pci/driver+index) to $hc, or rerun on a TTY"
+      return
+    fi
+    if ! mac="$(nic_resolve_target_mac_interactive "$iface")" || [ -z "$mac" ]; then
+      fail "operator did not pick a NIC"
+      return
+    fi
+    pass "operator picked MAC $mac via interactive picker"
+    # Persist the choice as cpuIsolation.nic.selector.mac so the next
+    # run is non-interactive.
+    if _ecat_persist_selector_mac "$hc" "$ci_json" "$mac"; then
+      pass "persisted selector.mac=$mac to $hc"
+    else
+      info "could not persist selector — next bootstrap will re-prompt"
+    fi
+  fi
+
+  # --- Step 2: idempotency guard ---------------------------------------
+  if nic_already_named "$iface" "$mac" && nic_udev_rule_present "$iface" "$mac"; then
+    pass "iface $iface already named for MAC $mac and udev rule binds it — no-op"
+    return
+  fi
+
+  # --- Step 3: write rule ----------------------------------------------
+  note "writing udev rule binding $iface -> $mac..."
+  if ! nic_write_udev_rule "$iface" "$mac"; then
+    fail "could not write /etc/udev/rules.d/70-ecat.rules"
+    return
+  fi
+  pass "udev rule installed"
+
+  # --- Step 4: apply --------------------------------------------------
+  note "applying udev rule (reload+trigger, waiting for $iface)..."
+  if nic_apply_udev "$iface"; then
+    pass "iface $iface up"
+  else
+    fail "iface $iface did not appear within 10s"
+    info "check 'ip -br link' for the actual name and 'journalctl -u systemd-udevd' for errors"
     return
   fi
 }
 
-# Build CLI flags from cpuIsolation.nic.selector. Echoes the flags
-# (or empty string) on stdout. The caller passes them unquoted to the
-# vendored script so the empty case becomes a no-op.
-_ecat_selector_args() {
-  python3 - "$1" <<'PY' 2>/dev/null || true
-import json, shlex, sys
+# Echo three space-separated tokens to stdout: <kind> <value> <index>.
+# kind is one of {mac, pci, driver} or empty when no selector is set.
+# index is empty unless kind=driver. Used by ecat_interface to dispatch
+# to the right nic_resolve_target_mac flag combination.
+_ecat_selector_fields() {
+  python3 - "$1" <<'PY' 2>/dev/null || echo ""
+import json, sys
 data = json.loads(sys.argv[1] or "{}")
 sel = ((data.get("nic") or {}).get("selector") or {})
-parts = []
 if sel.get("mac"):
-    parts.extend(["--mac", sel["mac"]])
+    print(f"mac {sel['mac']} ")
 elif sel.get("pci"):
-    parts.extend(["--pci", sel["pci"]])
+    print(f"pci {sel['pci']} ")
 elif sel.get("driver"):
-    parts.extend(["--driver", sel["driver"], "--index", str(sel.get("index", 0))])
-print(" ".join(shlex.quote(p) for p in parts))
+    print(f"driver {sel['driver']} {sel.get('index', 0)}")
+else:
+    print("")
 PY
+}
+
+# Splice cpuIsolation.nic.selector.mac into host-config.yaml after the
+# operator picks a NIC interactively. Replaces any existing selector
+# block. Returns 0 on success.
+_ecat_persist_selector_mac() {
+  local hc="$1" ci_json="$2" mac="$3"
+  local merged
+  merged="$(python3 - "$ci_json" "$mac" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1] or "{}")
+nic = d.get("nic") or {}
+nic["selector"] = {"mac": sys.argv[2]}
+d["nic"] = nic
+print(json.dumps(d))
+PY
+)"
+  _cpu_isolation_persist "$hc" "$merged"
 }
 
 # ---- phase 8: cpu-isolation (gates phase 9) --------------------------
@@ -1814,28 +1875,23 @@ install_dma_ethercat() {
     ethercat_die "no host-config.yaml — first bringup needs the wizard or --host-config"
   fi
 
-  local tag
-  tag="$(python3 - "$hc" <<'PY' 2>/dev/null
-import sys, yaml
-try:
-    cfg = yaml.safe_load(open(sys.argv[1])) or {}
-except Exception:
-    sys.exit(0)
-for entry in (cfg.get("images") or []):
-    if isinstance(entry, dict) and entry.get("name") == "foundationbot/dma-ethercat":
-        print(entry.get("newTag", ""))
-        break
-PY
-)"
-  if [ -z "$tag" ]; then
-    fail "host-config.yaml has no images entry for foundationbot/dma-ethercat"
-    ethercat_die "add 'foundationbot/dma-ethercat' to host-config.yaml's images: list (e.g. newTag: main-latest-aarch64) and re-run"
+  # Resolve the full image ref via the new container-keyed schema.
+  # Operators write `images.dma-ethercat.image: <repo:tag>`; we plug
+  # the whole thing into the Job template (replacing the
+  # `foundationbot/dma-ethercat:PLACEHOLDER` placeholder), so swapping
+  # to a private registry just works.
+  local image_ref
+  image_ref="$(python3 "$HOST_CONFIG_HELPER" "$hc" \
+                 get-image-for-container dma-ethercat 2>/dev/null || true)"
+  if [ -z "$image_ref" ]; then
+    fail "host-config.yaml has no images.dma-ethercat.image entry"
+    ethercat_die "add 'images.dma-ethercat.image: foundationbot/dma-ethercat:<tag>' to host-config.yaml and re-run"
   fi
-  pass "resolved dma-ethercat tag: $tag"
+  pass "resolved dma-ethercat image: $image_ref"
 
   # Render the Job manifest (sed-substitute PLACEHOLDER -> tag).
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  render $DMA_ETHERCAT_TEMPLATE -> $DMA_ETHERCAT_RENDERED  (tag=$tag)"
+    info "DRY-RUN  render $DMA_ETHERCAT_TEMPLATE -> $DMA_ETHERCAT_RENDERED  (image=$image_ref)"
     info "DRY-RUN  kubectl create ns phantom (if missing)"
     info "DRY-RUN  kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
@@ -1847,7 +1903,7 @@ PY
   fi
 
   mkdir -p "$(dirname "$DMA_ETHERCAT_RENDERED")"
-  sed -e "s#foundationbot/dma-ethercat:PLACEHOLDER#foundationbot/dma-ethercat:$tag#" \
+  sed -e "s#foundationbot/dma-ethercat:PLACEHOLDER#$image_ref#" \
     "$DMA_ETHERCAT_TEMPLATE" > "$DMA_ETHERCAT_RENDERED"
   chmod 0644 "$DMA_ETHERCAT_RENDERED"
   pass "rendered $DMA_ETHERCAT_RENDERED"

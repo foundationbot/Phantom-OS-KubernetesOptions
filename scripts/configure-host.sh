@@ -268,17 +268,27 @@ for name in ("core", "operator"):
         print(f"stack\t{name}\tselfHeal\t{'true' if spec['selfHeal'] else 'false'}")
 PY
 )
-  # Pull the images: block out by chopping everything before the
-  # first 'images:' line. Crude but adequate — seed files come from
-  # this repo or were last written by us.
-  # Pull the images: block — start at 'images:' line, stop at the
-  # next top-level key (anything matching ^[a-zA-Z] that isn't
-  # 'images:' itself).
-  seed_images_yaml="$(awk '
-    /^images:/         { flag=1; print; next }
-    flag && /^[a-zA-Z]/{ exit }
-    flag               { print }
-  ' "$seed_path" || true)"
+  # Pull the images: block. The schema is now container-keyed
+  # (images.<container>.image: <ref:tag>); seed harvest reads the
+  # YAML rather than line-grepping so we tolerate either ordering or
+  # comments.
+  seed_images_yaml=""
+  while IFS=$'\t' read -r cname img; do
+    [ -z "$cname" ] && continue
+    seed_images_yaml+="${cname}"$'\t'"${img}"$'\n'
+  done < <(python3 - "$seed_path" <<'PY'
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(0)
+images = cfg.get("images")
+if isinstance(images, dict):
+    for cname, spec in images.items():
+        if isinstance(spec, dict) and spec.get("image"):
+            print(f"{cname}\t{spec['image']}")
+PY
+)
 
   # deployments harvest. Reads the new schema (`deployments.<name>.mounts`)
   # and falls back to the old schema (`devMode.<name>.{source,mounts}`)
@@ -523,19 +533,22 @@ if [ "$operator_enabled" = "true" ]; then
 fi
 
 # --- images ---
-heading "image tag overrides"
-hint "Per-host kustomize.images entries injected into the live Argo Application."
-hint "These override anything in manifests/stacks/<stack>/ image references."
-hint "Skip this section to leave overlay defaults in effect."
+heading "image overrides"
+hint "Per-host image overrides. Each line names a known container and"
+hint "supplies the full image ref (repo:tag) it should run on this robot."
+hint "Skip this section to leave manifest defaults in effect."
 
 inject_images=1
 if [ -z "$seed_images_yaml" ]; then
-  if ! confirm "Add image tag overrides? (recommended for production robots)" "y"; then
+  if ! confirm "Add image overrides? (recommended for production robots)" "y"; then
     inject_images=0
   fi
 else
   hint "Defaults from seed:"
-  printf '%s%s%s\n' "$C_DIM" "$(printf '%s\n' "$seed_images_yaml" | sed 's/^/    /')" "$C_RESET" >&2
+  while IFS=$'\t' read -r cname img; do
+    [ -z "$cname" ] && continue
+    printf '%s    %s -> %s%s\n' "$C_DIM" "$cname" "$img" "$C_RESET" >&2
+  done <<< "$seed_images_yaml"
   if ! confirm "Use these as the starting point?" "y"; then
     if ! confirm "Skip image overrides entirely?" "n"; then
       die "aborted — re-run and accept defaults or pick --from-template <robot>"
@@ -544,75 +557,72 @@ else
   fi
 fi
 
-# Image entries to write. We collect them as parallel arrays
-# (name + tag) and emit at the end. The seed images go in first, then
-# the operator can edit each one.
-img_names=()
-img_tags=()
+# Container-keyed image entries: parallel arrays (container, image-ref).
+# Emitted as `images: { <container>: { image: <ref> } }` at the end.
+img_containers=()
+img_refs=()
 
 if [ "$inject_images" = 1 ]; then
-  # Parse seed images into the arrays.
+  # Parse seed entries (one TSV line per container) into arrays.
   if [ -n "$seed_images_yaml" ]; then
-    while IFS= read -r line; do
-      # accept lines like "  - name: foo" / "    newTag: bar"
-      case "$line" in
-        *"- name:"*)
-          img_names+=("${line#*- name:}")
-          img_names[-1]="$(printf '%s' "${img_names[-1]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-          img_tags+=("")
-          ;;
-        *newTag:*)
-          if [ "${#img_tags[@]}" -gt 0 ]; then
-            tag="${line#*newTag:}"
-            tag="$(printf '%s' "$tag" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-            img_tags[$((${#img_tags[@]}-1))]="$tag"
-          fi
-          ;;
-      esac
+    while IFS=$'\t' read -r cname img; do
+      [ -z "$cname" ] && continue
+      img_containers+=("$cname")
+      img_refs+=("$img")
     done <<< "$seed_images_yaml"
   fi
 
-  # Canonical fleet image set with sensible default tags. Schema-evolution
-  # safe: any new entry here is automatically offered to existing
-  # host-configs as a missing-from-seed prompt, so adding an image to
-  # the fleet doesn't require operators to hand-edit their host-config.
-  declare -a canonical_names=(
+  # Canonical fleet container set + default repo (without tag). Each
+  # entry in CONTAINER_TARGETS gets a row here so adding a workload
+  # is a single-line change. Tag defaults are held in
+  # canonical_default_tags; the operator can override the whole
+  # ref (repo + tag) at the prompt.
+  declare -a canonical_containers=(
+    "positronic-control"
+    "phantom-models"
+    "operator-ui"
+    "dma-ethercat"
+  )
+  declare -a canonical_default_repos=(
     "localhost:5443/positronic-control"
     "localhost:5443/phantom-models"
     "foundationbot/argus.operator-ui"
     "foundationbot/dma-ethercat"
   )
   declare -a canonical_default_tags=(
-    ""
-    ""
-    ""
+    "REPLACE-WITH-LOCAL-BUILD-TAG"
+    "REPLACE-WITH-MODEL-BUILD-DATE"
+    "REPLACE-WITH-OPERATOR-UI-COMMIT-SHA"
     "main-latest-aarch64"
   )
 
-  # Append any canonical name missing from the seed. Existing seed
-  # entries (and their values) are preserved; missing ones get the
-  # canonical default tag so the operator can press enter to accept.
-  for c_i in "${!canonical_names[@]}"; do
-    c_name="${canonical_names[$c_i]}"
+  # Append any canonical container missing from the seed. Existing
+  # seed entries are preserved as-is; missing ones get the canonical
+  # default ref so the operator can press enter to accept.
+  for c_i in "${!canonical_containers[@]}"; do
+    c_name="${canonical_containers[$c_i]}"
     found=0
-    for i in "${!img_names[@]}"; do
-      if [ "${img_names[$i]}" = "$c_name" ]; then found=1; break; fi
+    for i in "${!img_containers[@]}"; do
+      if [ "${img_containers[$i]}" = "$c_name" ]; then found=1; break; fi
     done
     if [ "$found" = 0 ]; then
-      img_names+=("$c_name")
-      img_tags+=("${canonical_default_tags[$c_i]}")
+      img_containers+=("$c_name")
+      img_refs+=("${canonical_default_repos[$c_i]}:${canonical_default_tags[$c_i]}")
     fi
   done
 
   echo
-  hint "Press enter to keep each tag, or type a new value."
-  example "0.2.44-production-cu130 (positronic-control)"
-  example "2026-04-30 (phantom-models — date-stamped)"
-  example "585e58803318f5366d793986ad3e6129538b8a81 (operator-ui — git SHA)"
-  example "main-latest-aarch64 (dma-ethercat — host arch matters)"
-  for i in "${!img_names[@]}"; do
-    new_tag="$(ask "${img_names[$i]} tag" "${img_tags[$i]}" "Tag this robot should pull. Empty to skip this image.")"
-    img_tags[$i]="$new_tag"
+  hint "Press enter to keep, or type a new image ref (repo:tag)."
+  hint "Swapping repos is fine — bootstrap renames+retags in one step."
+  example "localhost:5443/positronic-control:0.2.44-production-cu130"
+  example "foundationbot/phantom-cuda:0.2.46-dev.1-production-cu130 (swap repo)"
+  example "localhost:5443/phantom-models:2026-04-30                  (date-stamped)"
+  example "foundationbot/argus.operator-ui:<git-sha>"
+  example "foundationbot/dma-ethercat:main-latest-aarch64            (arm64)"
+  example "foundationbot/dma-ethercat:main-latest-amd64              (x86)"
+  for i in "${!img_containers[@]}"; do
+    new_ref="$(ask "${img_containers[$i]} image" "${img_refs[$i]}" "Full image ref (repo:tag). Empty to skip this container.")"
+    img_refs[$i]="$new_ref"
   done
 fi
 
@@ -829,17 +839,17 @@ tmp="$(mktemp)"
   fi
 
   if [ "$inject_images" = 1 ]; then
-    # Count non-empty tags so we don't emit an empty `images:` header.
+    # Count non-empty refs so we don't emit an empty `images:` header.
     nonempty=0
-    for i in "${!img_names[@]}"; do
-      [ -n "${img_tags[$i]}" ] && nonempty=$((nonempty + 1))
+    for i in "${!img_containers[@]}"; do
+      [ -n "${img_refs[$i]}" ] && nonempty=$((nonempty + 1))
     done
     if [ "$nonempty" -gt 0 ]; then
       printf 'images:\n'
-      for i in "${!img_names[@]}"; do
-        [ -z "${img_tags[$i]}" ] && continue
-        printf '  - name: %s\n' "${img_names[$i]}"
-        printf '    newTag: %s\n' "${img_tags[$i]}"
+      for i in "${!img_containers[@]}"; do
+        [ -z "${img_refs[$i]}" ] && continue
+        printf '  %s:\n' "${img_containers[$i]}"
+        printf '    image: %s\n' "${img_refs[$i]}"
       done
     fi
   fi
