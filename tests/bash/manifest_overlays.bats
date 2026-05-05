@@ -28,14 +28,24 @@ setup() { setup_common; }
   ! echo "$out" | grep -qE '^\s+kind: User\s*$'
   ! echo "$out" | grep -qE '^\s+kind: Group\s*$'
   # Every expected component SA must appear exactly once.
+  # dex-server is excluded: dex.enabled=false in terraform/main.tf (T2).
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-server\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-repo-server\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-application-controller\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-applicationset-controller\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-notifications-controller\s*$')" -eq 1 ]
-  [ "$(echo "$out" | grep -cE '^\s+name: argocd-dex-server\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-redis-secret-init\s*$')" -eq 1 ]
   [ "$(echo "$out" | grep -cE '^\s+name: argocd-commit-server\s*$')" -eq 1 ]
+  # argocd-dex-server must NOT appear (Dex is disabled).
+  ! echo "$out" | grep -qE '^\s+name: argocd-dex-server\s*$'
+}
+
+@test "argocd-secret-rbac is the only path to Secrets in argocd ns (no overlay-side ClusterRole)" {
+  out="$(kustomize build "$REPO_ROOT/manifests/base/argocd-secret-rbac")"
+  # The overlay must NOT contain a ClusterRole or ClusterRoleBinding —
+  # all Secret-read access must be namespace-scoped.
+  ! echo "$out" | grep -qE '^kind: ClusterRole$'
+  ! echo "$out" | grep -qE '^kind: ClusterRoleBinding$'
 }
 
 @test "argocd-rbac overlay declares operator and fleet-operator accounts" {

@@ -43,12 +43,43 @@ resource "helm_release" "argocd" {
   version    = var.argocd_chart_version
 
   values = [yamlencode({
+    # Disable chart-rendered cluster-wide ClusterRoles so they don't grant a
+    # parallel Secret-read path that bypasses our namespace-scoped
+    # argocd-secret-rbac/ overlay (Role + RoleBinding). Verified key name
+    # against chart 7.6.12 values.yaml.
+    # NOTE: server.clusterAdminAccess does NOT exist in 7.6.12; the correct
+    # top-level key is createClusterRoles.
+    # TODO: verify whether createClusterRoles: false still allows ArgoCD to
+    # manage workloads in the same cluster (may require manual ClusterRole for
+    # application controller). For now this is set intentionally to prevent
+    # cluster-wide Secret reads; adjust if in-cluster app management breaks.
+    createClusterRoles = false
+
     server = {
       service = {
         type          = "NodePort"
         nodePortHttp  = var.argocd_http_nodeport
         nodePortHttps = var.argocd_https_nodeport
       }
+    }
+
+    # Disable Dex — login goes through ArgoCD's built-in user store
+    # (admin/operator/fleet-operator). Disabling drops the chart-installed
+    # argocd-dex-server SA + its Secret-reading Role.
+    # Key verified against chart 7.6.12 values.yaml.
+    dex = {
+      enabled = false
+    }
+
+    # redisSecretInit generates the argocd-redis secret used by the in-cluster
+    # Redis StatefulSet. The chart README states: "If disabled, secret must be
+    # provisioned by alternative methods." We have no alternative provisioner,
+    # so we leave this ENABLED to avoid breaking in-cluster Redis.
+    # Key redisSecretInit.enabled verified against chart 7.6.12 values.yaml.
+    # If a future operator adds secret management, set enabled = false and
+    # remove argocd-redis-secret-init from the RoleBinding subjects list.
+    redisSecretInit = {
+      enabled = true
     }
   })]
 

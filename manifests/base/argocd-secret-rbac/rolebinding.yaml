@@ -1,7 +1,21 @@
 # Subject names follow the argo-cd Helm chart fullname pattern <release>-<component>
-# (release name "argocd"). Verified against chart versions 5.x through 7.x.
-# Do NOT modify terraform/variables.tf to pin the chart here; that is a separate
-# operations concern.
+# (release name "argocd"). Verified against chart version 7.6.12 (pinned in
+# terraform/variables.tf as argocd_chart_version).
+#
+# Components included / excluded:
+#   INCLUDED: argocd-server, argocd-repo-server, argocd-application-controller,
+#             argocd-applicationset-controller, argocd-notifications-controller,
+#             argocd-redis-secret-init (redisSecretInit.enabled=true; keeps the
+#             in-cluster Redis secret-init Job functional),
+#             argocd-commit-server (present in 7.x; no-op when chart disables it).
+#   EXCLUDED: argocd-dex-server (dex.enabled=false in terraform/main.tf; SA is
+#             not created by the chart when Dex is disabled).
+#
+# This overlay is now the ONLY RBAC path that grants secrets get/list/watch
+# in the argocd namespace. The chart's cluster-wide ClusterRoles are disabled
+# via createClusterRoles=false in terraform/main.tf (T2 follow-up, RFC 0002).
+# If a future chart version adds or removes a component SA, update this list
+# and the bats test in tests/bash/manifest_overlays.bats.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -11,12 +25,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: argocd-secret-reader
-# This list mirrors the argo-cd Helm chart's component ServiceAccounts for
-# release name "argocd". The overlay is ADDITIVE to chart-rendered RBAC —
-# chart-installed ClusterRoles may also grant Secret access, and tightening
-# to "this is the only path" is a separate follow-up tracked in RFC 0002.
-# If a future chart version adds or removes a component SA, update this list
-# and the bats test in tests/bash/manifest_overlays.bats.
 subjects:
   - kind: ServiceAccount
     name: argocd-server
@@ -33,11 +41,7 @@ subjects:
   - kind: ServiceAccount
     name: argocd-notifications-controller
     namespace: argocd
-  # dex-server: enabled by default when dex is used for SSO.
-  - kind: ServiceAccount
-    name: argocd-dex-server
-    namespace: argocd
-  # redis-secret-init: runs when in-cluster Redis is used (default).
+  # redis-secret-init: runs when in-cluster Redis is used (redisSecretInit.enabled=true).
   - kind: ServiceAccount
     name: argocd-redis-secret-init
     namespace: argocd
