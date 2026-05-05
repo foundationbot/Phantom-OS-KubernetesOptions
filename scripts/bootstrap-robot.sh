@@ -1351,6 +1351,25 @@ EOF
     info "removed stale $kubelet_state (kubelet recreates on start)"
   fi
 
+  # Defensive: orphan top-level /sys/fs/cgroup/kubepods from a previous
+  # k0s install with the legacy (cgroupRoot-unset) layout. After we
+  # change kubelet's cgroupRoot to /k8s.slice, kubelet creates kubepods
+  # under the slice and stops touching the top-level path. The old dir
+  # has no tasks but its skeleton (besteffort/, burstable/ subdirs)
+  # claims cpus 0-13 and conflicts with cpuIsolation partitions on
+  # apply. Best-effort delete; rmdir fails if non-empty (we leave it
+  # to manage_cpusets MANAGED_SLICES shrink in that case).
+  if [ -d /sys/fs/cgroup/kubepods ] && \
+     [ ! -s /sys/fs/cgroup/kubepods/cgroup.procs ]; then
+    # No tasks. Try to remove the (empty) qos children first.
+    for sub in besteffort burstable; do
+      rmdir "/sys/fs/cgroup/kubepods/$sub" 2>/dev/null || true
+    done
+    if rmdir /sys/fs/cgroup/kubepods 2>/dev/null; then
+      info "removed orphan /sys/fs/cgroup/kubepods (legacy top-level layout)"
+    fi
+  fi
+
   # If k0s is already running, warn the operator. Reconfiguring slice
   # placement on a running k0s requires a full reset+reinstall (verified
   # in RFC 0003 findings, experiment 2). Bootstrap doesn't do this
