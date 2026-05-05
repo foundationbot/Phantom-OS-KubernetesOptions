@@ -57,7 +57,14 @@ APPLY_WRAPPER="/usr/local/sbin/apply-cpusets"
 # Slices whose cpuset.cpus must be shrunk before an isolated partition can
 # activate. Any slice not in this list that still claims one of the target
 # CPUs will cause the partition to go "isolated invalid".
-MANAGED_SLICES=(system.slice user.slice init.scope docker.slice)
+#
+# Phantom-OS local addition: `kubepods` and `kubepods.slice` cover the
+# kubelet root cgroup. k0s/kubelet creates one of these (path varies by
+# cgroup driver — `kubepods` for cgroupfs, `kubepods.slice` for
+# systemd) at startup covering all CPUs, blocking partition activation.
+# We list both so either layout is shrunk safely; the directory check
+# in shrink_sibling_slices() makes a missing entry a no-op.
+MANAGED_SLICES=(system.slice user.slice init.scope docker.slice kubepods kubepods.slice)
 
 # Minimum number of CPUs to keep un-isolated (safety floor).
 HOUSEKEEPING_FLOOR=2

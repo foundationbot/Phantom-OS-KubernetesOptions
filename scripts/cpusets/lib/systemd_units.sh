@@ -280,13 +280,17 @@ exec "$install_dir/manage_cpusets.sh" apply "$etc_config" --yes "\$@"
 WRAPPER_EOF
     $SUDO chmod +x "$wrapper_path"
 
-    # Ordering: run before docker/user sessions claim CPUs.
+    # Ordering: run before docker/user sessions and the k0s kubelet
+    # claim CPUs. Phantom-OS local addition: k0scontroller.service /
+    # k0sworker.service create the kubepods cgroup covering all CPUs
+    # at startup, which blocks partition activation if not ordered
+    # after cpusets.service.
     $SUDO tee "$service_path" > /dev/null <<SERVICE_EOF
 [Unit]
 Description=cpuset partition activation
 DefaultDependencies=no
 After=local-fs.target
-Before=docker.service user@.service multi-user.target systemd-logind.service
+Before=docker.service user@.service multi-user.target systemd-logind.service k0scontroller.service k0sworker.service
 
 [Service]
 Type=oneshot

@@ -417,6 +417,31 @@ debugging another phase). To turn it off persistently, set
 `cpuIsolation.enabled: false` (or omit the block entirely) in
 `host-config.yaml`.
 
+### Interaction with k0s/kubelet
+
+k0s starts kubelet which creates a `kubepods` (cgroupfs) or
+`kubepods.slice` (systemd) cgroup covering every CPU at startup.
+Without ordering, this cgroup claims the cores you want isolated and
+the partition fails to activate (`isolated invalid (Cpu list in
+cpuset.cpus not exclusive)`).
+
+Phase 8 handles this two ways:
+
+- The vendored `manage_cpusets.sh` lists `kubepods` and
+  `kubepods.slice` in `MANAGED_SLICES`, so its runtime shrink step
+  trims kubelet's root cgroup to the housekeeping cores before
+  activating the partition.
+- The installed `cpusets.service` is ordered
+  `Before=k0scontroller.service k0sworker.service` so on every
+  subsequent reboot, partitions activate before kubelet starts and
+  kubepods is created with isolation already in place.
+
+If you bootstrap with `migrateCmdline: false` and a stale
+`isolcpus=10-13` is still on the kernel cmdline, the cpuset partition
+still works but the legacy mechanism is redundant — you cannot
+dynamically release the cores. Set `migrateCmdline: true` once on
+production robots to clean it up; reboot is required.
+
 ### Re-runs
 
 Phase 8 is idempotent. The vendored `manage_cpusets.sh apply` skips
