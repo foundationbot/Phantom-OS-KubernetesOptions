@@ -89,6 +89,42 @@ run helper threads and IRQ handlers that need ticks for softirq
 processing). `irqaffinity=0` corrals all default IRQs onto cpu 0,
 keeping the k8s pool (1-10) quiet.
 
+#### Kernel-config caveat (Jetson Thor / stock L4T)
+
+L4T 36.x ships the Thor kernel with `CONFIG_NO_HZ_FULL` and
+`CONFIG_RCU_NOCB_CPU` **not set** (HZ=250, NO_HZ_IDLE only). On this
+kernel:
+
+| Token | Effective on stock L4T? |
+|---|---|
+| `isolcpus=11-13` | ✅ yes (`CONFIG_CPU_ISOLATION=y`) |
+| `irqaffinity=0` | ✅ yes (always supported) |
+| `skew_tick=1` | ✅ yes |
+| `nohz_full=11` | ❌ **silently ignored** — no warning, parser not compiled in |
+| `rcu_nocbs=11-13` | ❌ silently ignored |
+| `rcu_nocb_poll` | ❌ silently ignored |
+
+The cyclic loop core (cpu 11) will still receive the 250 Hz scheduler
+tick and RCU callbacks. Bootstrap writes all six tokens anyway: the
+ignored ones are harmless dead text today and become live the moment
+someone rebuilds L4T with the matching configs. Documenting them on
+the cmdline keeps the operator-visible config consistent with the
+intent.
+
+Acontis published EtherCAT-on-Jetson-Thor measurements
+([Thor meets EtherCAT](https://www.acontis.com/en/thor-meets-ethercat-acontis-ec-master-on-nvidia-jetson-agx-thor.html)):
+stock L4T + no tuning ≈ ±330 µs jitter at 1 ms cycle; **RT kernel +
+`isolcpus` alone (no `nohz_full`)** ≈ ±125 µs. Sub-10 µs requires
+kernel-bypass NIC drivers, not finer cmdline tuning. So `isolcpus`
+provides the bulk of the win on this kernel; `nohz_full`/`rcu_nocbs`
+are diminishing returns gated on a kernel rebuild.
+
+These knobs are **kernel-cmdline only** — there is no sysfs/sysctl
+runtime equivalent for `nohz_full`, `rcu_nocbs`, `rcu_nocb_poll`,
+`skew_tick`, or `isolcpus`. Setting them in systemd unit files would
+have no effect; the cmdline (extlinux.conf / GRUB) is the only
+configuration surface.
+
 ### systemd CPUAffinity drop-in
 
 ```ini
@@ -292,4 +328,12 @@ partition approach:
   existing function with an `ensure` mode.
 - Write a small post-reboot verification script (`positronic.sh
   cpu-isolation status` or similar) that checks `/proc/cmdline`,
-  CPUAffinity, IRQ pins, governor.
+  `/sys/devices/system/cpu/{isolated,nohz_full}`, `CPUAffinity`,
+  IRQ pins, governor, and the LOC line in `/proc/interrupts` (250 Hz
+  ticks should *not* appear on `dmaRtCpu` once NO_HZ_FULL is live).
+  On stock L4T, expect `isolated` to match partitions but `nohz_full`
+  to be empty — log as info, not error.
+- Evaluate rebuilding L4T with `CONFIG_NO_HZ_FULL=y` +
+  `CONFIG_RCU_NOCB_CPU=y` if measured jitter on the SOEM cyclic loop
+  exceeds the budget once `isolcpus`-only is in place. Acontis's
+  ±125 µs at 1 ms cycle is a useful reference baseline.
