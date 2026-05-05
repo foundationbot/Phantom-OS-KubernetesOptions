@@ -642,7 +642,12 @@ check_kernel_params() {
 # isolated cores are a common source of jitter on Jetson.
 lock_isolated_core_governors() {
     local isolated_list c governor_file applied=0 skipped=0
-    isolated_list=$(expand_cpu_range "$(detect_isolated_cores)")
+    # detect_all_isolated_cores includes both cmdline-isolated and
+    # cgroup-partitioned cpus. After migrate-cmdline removes
+    # isolcpus=, only cgroup partitions remain — the bare
+    # detect_isolated_cores would return empty and we'd silently
+    # skip the governor lock.
+    isolated_list=$(expand_cpu_range "$(detect_all_isolated_cores)")
 
     if [[ -z "$isolated_list" ]]; then
         echo -e "${YELLOW}  No isolated cores — skipping governor lock.${NC}"

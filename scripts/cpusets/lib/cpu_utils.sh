@@ -291,6 +291,21 @@ compute_housekeeping_list() {
     cpu_list_diff "$present" "$combined"
 }
 
+# Union of "isolation"-flavored cpus on this host:
+#   - kernel cmdline isolated cpus (legacy isolcpus=)
+#   - cgroup v2 cpuset-partitioned cpus (this tool's mechanism)
+# Use this whenever the caller's intent is "every cpu the operator
+# wants kept off general-purpose work" — governor lock, workqueue
+# restriction, IRQ affinity defaults. Bare detect_isolated_cores
+# only sees the kernel cmdline view and is the wrong source after
+# migrate-cmdline removes isolcpus= in favour of cgroup partitions.
+detect_all_isolated_cores() {
+    local cmdline managed
+    cmdline=$(detect_isolated_cores)
+    managed=$(_read_state_managed_cpus)
+    cpu_list_union "$cmdline" "$managed"
+}
+
 # Read the union of cpus from the manage_cpusets state file, or
 # empty when the file is absent / unreadable. State file format is
 # 'name|cpus|<extra-fields>' (extra fields like creation timestamp
