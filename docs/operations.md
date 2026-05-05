@@ -379,7 +379,7 @@ run `--gitops` instead.
 
 ### 3.8 Bump dma-ethercat installer image
 
-The bare-metal `dma-ethercat` service is installed by phase 8 from a
+The bare-metal `dma-ethercat` service is installed by phase 9 from a
 `.deb` baked into the `foundationbot/dma-ethercat` container image. To
 roll a new version of the realtime stack:
 
@@ -425,14 +425,15 @@ rotation runbook. Short version: re-`docker login`, then re-run
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
 | 6. operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
-| 7. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | activate cpuset partitions, install `cpusets.service`, write systemd `CPUAffinity` drop-in, optionally pin EtherCAT NIC IRQs and migrate kernel cmdline. **Gates phase 8.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. |
-| 8. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the .deb, enable + start `dma-ethercat.service`. **Gates phase 9.** |
-| 9. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
-| 10. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
-| 11. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
-| 12. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
-| 13. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
-| 14. validate | `--validate` | `scripts/validate-local-registry.sh` |
+| 7. ecat-interface | `--ecat-interface` (default-on; `--skip-ecat-interface` to opt out) | resolve the EtherCAT NIC adapter and rename it to `cpuIsolation.nic.iface` via persistent udev rules. Driven by `cpuIsolation.nic.selector` (mac/pci/driver+index); falls back to the vendored interactive picker on a TTY. **Gates phase 8.** |
+| 8. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | activate cpuset partitions, install `cpusets.service`, write systemd `CPUAffinity` drop-in, optionally pin EtherCAT NIC IRQs and migrate kernel cmdline. **Gates phase 9.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. |
+| 9. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the .deb, enable + start `dma-ethercat.service`. **Gates phase 10.** |
+| 10. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
+| 11. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
+| 12. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
+| 13. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
+| 14. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
+| 15. validate | `--validate` | `scripts/validate-local-registry.sh` |
 
 With **no** `--<phase>` flag, every phase runs (full bootstrap).
 With **one or more** `--<phase>` flags, only those phases run
@@ -871,7 +872,7 @@ sudo bash scripts/bootstrap-robot.sh --host --skip-nvidia
 
 ### 7.15 dma-ethercat installer Job stuck or service won't start
 
-Phase 8 (`--install-dma-ethercat`) gates phase 9 (gitops): a failure
+Phase 9 (`--install-dma-ethercat`) gates phase 10 (gitops): a failure
 halts the bootstrap with a `DMA-ETHERCAT FAILURE` banner. Diagnose by
 sub-step.
 

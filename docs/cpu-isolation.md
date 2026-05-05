@@ -12,13 +12,13 @@ internals, verification phases). This file is the runbook.
 >
 > - **Hands-on (this runbook):** invoke `scripts/cpusets/manage_cpusets.sh`
 >   directly. Covers debugging, exploration, and one-off changes.
-> - **Bootstrap-driven (default-on):** `bootstrap-robot.sh` phase 7
+> - **Bootstrap-driven (default-on):** `bootstrap-robot.sh` phase 8
 >   (cpu-isolation) prompts the operator on first bringup if no
 >   `cpuIsolation:` block exists in `/etc/phantomos/host-config.yaml`,
 >   persists the answers, and drives every subcommand non-interactively
 >   on subsequent runs. See
 >   [the Bootstrap-driven setup](#bootstrap-driven-setup) section near
->   the end of this file. Phase 7 gates phase 8 (install dma-ethercat)
+>   the end of this file. Phase 8 gates phase 9 (install dma-ethercat)
 >   so the .deb's systemd unit comes up with the partition already active.
 
 ---
@@ -331,9 +331,9 @@ file under `/etc/systemd/system/`).
 
 ## Bootstrap-driven setup
 
-`bootstrap-robot.sh` phase 7 (`cpu-isolation`) drives every subcommand
+`bootstrap-robot.sh` phase 8 (`cpu-isolation`) drives every subcommand
 above non-interactively, reading `cpuIsolation:` from
-`/etc/phantomos/host-config.yaml`. Phase 7 gates phase 8
+`/etc/phantomos/host-config.yaml`. Phase 8 gates phase 9
 (`install-dma-ethercat`) so the .deb's `dma-ethercat.service` unit is
 started with the partition already active.
 
@@ -354,10 +354,22 @@ cpuIsolation:
   nic:                          # optional — only when this host pins a NIC
     iface: ecat0
     irqCore: 12                 # NIC IRQs / NAPI / softirq handling
+    selector:                   # optional — drives phase 7 ecat-interface
+      mac: aa:bb:cc:dd:ee:ff    # OR pci: "0000:01:00.0"
+                                # OR {driver: igc, index: 0}
   dmaRtCpu: 11                  # SOEM cyclic loop (DMA_RT_CPU)
   installAffinityDefaults: true # default: true. Writes /etc/systemd/system.conf.d/cpuaffinity.conf.
   migrateCmdline: false         # default: false. DESTRUCTIVE on Jetson.
 ```
+
+`cpuIsolation.nic.selector` is consumed by **phase 7 (ecat-interface)**,
+which renames the NIC adapter to `nic.iface` via persistent udev rules
+(`/etc/udev/rules.d/70-ecat.rules`). On a TTY first bringup the
+operator can omit `selector` and let the vendored
+`setup_ethercat_interface.sh` drive its interactive picker; on
+re-runs and unattended bootstraps, fill in `selector` so the phase
+runs non-interactively. Phase 7 is idempotent: if `ip link show <iface>`
+already succeeds, it short-circuits without touching udev.
 
 The full schema (with validation rules) lives at
 [`host-config-templates/_template/host-config.yaml`](../host-config-templates/_template/host-config.yaml).
@@ -381,7 +393,7 @@ The legacy `nic.rtCore` field is still accepted (with a deprecation
 warning) and treated as `irqCore`. New configs should use the split
 fields.
 
-### What phase 7 does
+### What phase 8 does
 
 1. Validates cgroup v2 is mounted.
 2. Renders `/etc/cpusets.conf` from `cpuIsolation.partitions`.
@@ -407,7 +419,7 @@ debugging another phase). To turn it off persistently, set
 
 ### Re-runs
 
-Phase 7 is idempotent. The vendored `manage_cpusets.sh apply` skips
+Phase 8 is idempotent. The vendored `manage_cpusets.sh apply` skips
 already-active partitions whose CPUs match the config. Re-bootstrapping
 after editing `cpuIsolation.partitions` will tear down and recreate
 only the partitions whose CPUs changed.

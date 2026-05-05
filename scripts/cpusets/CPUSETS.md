@@ -15,9 +15,10 @@ v2).
 scripts/
 ├── lib/
 │   ├── cpu_utils.sh         # CPU list parsing, set ops, isolation detection
+│   ├── nic_discovery.sh     # NIC selector helpers (MAC / PCI / driver+index)
 │   ├── nic_rt.sh            # NIC detection, IRQ pinning, ethtool tuning
 │   └── systemd_units.sh     # Service + drop-in writers
-├── setup_ethercat_interface.sh   # (NOT vendored — see DMA.ethercat upstream)   # Interactive EtherCAT NIC setup
+├── setup_ethercat_interface.sh   # EtherCAT NIC adapter rename + setup
 └── manage_cpusets.sh              # cgroup v2 cpuset partition manager
 ```
 
@@ -42,7 +43,7 @@ For full isolation you need **all three** layers:
 | default process affinity | systemd-spawned services starting on isolated cores | `/etc/systemd/system.conf.d/cpuaffinity.conf` |
 | IRQ affinity | Interrupts landing on isolated cores | `irqaffinity=` cmdline + `/proc/irq/*/smp_affinity` |
 
-`manage_cpusets.sh` handles layers 1 and 2. `setup_ethercat_interface.sh   # (NOT vendored — see DMA.ethercat upstream)`
+`manage_cpusets.sh` handles layers 1 and 2. `setup_ethercat_interface.sh`
 handles layer 3 for a specific NIC.
 
 ## `manage_cpusets.sh` — cpuset partition manager
@@ -164,7 +165,7 @@ names the specific one still claiming the requested CPUs. This turns the
 opaque "isolated invalid (Non-exclusive cpuset)" error into
 "`docker.slice` claims `0-13` (overlap: `10-11`)".
 
-## `setup_ethercat_interface.sh   # (NOT vendored — see DMA.ethercat upstream)` — EtherCAT NIC setup
+## `setup_ethercat_interface.sh` — EtherCAT NIC setup (legacy notes)
 
 Same CLI as before. No behavioural changes for existing users beyond the
 following improvements (all via the extracted libraries):
@@ -338,3 +339,41 @@ Writers for all systemd files in the tree:
 - `systemd` (for service installation and affinity drop-in)
 - Optional: `networkd-dispatcher` (for NIC tuning persistence),
   `rt-tests` (for Phase 4 verification), `stress-ng` (same)
+
+---
+
+## `setup_ethercat_interface.sh` — EtherCAT NIC interface setup
+
+One-time-per-host script that resolves the EtherCAT NIC adapter and
+renames it to a stable kernel interface name (e.g. `ecat0`, `ecat1`)
+via persistent udev rules at `/etc/udev/rules.d/70-ecat.rules`. Once
+written, the rule survives every reboot — phase 7 of bootstrap and
+this script both fast-path when the iface already exists.
+
+### Subcommand matrix
+
+| Mode | Args | Behaviour |
+|---|---|---|
+| Interactive | none, on a TTY | Lists candidate NICs, prompts operator, writes rule |
+| Non-interactive (mac) | `--iface ecat0 --mac aa:bb:cc:dd:ee:ff --yes` | Selects by MAC; fails if no match or multiple |
+| Non-interactive (pci) | `--iface ecat0 --pci 0000:01:00.0 --yes` | Selects by PCI BDF |
+| Non-interactive (driver+index) | `--iface ecat0 --driver igc --index 0 --yes` | Selects by driver name + zero-based index in BDF order |
+| Non-TTY + no selector | (any) | Hard-fails with remediation message |
+
+Exactly one selector flag (`--mac`, `--pci`, or the `--driver`+`--index`
+pair) must be supplied in non-interactive mode. Multiple selectors are
+rejected.
+
+### Selector precedence
+
+When the host-config-driven bootstrap path runs this script, it builds
+the selector flags from `cpuIsolation.nic.selector` in
+`/etc/phantomos/host-config.yaml`. Validator rules:
+
+- Exactly one of `mac`, `pci`, or `{driver, index}` must be set.
+- `mac` matches `^([0-9a-f]{2}:){5}[0-9a-f]{2}$` (case-insensitive).
+- `pci` matches `^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]$`.
+- `driver` is non-empty; `index` is a non-negative integer.
+
+See [`docs/cpu-isolation.md`](../../docs/cpu-isolation.md#bootstrap-driven-setup)
+for the host-config schema and bootstrap integration.

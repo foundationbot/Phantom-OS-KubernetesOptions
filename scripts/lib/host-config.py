@@ -802,6 +802,67 @@ def cmd_validate(cfg: dict) -> int:
                     else:
                         irq_core = raw_irq
 
+                    # selector — optional sub-block driving the
+                    # one-time ecat-interface setup phase. Exactly one
+                    # of {mac, pci, {driver,index}} must be set when
+                    # the selector block is present.
+                    sel = nic.get("selector")
+                    if sel is not None:
+                        if not isinstance(sel, dict):
+                            errors.append("cpuIsolation.nic.selector: must be a mapping")
+                        else:
+                            keys_set = sum(
+                                1 for k in ("mac", "pci", "driver") if sel.get(k)
+                            )
+                            if keys_set != 1:
+                                errors.append(
+                                    "cpuIsolation.nic.selector: set exactly one "
+                                    "of mac, pci, or driver+index "
+                                    "(got " + str(keys_set) + ")"
+                                )
+                            mac = sel.get("mac")
+                            if mac is not None:
+                                if not isinstance(mac, str) or not _re.match(
+                                    r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", mac
+                                ):
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.mac: must be "
+                                        "aa:bb:cc:dd:ee:ff"
+                                    )
+                            pci = sel.get("pci")
+                            if pci is not None:
+                                if not isinstance(pci, str) or not _re.match(
+                                    r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:"
+                                    r"[0-9a-fA-F]{2}\.[0-9]$",
+                                    pci,
+                                ):
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.pci: must be "
+                                        "BDF format 0000:01:00.0"
+                                    )
+                            drv = sel.get("driver")
+                            if drv is not None:
+                                if not isinstance(drv, str) or not drv:
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.driver: "
+                                        "non-empty string required"
+                                    )
+                                idx = sel.get("index")
+                                if idx is None:
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.index: "
+                                        "required when driver is set"
+                                    )
+                                elif (
+                                    not isinstance(idx, int)
+                                    or isinstance(idx, bool)
+                                    or idx < 0
+                                ):
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.index: "
+                                        "must be a non-negative integer"
+                                    )
+
             # dmaRtCpu — top-level. Core where dma_main pins its
             # cyclic loop. Different from nic.irqCore by default.
             if "dmaRtCpu" in ci:

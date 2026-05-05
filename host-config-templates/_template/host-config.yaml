@@ -104,10 +104,19 @@ images:
 #                              name: alnum/underscore (INI section)
 #                              cpus: kernel cpu-list ('10-13', '10,12-14')
 #                              partitions cannot overlap on a CPU
-#   nic                      optional {iface, irqCore}
-#                              iface:   e.g. ecat0
-#                              irqCore: core for NIC IRQs / NAPI / softirqs
-#                                       (must lie inside a partition)
+#   nic                      optional {iface, irqCore, selector?}
+#                              iface:    e.g. ecat0
+#                              irqCore:  core for NIC IRQs / NAPI / softirqs
+#                                        (must lie inside a partition)
+#                              selector: drives phase 7 ecat-interface,
+#                                        which renames the NIC adapter to
+#                                        iface via udev. Exactly one of:
+#                                          mac:    aa:bb:cc:dd:ee:ff
+#                                          pci:    "0000:01:00.0"
+#                                          driver: igc, index: 0
+#                                        Optional — first-bringup operators
+#                                        can leave it unset and let the
+#                                        vendored interactive picker run.
 #                              (legacy alias `rtCore` still accepted with
 #                              a deprecation warning).
 #   dmaRtCpu                 int, core for the SOEM cyclic loop (becomes
@@ -132,6 +141,9 @@ images:
 #   nic:
 #     iface: ecat0
 #     irqCore: 12              # IRQs on a core distinct from the loop
+#     selector:
+#       mac: aa:bb:cc:dd:ee:ff # OR pci: "0000:01:00.0"
+#                              # OR {driver: igc, index: 0}
 #   dmaRtCpu: 11               # SOEM cyclic loop core
 #   installAffinityDefaults: true
 #   migrateCmdline: false
