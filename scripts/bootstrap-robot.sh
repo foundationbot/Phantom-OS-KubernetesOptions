@@ -1133,9 +1133,25 @@ host_config() {
 
 # ---- phase 3: cluster ---------------------------------------------------
 
+K0S_CONFIG_FILE="${K0S_CONFIG_FILE:-/etc/k0s/k0s.yaml}"
+KUBELET_STATE_FILE="${KUBELET_STATE_FILE:-/var/lib/k0s/kubelet/cpu_manager_state}"
+
 cluster() {
   if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
   phase "phase 3: cluster"
+
+  # Render /etc/k0s/k0s.yaml workerProfiles[default] from
+  # cpuIsolation.partitions BEFORE k0s install so kubelet starts with
+  # the right reservedSystemCPUs/cpuManagerPolicy. On re-runs this is
+  # an idempotent rewrite — only restarts k0s if the rendered content
+  # actually differs (and handles cpu_manager_state migration when
+  # cpuManagerPolicy flips none -> static).
+  _kubelet_reservation_apply
+
+  local already_installed=0
+  if systemctl list-unit-files 2>/dev/null | grep -q '^k0scontroller\.service'; then
+    already_installed=1
+  fi
 
   local already_running=0
   systemctl is-active --quiet k0scontroller && already_running=1
@@ -1144,17 +1160,17 @@ cluster() {
   if [ "$already_running" = 1 ]; then
     skip "k0s already running ($(systemctl is-active k0scontroller k0sworker 2>/dev/null | tr '\n' ' '))"
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  k0s install controller --single --enable-worker  (if /etc/k0s/k0s.yaml absent)"
+    info "DRY-RUN  k0s install controller --single --enable-worker  (if k0scontroller.service absent)"
     info "DRY-RUN  systemctl enable --now k0scontroller"
   else
-    if [ ! -e /etc/k0s/k0s.yaml ]; then
+    if [ "$already_installed" = 0 ]; then
       if k0s install controller --single --enable-worker; then
         pass "k0s installed"
       else
         fail "k0s install"; return
       fi
     else
-      skip "k0s already installed (/etc/k0s/k0s.yaml present)"
+      skip "k0s already installed (k0scontroller.service present)"
     fi
     if systemctl enable --now k0scontroller; then
       pass "k0scontroller started"
@@ -1198,6 +1214,150 @@ cluster() {
     else
       fail "k0s kubeconfig admin failed"
     fi
+  fi
+}
+
+# Render kubelet reservedSystemCPUs + cpuManagerPolicy into
+# /etc/k0s/k0s.yaml under spec.workerProfiles[default] so kubepods
+# is born with the correct cpuset and the boot-time race between
+# cpusets.service and k0scontroller goes away (see FIR-282).
+#
+# - No cpuIsolation block (or enabled=false): no-op, leave any existing
+#   workerProfiles untouched.
+# - First-time bringup (no /etc/k0s/k0s.yaml yet): write a minimal
+#   ClusterConfig with just our workerProfile.
+# - Re-runs: read existing config, replace just the spec.workerProfiles
+#   list with our default profile (preserving every other field).
+# - Diff: only restart k0s if rendered content actually changed. On
+#   restart, if cpu_manager_state lists policy=none, delete it so
+#   kubelet starts cleanly with policy=static (kubelet refuses to
+#   start with a policy mismatch in its checkpoint).
+_kubelet_reservation_apply() {
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    skip "kubelet-reservation: no host-config.yaml — skipping"
+    return 0
+  fi
+
+  local reserved
+  reserved="$(python3 "$HOST_CONFIG_HELPER" "$hc" compute-reserved-cpus 2>/dev/null)"
+  if [ -z "$reserved" ]; then
+    skip "kubelet-reservation: no cpuIsolation.partitions in host-config — skipping"
+    return 0
+  fi
+  note "kubelet-reservation: reservedSystemCPUs=$reserved cpuManagerPolicy=static"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  merge spec.workerProfiles[default] into $K0S_CONFIG_FILE (reservedSystemCPUs=$reserved)"
+    info "DRY-RUN  if k0s running and content changed: restart k0scontroller after migrating cpu_manager_state"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$K0S_CONFIG_FILE")"
+
+  # Render+merge in python; emits "changed" or "nochange" + the new
+  # content via a temp path. Exit 0 = updated, 1 = no-op, 2 = error.
+  local tmp
+  tmp="$(mktemp)" || { fail "mktemp failed"; return 1; }
+  local rc=0
+  python3 - "$K0S_CONFIG_FILE" "$reserved" "$tmp" <<'PY' || rc=$?
+import sys, os, yaml, copy
+
+src = sys.argv[1]
+reserved = sys.argv[2]
+out_path = sys.argv[3]
+
+if os.path.exists(src):
+    with open(src) as f:
+        cfg = yaml.safe_load(f) or {}
+    if not isinstance(cfg, dict):
+        sys.stderr.write(f"error: {src} top-level is not a mapping\n")
+        sys.exit(2)
+else:
+    cfg = {
+        "apiVersion": "k0s.k0sproject.io/v1beta1",
+        "kind": "ClusterConfig",
+        "metadata": {"name": "k0s"},
+        "spec": {},
+    }
+
+before = copy.deepcopy(cfg)
+spec = cfg.setdefault("spec", {})
+
+# Replace our managed entry only; preserve other profiles the
+# operator may have added by hand.
+profiles = spec.get("workerProfiles") or []
+if not isinstance(profiles, list):
+    sys.stderr.write("error: spec.workerProfiles is not a list\n")
+    sys.exit(2)
+managed = {
+    "name": "default",
+    "values": {
+        "cpuManagerPolicy": "static",
+        "reservedSystemCPUs": reserved,
+    },
+}
+new_profiles = [p for p in profiles if not (isinstance(p, dict) and p.get("name") == "default")]
+new_profiles.insert(0, managed)
+spec["workerProfiles"] = new_profiles
+
+with open(out_path, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+
+sys.exit(0 if cfg != before else 1)
+PY
+
+  case "$rc" in
+    0)
+      install -m 0644 "$tmp" "$K0S_CONFIG_FILE"
+      rm -f "$tmp"
+      pass "wrote spec.workerProfiles[default] to $K0S_CONFIG_FILE"
+      ;;
+    1)
+      rm -f "$tmp"
+      skip "$K0S_CONFIG_FILE already has the desired workerProfile — no change"
+      return 0
+      ;;
+    *)
+      rm -f "$tmp"
+      fail "could not render $K0S_CONFIG_FILE"
+      return 1
+      ;;
+  esac
+
+  # If k0s is currently running, the rewrite needs a restart to take
+  # effect. Migrate cpu_manager_state if its policy doesn't match.
+  if systemctl is-active --quiet k0scontroller; then
+    note "k0s is running — restarting to pick up new workerProfile"
+    if [ -f "$KUBELET_STATE_FILE" ]; then
+      local state_policy
+      state_policy="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("policyName", ""))
+except Exception:
+    pass
+' "$KUBELET_STATE_FILE" 2>/dev/null)"
+      if [ "$state_policy" = "none" ]; then
+        note "cpu_manager_state has policy=none — deleting so kubelet starts clean with static"
+        rm -f "$KUBELET_STATE_FILE"
+        pass "removed stale $KUBELET_STATE_FILE"
+      elif [ -n "$state_policy" ]; then
+        info "cpu_manager_state already at policy=$state_policy — keeping checkpoint"
+      fi
+    fi
+    if systemctl restart k0scontroller; then
+      pass "k0scontroller restarted"
+    else
+      fail "systemctl restart k0scontroller failed"
+      return 1
+    fi
+  else
+    info "k0s not running yet — kubelet will pick up workerProfile on first start"
   fi
 }
 

@@ -15,6 +15,8 @@ Usage:
   host-config.py <path> set-dma-ethercat-config-path <value>
   host-config.py <path> get-cpu-isolation-json
   host-config.py <path> set-cpu-isolation-json <json>
+  host-config.py <path> compute-reserved-cpus
+  host-config.py <path> render-k0s-worker-profile
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -196,6 +198,146 @@ def cmd_get_cpu_isolation_json(cfg: dict) -> int:
         print("error: 'cpuIsolation' must be a mapping", file=sys.stderr)
         return 2
     print(json.dumps(block))
+    return 0
+
+
+def _expand_cpu_list(spec: str) -> set[int]:
+    """Parse a kernel cpu-list ('10-13', '0,4-7,12') into a set of
+    int CPU indices. Inverse: _compress_cpu_list."""
+    out: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            a, b = int(lo), int(hi)
+            if a > b:
+                raise ValueError(f"reversed range {part!r}")
+            out.update(range(a, b + 1))
+        else:
+            out.add(int(part))
+    return out
+
+
+def _compress_cpu_list(cpus: set[int]) -> str:
+    """Inverse of _expand_cpu_list: turn a set of ints into the
+    minimal kernel cpu-list string ('0-9', '0,4-7,12'). Empty set
+    returns empty string."""
+    if not cpus:
+        return ""
+    sorted_cpus = sorted(cpus)
+    ranges: list[tuple[int, int]] = []
+    start = prev = sorted_cpus[0]
+    for c in sorted_cpus[1:]:
+        if c == prev + 1:
+            prev = c
+        else:
+            ranges.append((start, prev))
+            start = prev = c
+    ranges.append((start, prev))
+    return ",".join(
+        f"{a}" if a == b else f"{a}-{b}" for a, b in ranges
+    )
+
+
+def _online_cpus() -> set[int]:
+    """Read /sys/devices/system/cpu/online. Returns the full
+    int-set. Falls back to /proc/cpuinfo CPU count when sysfs is
+    unavailable (shouldn't happen on Linux but defensive)."""
+    try:
+        with open("/sys/devices/system/cpu/online") as f:
+            return _expand_cpu_list(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    # Fallback: count processor entries in /proc/cpuinfo.
+    n = 0
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("processor"):
+                    n += 1
+    except OSError:
+        pass
+    return set(range(n)) if n else set()
+
+
+def _managed_cpus_from_block(ci: dict) -> set[int]:
+    """Sum of cpus across cpuIsolation.partitions[]."""
+    out: set[int] = set()
+    for p in (ci.get("partitions") or []):
+        if not isinstance(p, dict):
+            continue
+        cpus = p.get("cpus")
+        if not isinstance(cpus, str):
+            continue
+        try:
+            out |= _expand_cpu_list(cpus)
+        except ValueError:
+            continue
+    return out
+
+
+def cmd_compute_reserved_cpus(cfg: dict) -> int:
+    """Echo the housekeeping cpu-list (online minus cpuIsolation
+    partitions) — the value to plug into kubelet's
+    --reserved-cpus / KubeletConfiguration.reservedSystemCPUs.
+    Exit 1 when cpuIsolation isn't configured (caller should skip
+    kubelet override). Exit 2 on schema errors."""
+    ci = cfg.get("cpuIsolation")
+    if not isinstance(ci, dict):
+        return 1
+    if ci.get("enabled") is False:
+        return 1
+    managed = _managed_cpus_from_block(ci)
+    if not managed:
+        return 1
+    online = _online_cpus()
+    if not online:
+        print("error: could not detect online cpus", file=sys.stderr)
+        return 2
+    housekeeping = online - managed
+    if not housekeeping:
+        print("error: every online cpu is partitioned — no housekeeping", file=sys.stderr)
+        return 2
+    print(_compress_cpu_list(housekeeping))
+    return 0
+
+
+def cmd_render_k0s_worker_profile(cfg: dict) -> int:
+    """Emit the 'default' worker-profile YAML snippet (a list with a
+    single entry) that goes under spec.workerProfiles in
+    /etc/k0s/k0s.yaml. Bootstrap merges this into the live config.
+
+    The 'default' profile applies to every worker that lacks an
+    explicit k0sproject.io/worker-profile label, which on single-
+    node fleets is "every node". Heterogeneous fleets can override
+    by labeling specific nodes with another profile.
+
+    Exit 1 when cpuIsolation isn't configured (caller should leave
+    workerProfiles untouched)."""
+    rc_holder: list[int] = [0]
+    # Cheat: re-use cmd_compute_reserved_cpus to derive the value
+    # while keeping the validation rules in one place.
+    import io
+    buf = io.StringIO()
+    saved_out = sys.stdout
+    sys.stdout = buf
+    try:
+        rc = cmd_compute_reserved_cpus(cfg)
+    finally:
+        sys.stdout = saved_out
+    if rc != 0:
+        return rc
+    reserved = buf.getvalue().strip()
+    profile = [{
+        "name": "default",
+        "values": {
+            "cpuManagerPolicy": "static",
+            "reservedSystemCPUs": reserved,
+        },
+    }]
+    print(yaml.safe_dump({"workerProfiles": profile}, sort_keys=False).rstrip())
     return 0
 
 
@@ -1161,6 +1303,10 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
+    if cmd == "compute-reserved-cpus":
+        return cmd_compute_reserved_cpus(cfg)
+    if cmd == "render-k0s-worker-profile":
+        return cmd_render_k0s_worker_profile(cfg)
     if cmd == "set-cpu-isolation-json":
         if len(sys.argv) != 4:
             print(
