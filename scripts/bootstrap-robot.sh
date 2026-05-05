@@ -54,8 +54,10 @@
 #                        logManagement.enabled: false). See docs/operations.md.
 #   --gitops             terraform apply (argocd Helm) + render+apply
 #                        the per-host phantomos-<robot> Application
-#   --argocd-admin       install argocd CLI; prompt and set admin
-#                        password (default '1984' on empty input)
+#   --argocd-users       install argocd CLI; prompt and set passwords
+#                        for admin, operator, fleet-operator
+#                        (default '1984' on empty input)
+#                        --argocd-admin is a backwards-compat alias
 #   --image-overrides    inject host-config.yaml's images list into
 #                        the live Application
 #   --deployments        inject host-config.yaml's deployments: patches
@@ -131,7 +133,7 @@
 #
 # Examples:
 #   sudo bash scripts/bootstrap-robot.sh                       # full bootstrap
-#   sudo bash scripts/bootstrap-robot.sh --argocd-admin        # rotate password
+#   sudo bash scripts/bootstrap-robot.sh --argocd-users        # rotate passwords
 #   sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets   # re-seed creds
 #   sudo bash scripts/bootstrap-robot.sh --image-overrides     # push tag changes
 #   sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
@@ -276,6 +278,7 @@ SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
 SKIP_OPERATOR_UI_CONFIG=0
 SKIP_GITOPS=0
+SKIP_ARGOCD_USERS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
@@ -323,7 +326,8 @@ while [ $# -gt 0 ]; do
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
-    --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
+    --argocd-users|--argocd-admin)
+                         SELECTED_PHASES+=(argocd-users); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
     --deployments|--dev-mounts)
                          SELECTED_PHASES+=(dev-mounts); shift ;;
@@ -466,6 +470,10 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/cpusets/lib/nic_setup.sh
 . "$SCRIPT_DIR/cpusets/lib/nic_setup.sh"
 
+# Load extracted user-mgmt helpers (RFC 0002).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/argocd_users.sh"
+
 # host-config.yaml — single per-host source-of-truth. If --host-config
 # was passed, copy it to the canonical location so subsequent runs use
 # the same file. Then, if the file exists, harvest defaults for fields
@@ -530,6 +538,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
   SKIP_GITOPS=1
+  SKIP_ARGOCD_USERS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
@@ -546,7 +555,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
-      argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
+      argocd-users|argocd-admin) SKIP_ARGOCD_USERS=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
@@ -565,7 +574,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-users|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -3650,12 +3659,13 @@ PY
   done <<< "$entries"
 }
 
-# ---- phase 11: argocd admin (install CLI + reset password) -------------
+# ---- phase 11: argocd users (install CLI + set account passwords) ------
 
-# Installs the argocd CLI binary (latest release from GitHub) and resets
-# the admin password by writing a bcrypt hash into argocd-secret. Done
-# as a script step rather than via `argocd account update-password` so
-# we don't need a port-forward + login round-trip.
+# Installs the argocd CLI binary (latest release from GitHub) and sets
+# passwords for admin, operator, and fleet-operator accounts by writing
+# bcrypt hashes into argocd-secret. Done as a script step rather than via
+# `argocd account update-password` so we don't need a port-forward +
+# login round-trip.
 #
 # Password source:
 #   1. Interactive TTY → prompt twice (echo off), default to "1984" on
@@ -3663,139 +3673,121 @@ PY
 #   2. Non-interactive (no TTY, e.g. CI / piped) → use "1984".
 #
 # Deliberately no env-var override: typing a secret on the command line
-# leaks it to shell history and ps listings. `--argocd-admin`
-# inherits a TTY, so password rotation prompts as expected.
+# leaks it to shell history and ps listings.
 _argocd_default_password="1984"
 
-argocd_admin() {
-  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 11: argocd admin  (skipped)"; return; fi
-  phase "phase 11: argocd admin (install CLI + set admin password)"
-
-  # 1) install argocd CLI if missing
-  #
-  # Verifies the binary actually runs after install — partial downloads
-  # otherwise leave a broken /usr/local/bin/argocd that fails silently
-  # at first use. Up to two attempts before giving up.
+# _install_argocd_cli — download and verify the argocd CLI binary.
+# Verifies the binary actually runs after install — partial downloads
+# otherwise leave a broken /usr/local/bin/argocd that fails silently
+# at first use. Up to two attempts before returning non-zero.
+_install_argocd_cli() {
   local argocd_bin=/usr/local/bin/argocd
   local installed_ok=0
   if command -v argocd >/dev/null 2>&1 && argocd version --client >/dev/null 2>&1; then
     skip "argocd CLI already in PATH ($(argocd version --client --short 2>/dev/null || echo present))"
-    installed_ok=1
-  else
-    local argo_arch=""
-    case "$(uname -m)" in
-      x86_64)  argo_arch=amd64 ;;
-      aarch64) argo_arch=arm64 ;;
-      *)       fail "no argocd CLI binary for arch $(uname -m)" ;;
-    esac
-    if [ -n "$argo_arch" ]; then
-      local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
-      if [ "$DRY_RUN" = 1 ]; then
-        info "DRY-RUN  download $url -> $argocd_bin"
-        installed_ok=1
-      else
-        local attempt
-        for attempt in 1 2; do
-          rm -f /tmp/argocd
-          if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
-               "$url" -o /tmp/argocd \
-             && [ -s /tmp/argocd ] \
-             && install -m 0555 /tmp/argocd "$argocd_bin" \
-             && "$argocd_bin" version --client >/dev/null 2>&1; then
-            pass "argocd CLI installed ($("$argocd_bin" version --client --short 2>/dev/null || echo ok))"
-            rm -f /tmp/argocd
-            installed_ok=1
-            break
-          fi
-          if [ "$attempt" = 1 ]; then
-            info "argocd download/verify failed; retrying once..."
-            # If a broken binary was placed, get rid of it before retry.
-            [ -f "$argocd_bin" ] && ! "$argocd_bin" version --client >/dev/null 2>&1 \
-              && rm -f "$argocd_bin"
-            sleep 3
-          fi
-        done
-        rm -f /tmp/argocd
-        if [ "$installed_ok" = 0 ]; then
-          fail "argocd CLI install failed after 2 attempts ($url) — manual fix: sudo curl -fsSL -o $argocd_bin $url && sudo chmod +x $argocd_bin"
-        fi
-      fi
-    fi
+    return 0
   fi
-
-  # 2) acquire the password (prompt if interactive, default otherwise)
-  local pw=""
+  local argo_arch=""
+  case "$(uname -m)" in
+    x86_64)  argo_arch=amd64 ;;
+    aarch64) argo_arch=arm64 ;;
+    *)       fail "no argocd CLI binary for arch $(uname -m)"; return 1 ;;
+  esac
+  local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
   if [ "$DRY_RUN" = 1 ]; then
-    pw="$_argocd_default_password"
-    info "DRY-RUN  prompt for admin password (would default to '$pw' on empty input)"
-    info "DRY-RUN  patch argocd-secret with bcrypt(\$pw)"
-    return
+    info "DRY-RUN  download $url -> $argocd_bin"
+    return 0
   fi
+  local attempt
+  for attempt in 1 2; do
+    rm -f /tmp/argocd
+    if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
+         "$url" -o /tmp/argocd \
+       && [ -s /tmp/argocd ] \
+       && install -m 0555 /tmp/argocd "$argocd_bin" \
+       && "$argocd_bin" version --client >/dev/null 2>&1; then
+      pass "argocd CLI installed ($("$argocd_bin" version --client --short 2>/dev/null || echo ok))"
+      rm -f /tmp/argocd
+      installed_ok=1
+      break
+    fi
+    if [ "$attempt" = 1 ]; then
+      info "argocd download/verify failed; retrying once..."
+      [ -f "$argocd_bin" ] && ! "$argocd_bin" version --client >/dev/null 2>&1 \
+        && rm -f "$argocd_bin"
+      sleep 3
+    fi
+  done
+  rm -f /tmp/argocd
+  if [ "$installed_ok" = 0 ]; then
+    fail "argocd CLI install failed after 2 attempts ($url) — manual fix: sudo curl -fsSL -o $argocd_bin $url && sudo chmod +x $argocd_bin"
+    return 1
+  fi
+  return 0
+}
 
+# Prompt twice for a password with echo off; default to "1984" on empty
+# input. Non-interactive shells get the default. Stubbed in tests.
+_read_argocd_password() {
+  local account="${1:-admin}" default_pw="${_argocd_default_password:-1984}"
+  local pw_a pw_b
   if [ -t 0 ] && [ -t 2 ]; then
-    local pw_a pw_b
     while :; do
-      printf '  argocd admin password [%s]: ' "$_argocd_default_password" >&2
+      printf '  argocd %s password [%s]: ' "$account" "$default_pw" >&2
       stty -echo 2>/dev/null || true
       IFS= read -r pw_a || pw_a=""
       stty echo 2>/dev/null || true
       printf '\n' >&2
-      pw_a="${pw_a:-$_argocd_default_password}"
-
+      pw_a="${pw_a:-$default_pw}"
       printf '  confirm: ' >&2
       stty -echo 2>/dev/null || true
       IFS= read -r pw_b || pw_b=""
       stty echo 2>/dev/null || true
       printf '\n' >&2
-      pw_b="${pw_b:-$_argocd_default_password}"
-
-      if [ "$pw_a" = "$pw_b" ]; then
-        pw="$pw_a"
-        break
-      fi
+      pw_b="${pw_b:-$default_pw}"
+      [ "$pw_a" = "$pw_b" ] && break
       printf '  passwords do not match — try again\n' >&2
     done
+    printf '%s' "$pw_a"
   else
-    pw="$_argocd_default_password"
-    info "non-interactive shell — using default admin password"
-  fi
-
-  # 3) reset admin password by patching argocd-secret
-  if [ ${#KUBECTL[@]} -eq 0 ]; then
-    fail "no kubectl/k0s available — cannot patch argocd-secret"
-    return
-  fi
-
-  if ! "${KUBECTL[@]}" -n argocd get secret argocd-secret >/dev/null 2>&1; then
-    fail "argocd-secret not found in argocd ns — gitops phase must run first"
-    return
-  fi
-
-  # bcrypt the password. Prefer htpasswd (apache2-utils); install on demand
-  # since phase 2 doesn't pull it in.
-  if ! command -v htpasswd >/dev/null 2>&1; then
-    info "installing apache2-utils (for htpasswd)"
-    apt-get install -y apache2-utils >/dev/null 2>&1 || true
-  fi
-  if ! command -v htpasswd >/dev/null 2>&1; then
-    fail "htpasswd unavailable — install apache2-utils manually and re-run --argocd-admin"
-    return
-  fi
-
-  local hash mtime
-  hash=$(htpasswd -nbBC 10 "" "$pw" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
-  mtime=$(date +%FT%T%Z)
-
-  if "${KUBECTL[@]}" -n argocd patch secret argocd-secret --type merge \
-       -p "{\"stringData\":{\"admin.password\":\"$hash\",\"admin.passwordMtime\":\"$mtime\"}}" >/dev/null; then
-    pass "argocd admin password updated"
-    # initial-admin-secret is no longer authoritative once admin.password
-    # is rotated. Drop it so future operators don't try to use it.
-    "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret --ignore-not-found >/dev/null 2>&1 || true
-  else
-    fail "could not patch argocd-secret"
+    printf '%s' "$default_pw"
   fi
 }
+
+argocd_users() {
+  if [ "${SKIP_ARGOCD_USERS:-${SKIP_ARGOCD_ADMIN:-1}}" = 1 ]; then
+    phase "phase 11: argocd users  (skipped)"; return
+  fi
+  phase "phase 11: argocd users (install CLI + set admin/operator/fleet-operator passwords)"
+
+  # 1) install argocd CLI
+  _install_argocd_cli || return
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  prompt for admin/operator/fleet-operator passwords"
+    info "DRY-RUN  patch argocd-secret with bcrypt(\$pw) for each account"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot patch argocd-secret"; return
+  fi
+  if ! "${KUBECTL[@]}" -n argocd get secret argocd-secret >/dev/null 2>&1; then
+    fail "argocd-secret not found in argocd ns — gitops phase must run first"; return
+  fi
+
+  local account pw
+  for account in admin operator fleet-operator; do
+    pw="$(_read_argocd_password "$account")"
+    _argocd_set_account_password "$account" "$pw" || true
+  done
+
+  "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret \
+      --ignore-not-found >/dev/null 2>&1 || true
+}
+
+# Backwards-compat alias so external runbooks pinned to argocd_admin still work.
+argocd_admin() { argocd_users "$@"; }
 
 # ---- phase 14: setup-positronic (optional) --------------------------------
 
@@ -3927,7 +3919,7 @@ print_plan() {
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--install-dma-ethercat not selected"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
-  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
+  _step $([ "${SKIP_ARGOCD_USERS:-${SKIP_ARGOCD_ADMIN:-1}}" = 0 ] && echo 1 || echo 0) "phase 11  argocd-users"                 "--argocd-users not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 12  image-overrides"              "--image-overrides not selected"
   _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 13  deployments"                  "--deployments not selected"
   _step "$SETUP_POSITRONIC"                                         "phase 14  setup-positronic"             "--setup-positronic not set"
@@ -3997,7 +3989,7 @@ cpu_isolation      ; guard
 log_management     ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
-argocd_admin       ; guard
+argocd_users      ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
 setup_positronic   ; guard
