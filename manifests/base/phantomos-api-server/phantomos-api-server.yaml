@@ -67,6 +67,32 @@ spec:
       imagePullSecrets:
         - name: dockerhub-creds
 
+      # Models are loaded the same way positronic-control loads them:
+      # a busybox-style image (foundationbot/phantom-models) ships the
+      # /models tree, the load-models init container copies it into a
+      # shared emptyDir, and the api container mounts it read-only at
+      # /home/operator/models. The image tag is rewritten per-host via
+      # the same kustomize.images injection that handles positronic.
+      initContainers:
+        - name: load-models
+          image: localhost:5443/phantom-models:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "==> copying /models -> /shared"
+              cp -a /models/. /shared/
+              echo "==> done"
+              ls -la /shared | head
+          volumeMounts:
+            - name: phantom-models
+              mountPath: /shared
+          resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
       containers:
         - name: api
           # CircleCI publishes this image to DockerHub on every push to
@@ -94,15 +120,23 @@ spec:
             # every service-status endpoint reports "inactive".
             - name: HOST_EXEC_PREFIX
               value: "nsenter -t 1 -a"
-            # Compose project paths default to /home/operator/...,
-            # /home/gaurav/.... If those don't exist on the robot,
-            # override here so /docker-compose/* points somewhere real.
+            # PHANTOM_MODELS points at the emptyDir populated by the
+            # load-models init container (image source-of-truth). The
+            # operator-ui compose project and phantom-scripts paths
+            # are no longer mounted by default — they were /home/<dev>
+            # paths that don't exist on production robots. If a host
+            # legitimately needs them, declare under
+            # /etc/phantomos/host-config.yaml's
+            # deployments.phantomos-api-server.mounts list and
+            # bootstrap will inject them via kustomize.patches.
+            - name: PHANTOM_MODELS
+              value: /home/operator/models
+            # Override these in host-config.yaml as ConfigMap fields if
+            # you have on-disk compose project trees to expose:
             # - name: OPERATOR_UI_COMPOSE_PATH
-            #   value: /opt/argus/operator_ui
+            #   value: /home/operator/repos/argus/operator_ui
             # - name: PHANTOM_SCRIPT_DIRECTORY
-            #   value: /opt/phantom/scripts
-            # - name: PHANTOM_MODELS
-            #   value: /opt/phantom/models
+            #   value: /home/operator/scripts
 
           securityContext:
             # nsenter into PID 1 needs CAP_SYS_ADMIN + CAP_SYS_PTRACE.
@@ -167,16 +201,16 @@ spec:
             - name: dev
               mountPath: /dev
               mountPropagation: HostToContainer
-            # ── Compose project trees referenced by config.go's
-            # ComposeProjects map. Add one volume per project. Drop
-            # these mounts if you override the env vars above to point
-            # at in-container paths instead.
-            - name: operator-ui-repo
-              mountPath: /home/operator/repos/argus/operator_ui
-            - name: phantom-scripts
-              mountPath: /home/gaurav/foundation/ai-nix-phantom-apps
+            # ── Models tree, populated by the load-models init
+            # container from the foundationbot/phantom-models image.
             - name: phantom-models
-              mountPath: /home/gaurav/models
+              mountPath: /home/operator/models
+              readOnly: true
+            # Per-host hostPath mounts (operator-ui compose tree,
+            # phantom scripts, etc.) come from /etc/phantomos/host-
+            # config.yaml's deployments.phantomos-api-server.mounts
+            # list at bootstrap time as a strategic-merge patch on the
+            # phantomos-<robot>-core Application. None are baked here.
 
       volumes:
         - name: host-sys
@@ -199,15 +233,10 @@ spec:
           hostPath:
             path: /dev
             type: Directory
-        - name: operator-ui-repo
-          hostPath:
-            path: /home/operator/repos/argus/operator_ui
-            type: DirectoryOrCreate
-        - name: phantom-scripts
-          hostPath:
-            path: /home/gaurav/foundation/ai-nix-phantom-apps
-            type: DirectoryOrCreate
+        # Models — emptyDir populated by the load-models initContainer
+        # from the registry-pinned foundationbot/phantom-models image.
+        # Same pattern as positronic-control. Tag flows through the
+        # host-config images: list (the same localhost:5443/phantom-
+        # models entry that handles positronic).
         - name: phantom-models
-          hostPath:
-            path: /home/gaurav/models
-            type: DirectoryOrCreate
+          emptyDir: {}

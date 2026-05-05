@@ -1,6 +1,10 @@
-# Terraform bootstraps a k8s cluster into "ArgoCD-managed" state.
-# Beyond this file, nothing else should ever be kubectl-applied by hand —
-# every subsequent change flows from git through ArgoCD.
+# Terraform bootstraps a k8s cluster into "ArgoCD-installed" state.
+# It only installs the argocd Helm chart — it does NOT apply any
+# Application CRs. The per-host Application that points argocd at this
+# robot's overlay is rendered + applied by scripts/bootstrap-robot.sh
+# from a template + /etc/phantomos/host-config.yaml. The repo carries
+# no per-robot Application files; that data is per-device and lives
+# outside git (or, eventually, comes from a fleet control plane).
 
 locals {
   kubeconfig_path = pathexpand(var.kubeconfig)
@@ -54,21 +58,3 @@ resource "helm_release" "argocd" {
   atomic         = false
 }
 
-# 3. Root Application CR (app-of-apps).
-#    Using null_resource + local-exec because terraform's native
-#    kubernetes_manifest requires the Application CRD to exist at plan
-#    time — which it doesn't until the Helm release installs it. The
-#    local-exec fires AFTER helm_release, when the CRD is present.
-resource "null_resource" "root_application" {
-  triggers = {
-    manifest_hash   = filesha256("${path.module}/${var.root_app_manifest}")
-    kubeconfig_path = local.kubeconfig_path
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["bash", "-c"]
-    command     = "k0s kubectl --kubeconfig='${local.kubeconfig_path}' apply -f '${path.module}/${var.root_app_manifest}'"
-  }
-
-  depends_on = [helm_release.argocd]
-}

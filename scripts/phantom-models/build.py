@@ -399,10 +399,11 @@ def main() -> int:
 
     print(f"\n==> Done: {image_ref}", file=sys.stderr)
     if not args.no_push:
-        print("\nBump the tag in the per-robot patch:", file=sys.stderr)
-        print("  manifests/robots/<robot>/patches/positronic-models-image.yaml",
+        print("\nUpdate /etc/phantomos/host-config.yaml's images: list", file=sys.stderr)
+        print("with the new tag, then run:", file=sys.stderr)
+        print("  sudo bash scripts/bootstrap-robot.sh --image-overrides",
               file=sys.stderr)
-        print(f"    reference: {image_ref}", file=sys.stderr)
+        print(f"  (image: {image_ref})", file=sys.stderr)
     return 0
 
 

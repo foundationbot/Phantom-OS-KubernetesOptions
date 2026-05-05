@@ -38,37 +38,30 @@ ARGO_NS="${ARGO_NS:-argocd}"
 
 DRY_RUN=0
 
+# Pull in the shared robot-identity helper. resolve_robot honors (in
+# order): explicit --robot/ROBOT, /etc/phantomos/robot, hostname.
+REPO_ROOT="$REPO"
+# shellcheck source=lib/robot-id.sh
+. "$(dirname "$0")/lib/robot-id.sh"
+
 # _resolve_robot — called after arg parsing to finalise ROBOT and derived vars.
 _resolve_robot() {
-  # 1. Explicit --robot or ROBOT env already set.
-  # 2. Fall back to hostname if it matches a manifests/robots/<name> dir.
-  # 3. Prompt interactively.
-  if [ -z "$ROBOT" ]; then
-    local hn
-    hn="$(hostname 2>/dev/null || true)"
-    if [ -n "$hn" ] && [ -d "$REPO/manifests/robots/$hn" ]; then
-      ROBOT="$hn"
-    fi
-  fi
-
-  if [ -z "$ROBOT" ]; then
-    local available
-    available="$(ls -1 "$REPO/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
-    printf 'Could not determine robot name.\n' >&2
-    printf 'Available robots: %s\n' "${available:-<none>}" >&2
+  local resolved
+  if ! resolved="$(resolve_robot "$ROBOT")"; then
+    # resolve_robot prints its own diagnostic. Fall back to interactive
+    # prompt for backwards compatibility on dev laptops.
     printf 'Enter robot name: ' >&2
     read -r ROBOT
     [ -n "$ROBOT" ] || die "robot name is required"
+    if ! resolved="$(resolve_robot "$ROBOT")"; then
+      die "robot name $ROBOT did not resolve"
+    fi
   fi
-
-  if [ ! -d "$REPO/manifests/robots/$ROBOT" ]; then
-    local available
-    available="$(ls -1 "$REPO/manifests/robots/" 2>/dev/null | tr '\n' ' ')"
-    die "manifests/robots/$ROBOT/ not found — available: ${available:-<none>}"
-  fi
+  ROBOT="$resolved"
 
   # Derived paths (still env-overridable).
-  OVERLAY="${OVERLAY:-${REPO}/manifests/robots/${ROBOT}}"
+  # positronic-control lives in the `core` stack post-restructure.
+  OVERLAY="${OVERLAY:-${REPO}/manifests/stacks/core}"
   TRACK_APP_FILE="${TRACK_APP_FILE:-${REPO}/gitops/apps/${ROBOT}/phantomos-${ROBOT}.yaml}"
   ARGO_APP="${ARGO_APP:-phantomos-${ROBOT}}"
 }
@@ -215,7 +208,7 @@ ${C_BOLD}Subcommands:${C_RESET}
 
 ${C_BOLD}Global flags:${C_RESET}
   --robot <name>               Robot identifier (matches a directory under
-                               manifests/robots/). Auto-detected from
+                               metadata.name suffix. Auto-detected from
                                hostname when omitted; prompts if ambiguous.
   --dry-run                    Print kubectl commands instead of running
                                them. Useful for review.
@@ -224,7 +217,7 @@ ${C_BOLD}Env overrides:${C_RESET}
   ROBOT            (default: auto-detected from hostname)
   NAMESPACE        (default: $NAMESPACE)
   APP_LABEL        (default: $APP_LABEL)
-  OVERLAY          (default: \$REPO/manifests/robots/\$ROBOT)
+  OVERLAY          (default: \$REPO/manifests/stacks/core)
   CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
   IMAGE_NAME       (default: $IMAGE_NAME)
   TRACK_APP_FILE   (default: \$REPO/gitops/apps/\$ROBOT/phantomos-\$ROBOT.yaml)
@@ -314,6 +307,98 @@ cmd_status() {
     warn "could not read /proc/1/cmdline (pod may not be Ready)"
   else
     printf '    %s\n' "$pid1"
+  fi
+
+  # Live hostPath mounts — what the running pod actually has bind-mounted.
+  # Joined by volume name so the output is host -> container.
+  bold "hostPath mounts (live pod spec)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    info "(python3 unavailable — cannot pretty-print mounts)"
+  else
+    local mounts_out
+    mounts_out="$($KUBECTL -n "$NAMESPACE" get pod "$pod" -o json 2>/dev/null \
+      | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+volumes = {v["name"]: v["hostPath"]["path"]
+           for v in p.get("spec", {}).get("volumes", [])
+           if v.get("hostPath")}
+container = next((c for c in p["spec"].get("containers", [])
+                  if c.get("name") == "'"$CONTAINER_NAME"'"), None)
+if not container:
+    sys.exit(0)
+mounts = [(volumes[m["name"]], m["mountPath"], m.get("readOnly", False))
+          for m in container.get("volumeMounts", []) if m["name"] in volumes]
+if not mounts:
+    print("(none)")
+else:
+    width = max(len(h) for h, _, _ in mounts)
+    for host, ctr, ro in mounts:
+        ro_tag = "  (ro)" if ro else ""
+        print(f"{host:<{width}}  ->  {ctr}{ro_tag}")
+' 2>/dev/null || true)"
+    if [ -z "$mounts_out" ]; then
+      info "(could not parse pod spec)"
+    else
+      printf '%s\n' "$mounts_out" | sed 's/^/    /'
+    fi
+  fi
+
+  # deployments intent from /etc/phantomos/host-config.yaml. Tells the
+  # operator what the host expects, independent of what's currently
+  # running. A disagreement between the live mounts above and the intent
+  # below means bootstrap hasn't been re-run since the host-config
+  # changed; run `bootstrap-robot.sh --deployments` to reconcile.
+  bold "deployments (intent, /etc/phantomos/host-config.yaml)"
+  local hc=/etc/phantomos/host-config.yaml
+  if [ ! -r "$hc" ]; then
+    info "(no host-config.yaml — deployments not configured)"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    info "(python3 unavailable)"
+  else
+    local dep_out
+    dep_out="$(python3 - "$hc" <<'PY' 2>/dev/null
+import sys
+try:
+    import yaml
+except ImportError:
+    print("(PyYAML missing — install python3-yaml)")
+    sys.exit(0)
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception as exc:
+    print(f"(error reading host-config: {exc})")
+    sys.exit(0)
+
+# New schema: deployments.<name>. Falls back to legacy devMode.<name>
+# so an unmigrated host-config still produces useful status output.
+deployments = cfg.get("deployments") if isinstance(cfg, dict) else None
+legacy_dev = cfg.get("devMode") if isinstance(cfg, dict) else None
+
+if not deployments and not legacy_dev:
+    print("(no deployments/devMode block — bare base mounts only)")
+    sys.exit(0)
+
+if legacy_dev and not deployments:
+    print("(host-config still uses legacy 'devMode:' schema — re-run configure-host.sh to migrate)")
+
+source = deployments or {}
+for name, spec in (source.items() if isinstance(source, dict) else []):
+    if not isinstance(spec, dict):
+        continue
+    privileged = bool(spec.get("privileged"))
+    mounts = spec.get("mounts") or []
+    print(f"{name}:")
+    print(f"  privileged: {'true' if privileged else 'false'}")
+    print(f"  mounts:     {len(mounts)} configured")
+    for i, m in enumerate(mounts):
+        if isinstance(m, dict) and m.get("host") and m.get("container"):
+            vol = m.get("name") or f"mount-{i}"
+            print(f"    [{vol}] {m['host']}  ->  {m['container']}")
+PY
+)"
+    printf '%s\n' "$dep_out" | sed 's/^/    /'
   fi
 }
 

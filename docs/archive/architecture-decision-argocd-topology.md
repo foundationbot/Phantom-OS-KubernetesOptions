@@ -1,3 +1,5 @@
+> **Archived 2026-05-02.** Snapshot of an earlier design. Current architecture lives in [`docs/architecture.md`](../architecture.md).
+
 # Architecture Decision: ArgoCD Topology and Fleet GitOps Strategy
 
 **Status**: Accepted

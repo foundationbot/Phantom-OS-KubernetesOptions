@@ -99,7 +99,7 @@ mkdir -p "$(dirname "${CONTAINERD_IMPORT}")"
 backup "${CONTAINERD_IMPORT}"
 cat > "${CONTAINERD_IMPORT}" <<EOF
 # Managed by scripts/configure-k0s-containerd-mirror.sh
-# Pulled into containerd's main config via the `imports` line in
+# Pulled into containerd's main config via the imports line in
 # ${CONTAINERD_CONFIG} (also added by this script).
 
 version = 2

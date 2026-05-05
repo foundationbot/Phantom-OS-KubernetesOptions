@@ -1,3 +1,5 @@
+> **Archived 2026-05-02.** Snapshot of an earlier design. Current architecture lives in [`docs/architecture.md`](../architecture.md).
+
 # k0s Implementation Plan — PhantomOS
 > **Author:** Siddhant  
 > **Date:** 2026-04-07  

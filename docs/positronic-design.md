@@ -1,5 +1,14 @@
 # positronic-control on k0s — design
 
+> **Partially current.** Sections 1-5 (image flow, storage, pod composition,
+> initContainer + emptyDir for models, hostNetwork rationale, GPU runtime,
+> Guaranteed QoS) are still accurate. Sections 6 ("per-robot overlay model")
+> and 7 ("ArgoCD wiring") describe the pre-Stage-F layout (`manifests/robots/<name>/`,
+> `gitops/root-app.yaml`, app-of-apps) and are STALE — that machinery was
+> replaced by per-host rendered Application CRs. For the current design see
+> [`architecture.md`](./architecture.md).
+
+
 How the positronic-control deployment fits together: the two repos, the
 three images, the storage layers, the pod composition, the per-robot
 overlay model, and the ArgoCD wiring. For day-to-day commands see

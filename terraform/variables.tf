@@ -25,8 +25,3 @@ variable "argocd_https_nodeport" {
   default = 30443
 }
 
-variable "root_app_manifest" {
-  description = "Path to the root ArgoCD Application CR manifest, relative to this terraform module."
-  type        = string
-  default     = "../gitops/root-app.yaml"
-}
