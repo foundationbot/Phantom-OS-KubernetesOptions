@@ -15,8 +15,7 @@ Usage:
   host-config.py <path> set-dma-ethercat-config-path <value>
   host-config.py <path> get-cpu-isolation-json
   host-config.py <path> set-cpu-isolation-json <json>
-  host-config.py <path> compute-reserved-cpus
-  host-config.py <path> render-k0s-worker-profile
+  host-config.py <path> compute-k8s-cpus
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -278,80 +277,58 @@ def _managed_cpus_from_block(ci: dict) -> set[int]:
     return out
 
 
-def cmd_compute_reserved_cpus(cfg: dict) -> int:
-    """Echo the cpu-list to plug into kubelet's --reserved-cpus /
-    KubeletConfiguration.reservedSystemCPUs. Per kubernetes docs,
-    'CPUs in this set are not eligible to be assigned to any
-    containers' cpuset.cpus'. So the right value is the union of
-    cpuIsolation.partitions cpus — the cores we want kept OFF kubepods
-    (e.g. the EtherCAT RT cores). Pods then land on the inverse
-    (housekeeping) automatically.
+def cmd_compute_k8s_cpus(cfg: dict) -> int:
+    """Echo the cpu-list that bounds the k0s/kubelet/pods world.
+    This is the value bootstrap writes into k8s.slice's
+    AllowedCPUs= (so cgroup-v2 inheritance carves kubepods to
+    exactly this set, regardless of what kubelet writes to
+    kubepods.cpuset.cpus).
 
-    Exit 1 when cpuIsolation isn't configured (caller should skip
-    kubelet override). Exit 2 on schema errors."""
+    Resolution:
+      1. cpuIsolation.k8sCpus, if set explicitly.
+      2. Else: (online cpus) − (cpuIsolation.partitions cpus) − {0}
+         The {0} subtraction reserves cpu 0 for the kernel's default
+         scheduler (housekeeping); operators who want cpu 0 in the
+         k8s pool must set k8sCpus explicitly.
+
+    Exit 1 when cpuIsolation isn't configured (caller skips the
+    slice setup). Exit 2 on schema errors."""
     ci = cfg.get("cpuIsolation")
     if not isinstance(ci, dict):
         return 1
     if ci.get("enabled") is False:
         return 1
+
+    # Explicit override.
+    explicit = ci.get("k8sCpus")
+    if isinstance(explicit, str) and explicit:
+        try:
+            cpus = _expand_cpu_list(explicit)
+        except ValueError as exc:
+            print(f"error: cpuIsolation.k8sCpus: {exc}", file=sys.stderr)
+            return 2
+        if not cpus:
+            print("error: cpuIsolation.k8sCpus expanded to empty set", file=sys.stderr)
+            return 2
+        print(_compress_cpu_list(cpus))
+        return 0
+
+    # Computed default.
     managed = _managed_cpus_from_block(ci)
-    if not managed:
-        return 1
     online = _online_cpus()
     if not online:
         print("error: could not detect online cpus", file=sys.stderr)
         return 2
-    housekeeping = online - managed
-    if not housekeeping:
-        print("error: every online cpu is partitioned — no housekeeping", file=sys.stderr)
+    k8s = online - managed - {0}
+    if not k8s:
+        print(
+            "error: computed k8sCpus is empty — every online cpu is "
+            "either partitioned or reserved for cpu 0. Set "
+            "cpuIsolation.k8sCpus explicitly.",
+            file=sys.stderr,
+        )
         return 2
-    print(_compress_cpu_list(managed))
-    return 0
-
-
-def cmd_render_k0s_worker_profile(cfg: dict) -> int:
-    """Emit the 'default' worker-profile YAML snippet (a list with a
-    single entry) that goes under spec.workerProfiles in
-    /etc/k0s/k0s.yaml. Bootstrap merges this into the live config.
-
-    The 'default' profile applies to every worker that lacks an
-    explicit k0sproject.io/worker-profile label, which on single-
-    node fleets is "every node". Heterogeneous fleets can override
-    by labeling specific nodes with another profile.
-
-    Exit 1 when cpuIsolation isn't configured (caller should leave
-    workerProfiles untouched)."""
-    rc_holder: list[int] = [0]
-    # Cheat: re-use cmd_compute_reserved_cpus to derive the value
-    # while keeping the validation rules in one place.
-    import io
-    buf = io.StringIO()
-    saved_out = sys.stdout
-    sys.stdout = buf
-    try:
-        rc = cmd_compute_reserved_cpus(cfg)
-    finally:
-        sys.stdout = saved_out
-    if rc != 0:
-        return rc
-    reserved = buf.getvalue().strip()
-    profile = [{
-        "name": "default",
-        "values": {
-            "cpuManagerPolicy": "static",
-            "reservedSystemCPUs": reserved,
-            # Clear k0s's default kubeReservedCgroup ("system.slice").
-            # k8s >= 1.32 rejects the combination of reservedSystemCPUs
-            # with either kubeReservedCgroup or systemReservedCgroup
-            # ("invalid configuration: can't use reservedSystemCPUs ...
-            # with systemReservedCgroup or kubeReservedCgroup"). The
-            # empty string clears the inherited default; kubelet's
-            # own resource enforcement still works without a dedicated
-            # cgroup target.
-            "kubeReservedCgroup": "",
-        },
-    }]
-    print(yaml.safe_dump({"workerProfiles": profile}, sort_keys=False).rstrip())
+    print(_compress_cpu_list(k8s))
     return 0
 
 
@@ -1174,6 +1151,36 @@ def cmd_validate(cfg: dict) -> int:
                     "services will land on isolated cores)"
                 )
 
+            # k8sCpus — explicit override of the cpu pool that
+            # k0s/kubelet/kubepods may use. Default is computed:
+            # online − partitions − {0}. When set explicitly:
+            #   - must match kernel cpu-list syntax
+            #   - must NOT overlap any partition cpus (those are for
+            #     host RT, off-limits to k8s)
+            if "k8sCpus" in ci:
+                k8s = ci["k8sCpus"]
+                if not isinstance(k8s, str) or not k8s:
+                    errors.append("cpuIsolation.k8sCpus: must be a non-empty string")
+                elif not _CPU_RANGE_RE.match(k8s):
+                    errors.append(
+                        f"cpuIsolation.k8sCpus={k8s!r}: must match kernel "
+                        f"cpu-list syntax (e.g. '1-10', '0,4-7,12')"
+                    )
+                else:
+                    try:
+                        k8s_set = _expand_cpus(k8s)
+                    except ValueError as exc:
+                        errors.append(f"cpuIsolation.k8sCpus: {exc}")
+                        k8s_set = set()
+                    overlap = k8s_set & seen_cpus
+                    if overlap:
+                        errors.append(
+                            f"cpuIsolation.k8sCpus={k8s!r}: overlaps "
+                            f"partition cpus on {sorted(overlap)}. The "
+                            f"k8s pool and host-RT partitions must be "
+                            f"disjoint."
+                        )
+
     # dmaEthercat is optional. configSet must be a single directory
     # name (no slashes, no '..') — bootstrap interpolates it into
     # /usr/share/dma-ethercat/config/<configSet>/<robot>.json, so
@@ -1317,10 +1324,8 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
-    if cmd == "compute-reserved-cpus":
-        return cmd_compute_reserved_cpus(cfg)
-    if cmd == "render-k0s-worker-profile":
-        return cmd_render_k0s_worker_profile(cfg)
+    if cmd == "compute-k8s-cpus":
+        return cmd_compute_k8s_cpus(cfg)
     if cmd == "set-cpu-isolation-json":
         if len(sys.argv) != 4:
             print(
