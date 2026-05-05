@@ -1215,6 +1215,15 @@ cluster() {
       fail "k0s kubeconfig admin failed"
     fi
   fi
+
+  # Apply the worker-profile label so the workerProfile we rendered
+  # in _kubelet_reservation_apply actually takes effect. k0s only
+  # applies a worker profile to nodes that carry
+  # k0sproject.io/worker-profile=<profile-name>; without the label,
+  # kubelet uses the default config and ignores spec.workerProfiles
+  # entirely. Has to run AFTER the node registers (above), and only
+  # when cpuIsolation is configured (matches what we actually wrote).
+  _kubelet_reservation_label_node
 }
 
 # Render kubelet reservedSystemCPUs + cpuManagerPolicy into
@@ -1358,6 +1367,140 @@ except Exception:
     fi
   else
     info "k0s not running yet — kubelet will pick up workerProfile on first start"
+  fi
+}
+
+# Label the node with k0sproject.io/worker-profile=default so k0s
+# applies the workerProfile we wrote in _kubelet_reservation_apply.
+# Restart k0scontroller after labeling so kubelet re-reads the profile
+# and regenerates /run/k0s/kubelet/config.yaml with our
+# cpuManagerPolicy + reservedSystemCPUs.
+#
+# No-op when:
+#   - cpuIsolation isn't configured (no profile to apply)
+#   - the label is already present and kubelet's live config
+#     already reflects the profile (avoids unnecessary restarts)
+_kubelet_reservation_label_node() {
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  [ -r "$hc" ] || return 0
+
+  local reserved
+  reserved="$(python3 "$HOST_CONFIG_HELPER" "$hc" compute-reserved-cpus 2>/dev/null)"
+  [ -n "$reserved" ] || return 0
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  kubectl label node \$hostname k0sproject.io/worker-profile=default --overwrite"
+    info "DRY-RUN  systemctl restart k0scontroller (if kubelet config doesn't already reflect reservedSystemCPUs=$reserved)"
+    return 0
+  fi
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl available to label node for worker-profile"
+    return 1
+  fi
+
+  local node_name
+  node_name="$(hostname)"
+  local current_label
+  current_label="$("${KUBECTL[@]}" get node "$node_name" \
+    -o jsonpath='{.metadata.labels.k0sproject\.io/worker-profile}' 2>/dev/null)"
+
+  local needs_restart=0
+  if [ "$current_label" = "default" ]; then
+    skip "node $node_name already labeled k0sproject.io/worker-profile=default"
+  else
+    note "labeling node $node_name with k0sproject.io/worker-profile=default"
+    if "${KUBECTL[@]}" label node "$node_name" \
+        k0sproject.io/worker-profile=default --overwrite >/dev/null; then
+      pass "node label applied"
+      needs_restart=1
+    else
+      fail "kubectl label node failed"
+      return 1
+    fi
+  fi
+
+  # Verify kubelet's live config reflects what we want. If it doesn't
+  # match (regardless of whether we just labeled or the label was
+  # already there from a prior bootstrap that pre-dated this commit),
+  # restart k0s to regenerate /run/k0s/kubelet/config.yaml.
+  local live_reserved live_policy
+  if [ -r /run/k0s/kubelet/config.yaml ]; then
+    live_reserved="$(python3 -c '
+import yaml, sys
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+    print(d.get("reservedSystemCPUs", ""))
+except Exception:
+    pass
+' /run/k0s/kubelet/config.yaml 2>/dev/null)"
+    live_policy="$(python3 -c '
+import yaml, sys
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+    print(d.get("cpuManagerPolicy", ""))
+except Exception:
+    pass
+' /run/k0s/kubelet/config.yaml 2>/dev/null)"
+  fi
+
+  if [ "$live_reserved" != "$reserved" ] || [ "$live_policy" != "static" ]; then
+    needs_restart=1
+    info "live kubelet config doesn't match desired (reservedSystemCPUs=$live_reserved policy=$live_policy)"
+  fi
+
+  if [ "$needs_restart" = 1 ]; then
+    note "restarting k0scontroller so kubelet picks up the worker-profile..."
+    # State migration: kubelet refuses to start when checkpoint policy
+    # mismatches the running config policy. Already handled in
+    # _kubelet_reservation_apply but be defensive on the second restart.
+    if [ -f "$KUBELET_STATE_FILE" ]; then
+      local state_policy
+      state_policy="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("policyName", ""))
+except Exception:
+    pass
+' "$KUBELET_STATE_FILE" 2>/dev/null)"
+      if [ "$state_policy" = "none" ]; then
+        rm -f "$KUBELET_STATE_FILE"
+        note "removed stale cpu_manager_state (was policy=none)"
+      fi
+    fi
+    if systemctl restart k0scontroller; then
+      pass "k0scontroller restarted"
+      # Brief wait for kubelet config regeneration.
+      local i
+      for i in $(seq 1 30); do
+        sleep 2
+        if [ -r /run/k0s/kubelet/config.yaml ]; then
+          live_reserved="$(python3 -c '
+import yaml, sys
+try:
+    d = yaml.safe_load(open(sys.argv[1])) or {}
+    print(d.get("reservedSystemCPUs", ""))
+except Exception:
+    pass
+' /run/k0s/kubelet/config.yaml 2>/dev/null)"
+          [ "$live_reserved" = "$reserved" ] && break
+        fi
+      done
+      if [ "$live_reserved" = "$reserved" ]; then
+        pass "kubelet config now has reservedSystemCPUs=$reserved cpuManagerPolicy=static"
+      else
+        fail "kubelet config still missing reservedSystemCPUs after restart"
+        info "check: cat /run/k0s/kubelet/config.yaml; kubectl get node $node_name -o yaml | grep worker-profile"
+      fi
+    else
+      fail "systemctl restart k0scontroller failed"
+      return 1
+    fi
+  else
+    skip "kubelet config already matches (reservedSystemCPUs=$reserved policy=static)"
   fi
 }
 
