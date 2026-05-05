@@ -968,9 +968,10 @@ cmd_migrate_cmdline() {
         if [[ -n "$default_label" ]]; then
             info "extlinux DEFAULT label: $default_label"
             # Pull APPEND from inside the matching LABEL block.
+            # awk POSIX EREs do not understand \s — use [[:space:]].
             current=$(awk -v lbl="$default_label" '
-                /^\s*LABEL\s/  { in_block = ($2 == lbl) }
-                in_block && /^\s*APPEND\s/ { print; exit }
+                /^[[:space:]]*LABEL[[:space:]]/  { in_block = ($2 == lbl) }
+                in_block && /^[[:space:]]*APPEND[[:space:]]/ { print; exit }
             ' "$config_file")
             awk_scope="$default_label"
         else
