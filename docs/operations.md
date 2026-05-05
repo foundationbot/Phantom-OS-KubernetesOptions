@@ -1061,4 +1061,72 @@ the full schema and defaults.
 | `--dry-run` | Print plan, change nothing |
 | `-y, --yes` | Skip confirmation prompts |
 
+## Issuing a fleet-operator kubeconfig
+
+The `fleet-operator` ServiceAccount is installed by
+`manifests/base/fleet-operator-kubectl-rbac/`. To hand a kubeconfig to an
+on-call operator:
+
+```bash
+ROBOT=<robot-name>
+SA_NS=kube-system
+SA=fleet-operator
+SECRET=$(kubectl -n $SA_NS create token $SA --duration=720h)
+APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+CA=$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+cat > "$ROBOT-fleet-operator.kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: $ROBOT
+  cluster:
+    server: $APISERVER
+    certificate-authority-data: $CA
+contexts:
+- name: $ROBOT
+  context: {cluster: $ROBOT, user: fleet-operator, namespace: default}
+users:
+- name: fleet-operator
+  user: {token: $SECRET}
+current-context: $ROBOT
+EOF
+chmod 0600 "$ROBOT-fleet-operator.kubeconfig"
+```
+
+Verify: `kubectl --kubeconfig=...kubeconfig get ns` succeeds; `kubectl ...
+get secret -n argocd phantomos-kos-repo` returns `Forbidden`; `kubectl ...
+scale deploy/foo --replicas=2 -n nimbus` succeeds; `kubectl ... delete ns
+nimbus` returns `Forbidden`.
+
+## Rotating the ArgoCD repo credential
+
+1. Render a fresh `argocd-repo-credential.yaml` from
+   `host-config-templates/_template/argocd-repo-credential.yaml.tpl` with
+   the new GitHub App key (or PAT). `chmod 0600`.
+2. For each robot:
+   ```
+   scp -p argocd-repo-credential.yaml \
+       root@$ROBOT:/etc/phantomos/argocd-repo-credential.yaml
+   ssh root@$ROBOT 'bootstrap-robot.sh --gitops-repo-credential-only'
+   ```
+3. Verify on the robot: `argocd repo list` reports `Successful`.
+4. After the fan-out, revoke the old GitHub App installation key.
+
+## Recovering a lost etcd encryption key
+
+The encryption key lives at `/var/lib/k0s/pki/encryption-config.yaml` with
+a backup at `/etc/phantomos/etcd-encryption-key.bak`. If both are lost:
+
+- All Secrets in etcd become unreadable. The cluster keeps running but new
+  pods that need those Secrets will fail.
+- Recover by re-bootstrapping (`bootstrap-robot.sh --gitops`) which
+  generates a fresh key and re-applies the repo credential. Any Secret not
+  re-applied (e.g. operator-installed app secrets) must be manually
+  recreated.
+
+To prevent loss: `cp /var/lib/k0s/pki/encryption-config.yaml
+/etc/phantomos/etcd-encryption-key.bak` is a no-op once bootstrap has run,
+so as long as `/etc/phantomos/` is on a separate partition from
+`/var/lib/`, single-disk failures won't take both copies.
+
 For deeper sub-system debugging see [architecture.md](./architecture.md).
