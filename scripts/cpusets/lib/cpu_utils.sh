@@ -266,12 +266,42 @@ cpu_list_to_hex_mask() {
     printf "%x" "$mask"
 }
 
-# Housekeeping CPUs = present minus isolated. Compressed output.
+# Housekeeping CPUs = present minus (cmdline-isolated ∪ cgroup-partitioned).
+#
+# Two isolation mechanisms can be in play simultaneously:
+#   1. isolcpus= on the kernel cmdline (legacy), reported by
+#      /sys/devices/system/cpu/isolated.
+#   2. cgroup v2 cpuset partitions managed by manage_cpusets.sh,
+#      tracked in /var/lib/manage_cpusets/state.
+#
+# After 'migrate-cmdline --add-rt-flags' removes isolcpus= from the
+# kernel cmdline (the canonical migration), only mechanism (2) remains.
+# The lib previously only knew about (1), so compute_housekeeping_list
+# silently regressed to "all CPUs" — making the systemd CPUAffinity
+# drop-in a no-op and stranding userspace work on the RT cores.
+#
+# The state file is read directly to keep the lib free of dependencies
+# on manage_cpusets.sh's bash functions. Format: 'name|cpus' per line.
 compute_housekeeping_list() {
-    local present isolated
+    local present isolated managed combined
     present=$(get_present_cpus)
     isolated=$(detect_isolated_cores)
-    cpu_list_diff "$present" "$isolated"
+    managed=$(_read_state_managed_cpus)
+    combined=$(cpu_list_union "$isolated" "$managed")
+    cpu_list_diff "$present" "$combined"
+}
+
+# Read the union of cpus from the manage_cpusets state file, or
+# empty when the file is absent / unreadable.
+_read_state_managed_cpus() {
+    local state_file="${MANAGE_CPUSETS_STATE_FILE:-/var/lib/manage_cpusets/state}"
+    local combined="" line cpus
+    [[ -r "$state_file" ]] || { echo ""; return 0; }
+    while IFS='|' read -r _name cpus; do
+        [[ -z "$cpus" ]] && continue
+        combined=$(cpu_list_union "$combined" "$cpus")
+    done < "$state_file"
+    echo "$combined"
 }
 
 # Same as above but emitted as a hex bitmask.
