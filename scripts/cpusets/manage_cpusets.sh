@@ -958,15 +958,32 @@ cmd_migrate_cmdline() {
     info "Detected bootloader: $bootloader ($config_file)"
 
     # Extract the current APPEND or GRUB_CMDLINE_LINUX_DEFAULT line.
-    local line_pattern new_line
+    # On extlinux, scope edits to the DEFAULT label's APPEND only —
+    # Jetson's extlinux.conf typically carries multiple LABEL blocks
+    # (primary, recovery, …) each with their own APPEND, and we MUST
+    # NOT touch the recovery one.
+    local line_pattern new_line default_label="" awk_scope=""
     if [[ "$bootloader" == "extlinux" ]]; then
-        current=$(grep -E '^\s*APPEND\s' "$config_file" | head -1)
-        [[ -z "$current" ]] && die "No APPEND line in $config_file"
-        line_pattern='^\s*APPEND\s'
+        default_label=$(grep -E '^\s*DEFAULT\s' "$config_file" | head -1 | awk '{print $2}')
+        if [[ -n "$default_label" ]]; then
+            info "extlinux DEFAULT label: $default_label"
+            # Pull APPEND from inside the matching LABEL block.
+            current=$(awk -v lbl="$default_label" '
+                /^\s*LABEL\s/  { in_block = ($2 == lbl) }
+                in_block && /^\s*APPEND\s/ { print; exit }
+            ' "$config_file")
+            awk_scope="$default_label"
+        else
+            warn "no DEFAULT label found — falling back to first APPEND line"
+            current=$(grep -E '^\s*APPEND\s' "$config_file" | head -1)
+        fi
+        [[ -z "$current" ]] && die "No APPEND line for label '$default_label' in $config_file"
+        # awk uses POSIX EREs and does not honor \s. Use [[:space:]].
+        line_pattern='^[[:space:]]*APPEND[[:space:]]'
     else
         current=$(grep -E '^\s*GRUB_CMDLINE_LINUX(_DEFAULT)?=' "$config_file" | head -1)
         [[ -z "$current" ]] && die "No GRUB_CMDLINE_LINUX line in $config_file"
-        line_pattern='^\s*GRUB_CMDLINE_LINUX(_DEFAULT)?='
+        line_pattern='^[[:space:]]*GRUB_CMDLINE_LINUX(_DEFAULT)?='
     fi
 
     # Remove isolcpus=<anything> tokens.
@@ -978,9 +995,16 @@ cmd_migrate_cmdline() {
         local need=("rcu_nocb_poll" "skew_tick=1" "irqaffinity=$hk")
         local flag
         for flag in "${need[@]}"; do
-            # strip any existing value of the same key so we replace cleanly
             local key="${flag%%=*}"
-            new_line=$(echo "$new_line" | sed -E "s/\s*${key}=[^ \"]*//g" | sed -E 's/\s+/ /g')
+            if [[ "$flag" == *"="* ]]; then
+                # key=value: strip "key=anything" before re-adding.
+                new_line=$(echo "$new_line" | sed -E "s/\s*${key}=[^ \"]*//g" | sed -E 's/\s+/ /g')
+            else
+                # bare flag: strip the bare token (with word boundaries)
+                # so we don't double-add when it's already present and
+                # don't accidentally chew through a longer-prefix flag.
+                new_line=$(echo "$new_line" | sed -E "s/(^|\s)${key}(\s|$|\")/\1\2/g" | sed -E 's/\s+/ /g')
+            fi
             # insert inside the quoted string if present, else append
             if [[ "$new_line" =~ \" ]]; then
                 new_line=$(echo "$new_line" | sed -E "s/\"([^\"]*)\"/\"\1 ${flag}\"/")
@@ -1002,9 +1026,21 @@ cmd_migrate_cmdline() {
         return 0
     fi
 
-    # Refuse if the cmdline has multi-line APPEND or other ambiguity.
-    if [[ "$(grep -cE "$line_pattern" "$config_file")" -ne 1 ]]; then
-        die "Multiple $line_pattern lines in $config_file — refusing to auto-edit. Please edit manually."
+    # Refuse if the cmdline is ambiguous. extlinux is allowed to have
+    # multiple APPEND lines (one per LABEL); we scope the edit to
+    # default_label below. GRUB has exactly one GRUB_CMDLINE_LINUX*
+    # line by convention — anything else is operator-edited and we
+    # refuse rather than risk corrupting it.
+    if [[ "$bootloader" == "grub" ]]; then
+        if [[ "$(grep -cE "$line_pattern" "$config_file")" -ne 1 ]]; then
+            die "Multiple $line_pattern lines in $config_file — refusing to auto-edit. Please edit manually."
+        fi
+    elif [[ -z "$default_label" ]]; then
+        # extlinux without DEFAULT label = ambiguous; fall back to
+        # the original strict refusal so we don't blast every label.
+        if [[ "$(grep -cE "$line_pattern" "$config_file")" -ne 1 ]]; then
+            die "Multiple $line_pattern lines in $config_file and no DEFAULT label — refusing to auto-edit. Please edit manually."
+        fi
     fi
 
     if [[ "${SKIP_PROMPTS:-0}" != "1" ]]; then
@@ -1020,18 +1056,28 @@ cmd_migrate_cmdline() {
     $SUDO cp "$config_file" "$backup" || die "Backup failed"
     success "Backed up to $backup"
 
-    # Atomic write via tempfile.
+    # Atomic write via tempfile. On extlinux with a DEFAULT label,
+    # only replace the APPEND inside that LABEL block — leave other
+    # labels (recovery, etc.) untouched. Otherwise replace the first
+    # matching line.
     local tmp
     tmp=$(mktemp)
-    # shellcheck disable=SC2016
-    $SUDO sed -E "${config_file//\//\\/}s;.*;$(printf '%s' "$new_line" | sed 's/[\/&]/\\&/g');" "$config_file" > /dev/null 2>&1 || true
-    # Safer: line replacement using awk.
-    awk -v pat="$line_pattern" -v repl="$new_line" '
-        {
-            if (match($0, pat) && !done) { print repl; done=1 }
-            else { print }
-        }
-    ' "$config_file" > "$tmp"
+    if [[ "$bootloader" == "extlinux" && -n "$awk_scope" ]]; then
+        awk -v pat="$line_pattern" -v repl="$new_line" -v lbl="$awk_scope" '
+            /^[[:space:]]*LABEL[[:space:]]/ { in_block = ($2 == lbl) }
+            {
+                if (in_block && match($0, pat) && !done) { print repl; done=1 }
+                else { print }
+            }
+        ' "$config_file" > "$tmp"
+    else
+        awk -v pat="$line_pattern" -v repl="$new_line" '
+            {
+                if (match($0, pat) && !done) { print repl; done=1 }
+                else { print }
+            }
+        ' "$config_file" > "$tmp"
+    fi
 
     $SUDO cp "$tmp" "$config_file.new"
     $SUDO mv "$config_file.new" "$config_file"

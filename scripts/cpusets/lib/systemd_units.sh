@@ -272,7 +272,12 @@ write_cpusets_service() {
     $SUDO cp "$source_dir/lib/"*.sh "$install_dir/lib/"
     $SUDO chmod +x "$install_dir/manage_cpusets.sh"
 
-    $SUDO cp "$config_file" "$etc_config"
+    # Skip the copy when the operator already passed the canonical
+    # path; cp would otherwise emit "are the same file" noise. Use
+    # -ef to compare inodes (handles symlinks + bind mounts cleanly).
+    if [[ ! "$config_file" -ef "$etc_config" ]]; then
+        $SUDO cp "$config_file" "$etc_config"
+    fi
 
     $SUDO tee "$wrapper_path" > /dev/null <<WRAPPER_EOF
 #!/bin/bash
