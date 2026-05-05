@@ -32,9 +32,15 @@ CONTAINER_NAME="${CONTAINER_NAME:-positronic-control}"
 INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
 IMAGE_NAME="${IMAGE_NAME:-localhost:5443/positronic-control}"
 
-TRACK_ROOT_APP="${TRACK_ROOT_APP:-root}"
-TRACK_ROOT_NS="${TRACK_ROOT_NS:-argocd}"
 ARGO_NS="${ARGO_NS:-argocd}"
+
+# Per-host source-of-truth — track-branch / argo-pause / argo-resume
+# read targetRevision and the enabled-stacks list from this file. The
+# legacy umbrella-app layout (gitops/apps/<robot>/...) was removed
+# when per-stack Applications shipped; Application CRs are now
+# per-host generated state, not in git.
+HOST_CONFIG_FILE="${HOST_CONFIG_FILE:-/etc/phantomos/host-config.yaml}"
+HOST_CONFIG_HELPER="${HOST_CONFIG_HELPER:-${REPO}/scripts/lib/host-config.py}"
 
 DRY_RUN=0
 
@@ -62,8 +68,20 @@ _resolve_robot() {
   # Derived paths (still env-overridable).
   # positronic-control lives in the `core` stack post-restructure.
   OVERLAY="${OVERLAY:-${REPO}/manifests/stacks/core}"
-  TRACK_APP_FILE="${TRACK_APP_FILE:-${REPO}/gitops/apps/${ROBOT}/phantomos-${ROBOT}.yaml}"
-  ARGO_APP="${ARGO_APP:-phantomos-${ROBOT}}"
+}
+
+# Enumerate this robot's per-stack Application names. Echoes one
+# 'phantomos-<robot>-<stack>' per line, in canonical order. Called
+# by track-branch / argo-pause / argo-resume.
+_enabled_stack_apps() {
+  if [ ! -r "$HOST_CONFIG_FILE" ]; then
+    return 0
+  fi
+  python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" get-enabled-stacks 2>/dev/null \
+    | while read -r stack; do
+        [ -z "$stack" ] && continue
+        printf 'phantomos-%s-%s\n' "$ROBOT" "$stack"
+      done
 }
 
 # ---------- color helpers (only when stdout is a TTY) ---------------------
@@ -190,18 +208,22 @@ ${C_BOLD}Subcommands:${C_RESET}
   redeploy                     kubectl apply -k <overlay>, then bounce the
                                pod. Same as APPLY=1 diagnose-positronic.sh
                                minus the diagnose phase.
-  track-branch [<branch>]      Point ArgoCD's root app at <branch> (default:
-                               current git branch). Edits + commits + pushes
-                               targetRevision in the robot's app manifest,
-                               then patches the live root Application. ArgoCD
+  track-branch [<branch>]      Point ArgoCD at <branch> (default: current
+                               git branch). Updates targetRevision in
+                               /etc/phantomos/host-config.yaml and patches
+                               every enabled per-stack Application
+                               (phantomos-<robot>-core, -operator, ...).
+                               Host-config is per-host machine state and is
+                               not committed back to the repo. ArgoCD
                                reconciles within ~3 min. Flip back:
                                track-branch main.
-  argo-pause                   Disable selfHeal on the robot's ArgoCD app so
-                               a manual 'kubectl apply -k' against the overlay
-                               sticks. Auto-sync stays on (git changes still
-                               apply); cluster drift just isn't reverted.
-                               Resume with argo-resume.
-  argo-resume                  Re-enable selfHeal on the robot's ArgoCD app.
+  argo-pause                   Disable selfHeal on every enabled per-stack
+                               Application so a manual 'kubectl apply -k'
+                               against the overlay sticks. Auto-sync stays
+                               on (git changes still apply); cluster drift
+                               just isn't reverted. Resume with argo-resume.
+  argo-resume                  Re-enable selfHeal on every enabled per-stack
+                               Application.
   teardown [-y|--yes]          Delete the Deployment + ConfigMap + ns.
                                Cluster-side only — does not touch manifests.
   help                         This message.
@@ -220,11 +242,9 @@ ${C_BOLD}Env overrides:${C_RESET}
   OVERLAY          (default: \$REPO/manifests/stacks/core)
   CONFIGMAP_NAME   (default: $CONFIGMAP_NAME)
   IMAGE_NAME       (default: $IMAGE_NAME)
-  TRACK_APP_FILE   (default: \$REPO/gitops/apps/\$ROBOT/phantomos-\$ROBOT.yaml)
-  TRACK_ROOT_APP   (default: $TRACK_ROOT_APP)
-  TRACK_ROOT_NS    (default: $TRACK_ROOT_NS)
-  ARGO_APP         (default: phantomos-\$ROBOT)
-  ARGO_NS          (default: $ARGO_NS)
+  ARGO_NS              (default: $ARGO_NS)
+  HOST_CONFIG_FILE     (default: /etc/phantomos/host-config.yaml)
+  HOST_CONFIG_HELPER   (default: \$REPO/scripts/lib/host-config.py)
 
 ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh status
@@ -773,39 +793,39 @@ cmd_track_branch() {
     fi
   fi
 
-  command -v git >/dev/null 2>&1 || die "git is required for track-branch"
-  [ -f "$TRACK_APP_FILE" ] || die "Application file not found: $TRACK_APP_FILE"
+  [ -r "$HOST_CONFIG_FILE" ] || die "host-config not found at $HOST_CONFIG_FILE"
 
-  bold "Pointing $TRACK_ROOT_APP at branch: $branch"
-
-  # 1. Edit the Application file in place.
+  # 1. Update targetRevision in host-config.yaml. host-config is the
+  # per-host source-of-truth; bootstrap re-renders Application CRs
+  # from it on the next --gitops run. This is NOT committed to the
+  # repo — host-config.yaml is per-host machine state.
+  bold "Setting targetRevision=$branch in $HOST_CONFIG_FILE"
   local edit_rc=0
   if [ "$DRY_RUN" = 1 ]; then
-    info "would set targetRevision=$branch in $TRACK_APP_FILE"
+    info "would set targetRevision=$branch in $HOST_CONFIG_FILE"
   else
-    _update_target_revision "$TRACK_APP_FILE" "$branch" || edit_rc=$?
+    _update_target_revision "$HOST_CONFIG_FILE" "$branch" || edit_rc=$?
     case "$edit_rc" in
-      0) ok "$TRACK_APP_FILE — targetRevision: $branch" ;;
-      1) info "$TRACK_APP_FILE already at targetRevision: $branch" ;;
-      *) die "failed to update $TRACK_APP_FILE" ;;
+      0) ok "$HOST_CONFIG_FILE — targetRevision: $branch" ;;
+      1) info "$HOST_CONFIG_FILE already at targetRevision: $branch" ;;
+      *) die "failed to update $HOST_CONFIG_FILE" ;;
     esac
   fi
 
-  # 2. Commit + push the file (only if it actually changed).
-  if [ "$edit_rc" = 0 ] && [ "$DRY_RUN" != 1 ]; then
-    bold "Committing + pushing $TRACK_APP_FILE"
-    local cur_branch
-    cur_branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    git -C "$REPO" add "$TRACK_APP_FILE" || die "git add failed"
-    git -C "$REPO" commit -m "gitops: track $branch on $ARGO_APP" -- "$TRACK_APP_FILE" \
-      || die "git commit failed"
-    git -C "$REPO" push -u origin "$cur_branch" || die "git push failed"
-    ok "pushed to origin/$cur_branch"
+  # 2. Patch every enabled per-stack Application's
+  # spec.source.targetRevision so ArgoCD picks up the new branch
+  # immediately (without waiting for the next bootstrap re-render).
+  require_kubectl
+  local apps=()
+  while IFS= read -r app; do
+    [ -z "$app" ] && continue
+    apps+=("$app")
+  done < <(_enabled_stack_apps)
+
+  if [ "${#apps[@]}" -eq 0 ]; then
+    die "no enabled stacks for $ROBOT — check stacks: in $HOST_CONFIG_FILE"
   fi
 
-  # 3. Patch the live root Application's targetRevision.
-  bold "Patching live $TRACK_ROOT_APP.spec.source.targetRevision -> $branch"
-  require_kubectl
   local payload
   if ! payload="$(BRANCH="$branch" python3 -c '
 import json, os
@@ -813,17 +833,25 @@ print(json.dumps({"spec": {"source": {"targetRevision": os.environ["BRANCH"]}}})
 ' 2>/dev/null)"; then
     die "python3 is required to build the patch JSON"
   fi
-  kctl -n "$TRACK_ROOT_NS" patch app "$TRACK_ROOT_APP" --type=merge -p "$payload" \
-    || die "failed to patch live $TRACK_ROOT_APP Application"
+
+  for app in "${apps[@]}"; do
+    bold "Patching live $ARGO_NS/$app.spec.source.targetRevision -> $branch"
+    if [ "$DRY_RUN" = 1 ]; then
+      info "would patch app/$app with $payload"
+      continue
+    fi
+    kctl -n "$ARGO_NS" patch app "$app" --type=merge -p "$payload" \
+      || die "failed to patch $app"
+    ok "$app -> $branch"
+  done
 
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
 
-  ok "$TRACK_ROOT_APP -> $branch"
-
   bold "Next"
   info "ArgoCD reconciles within ~3 min, or trigger now:"
-  info "  $KUBECTL -n $TRACK_ROOT_NS annotate app $TRACK_ROOT_APP \\"
-  info "    argocd.argoproj.io/refresh=hard --overwrite"
+  for app in "${apps[@]}"; do
+    info "  $KUBECTL -n $ARGO_NS annotate app $app argocd.argoproj.io/refresh=hard --overwrite"
+  done
   info ""
   info "Heads up: any uncommitted changes under manifests/ aren't on the branch"
   info "yet — commit + push them before ArgoCD reconciles, or it will pull the"
@@ -834,27 +862,44 @@ print(json.dumps({"spec": {"source": {"targetRevision": os.environ["BRANCH"]}}})
 
 # ---------- subcommand: argo-pause / argo-resume --------------------------
 
-cmd_argo_pause() {
+# Iterate every enabled per-stack Application and apply a selfHeal
+# patch. selfHeal_value is "true" or "false".
+_argo_set_selfheal() {
+  local selfheal_value="$1"
   require_kubectl
-  bold "Disabling ArgoCD selfHeal on $ARGO_NS/$ARGO_APP"
+  local apps=()
+  while IFS= read -r app; do
+    [ -z "$app" ] && continue
+    apps+=("$app")
+  done < <(_enabled_stack_apps)
+  if [ "${#apps[@]}" -eq 0 ]; then
+    die "no enabled stacks for $ROBOT — check stacks: in $HOST_CONFIG_FILE"
+  fi
+  local payload="{\"spec\":{\"syncPolicy\":{\"automated\":{\"selfHeal\":${selfheal_value},\"prune\":true}}}}"
+  for app in "${apps[@]}"; do
+    bold "Patching $ARGO_NS/$app -> selfHeal=$selfheal_value"
+    if [ "$DRY_RUN" = 1 ]; then
+      info "would patch app/$app with $payload"
+      continue
+    fi
+    kctl -n "$ARGO_NS" patch app "$app" --type=merge -p "$payload" || die "patch failed on $app"
+    ok "$app selfHeal=$selfheal_value"
+  done
+}
+
+cmd_argo_pause() {
+  bold "Disabling ArgoCD selfHeal on every enabled stack for $ROBOT"
   info "auto-sync stays ON; cluster drift won't be reverted by ArgoCD."
-  kctl -n "$ARGO_NS" patch app "$ARGO_APP" --type=merge \
-    -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false,"prune":true}}}}' \
-    || die "patch failed"
+  _argo_set_selfheal "false"
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
-  ok "$ARGO_APP selfHeal=false"
   info "you can now: kubectl apply -k <overlay> (sticks until next git change)"
   info "resume: bash scripts/positronic.sh argo-resume"
 }
 
 cmd_argo_resume() {
-  require_kubectl
-  bold "Re-enabling ArgoCD selfHeal on $ARGO_NS/$ARGO_APP"
-  kctl -n "$ARGO_NS" patch app "$ARGO_APP" --type=merge \
-    -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":true,"prune":true}}}}' \
-    || die "patch failed"
+  bold "Re-enabling ArgoCD selfHeal on every enabled stack for $ROBOT"
+  _argo_set_selfheal "true"
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
-  ok "$ARGO_APP selfHeal=true"
   info "ArgoCD will revert any cluster-side drift on the next reconcile."
 }
 
