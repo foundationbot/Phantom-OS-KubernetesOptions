@@ -1596,6 +1596,40 @@ cpu_isolation() {
   fi
   phase "phase 8: cpu-isolation (gates phase 9)"
 
+  # Detect legacy single-core configs (cpuIsolation.nic.irqCore set,
+  # but no top-level cpuIsolation.dmaRtCpu). These typically come from
+  # bootstrap runs that pre-date the irqCore/dmaRtCpu split — the old
+  # prompt persisted nic.rtCore only, validator translates it to
+  # nic.irqCore for back-compat, and the env-write helper falls back to
+  # using irqCore as DMA_RT_CPU. Net effect: NIC IRQs and the SOEM RT
+  # loop end up co-located, defeating the whole point of distinct
+  # cores. On a TTY we prompt for the missing dmaRtCpu; off-TTY we
+  # fail loudly.
+  local _ci_iface _ci_irq _ci_dma_rt
+  { read -r _ci_iface; read -r _ci_irq; } < <(cpusets_json_nic "$ci_json")
+  _ci_dma_rt="$(cpusets_json_dma_rt_cpu "$ci_json")"
+  if [ -n "$_ci_irq" ] && [ -z "$_ci_dma_rt" ]; then
+    info "host-config has nic.irqCore=$_ci_irq but no cpuIsolation.dmaRtCpu."
+    info "for low-jitter EtherCAT the SOEM RT loop core SHOULD differ from"
+    info "the NIC IRQ core — async interrupts can preempt the cyclic loop."
+    if [ -t 0 ] && [ -t 2 ] && [ "$DRY_RUN" != 1 ]; then
+      if ! _cpu_isolation_prompt_dma_rt_cpu "$hc" "$ci_json" "$_ci_irq"; then
+        fail "operator declined to set dmaRtCpu — bootstrap would silently"
+        info "co-locate IRQs and the RT loop. Re-run and pick a distinct core,"
+        info "or hand-edit $hc to add 'dmaRtCpu: <core>' under cpuIsolation."
+        return
+      fi
+      ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+    else
+      fail "cpuIsolation.dmaRtCpu missing and shell is not interactive"
+      info "add 'dmaRtCpu: <core>' under cpuIsolation in $hc and re-run,"
+      info "or rerun on a TTY to be prompted. To deliberately co-locate"
+      info "(soft-RT only), set dmaRtCpu to the same value as nic.irqCore"
+      info "— validator will warn but not fail."
+      return
+    fi
+  fi
+
   # Sanity: cgroup v2 + manage_cpusets.sh present. The kernel writes
   # /sys/fs/cgroup/cgroup.controllers iff the unified hierarchy is
   # mounted at that path — more reliable than parsing mount output,
@@ -2109,6 +2143,92 @@ PY
 
 # Persist a JSON cpuIsolation blob, then validate the resulting file.
 # Reverts the file on validation failure (writes through a tmp copy).
+# Prompt the operator for cpuIsolation.dmaRtCpu only — used when an
+# existing host-config has nic.irqCore (or legacy nic.rtCore) but no
+# top-level dmaRtCpu (i.e. it was persisted by an old prompt before
+# the irqCore/dmaRtCpu split landed). Reads the existing JSON, splices
+# in dmaRtCpu, persists the merged block, returns 0. Aborts via
+# return 1 on EOF / non-numeric input / out-of-partition / explicit
+# operator opt-out.
+#
+# Args:
+#   $1  host-config path
+#   $2  current cpuIsolation JSON blob
+#   $3  current nic.irqCore (so we can default the loop core to a
+#        distinct cpu and warn on collision)
+_cpu_isolation_prompt_dma_rt_cpu() {
+  local hc="$1" ci_json="$2" nic_irq="$3"
+  local part_cpus first_cpu second_cpu rt_default rt_input
+
+  # Pull the first declared partition's cpus and pick a default rt
+  # loop core that differs from nic_irq.
+  part_cpus="$(python3 - "$ci_json" <<'PY' 2>/dev/null
+import json, sys
+d = json.loads(sys.argv[1] or "{}")
+parts = d.get("partitions") or []
+print(parts[0].get("cpus", "") if parts else "")
+PY
+)"
+  if [ -z "$part_cpus" ]; then
+    fail "no partitions declared — cannot suggest a default dmaRtCpu"
+    return 1
+  fi
+
+  local part_expanded
+  part_expanded="$(_cpu_isolation_expand_cpus "$part_cpus")"
+  first_cpu="$(printf '%s\n' "$part_expanded" | head -n1)"
+  second_cpu="$(printf '%s\n' "$part_expanded" | sed -n '2p')"
+  [ -z "$second_cpu" ] && second_cpu="$first_cpu"
+
+  rt_default="$second_cpu"
+  if [ "$nic_irq" = "$second_cpu" ]; then
+    rt_default="$first_cpu"
+  fi
+
+  while :; do
+    printf '\n  SOEM RT loop core (integer inside %s, distinct from nic.irqCore=%s) [%s]: ' \
+      "$part_cpus" "$nic_irq" "$rt_default" >&2
+    IFS= read -r rt_input </dev/tty || return 1
+    [ -z "$rt_input" ] && rt_input="$rt_default"
+    case "$rt_input" in
+      ''|*[!0-9]*) printf '    not a number\n' >&2; continue ;;
+    esac
+    # Must be inside the partition.
+    if ! printf '%s\n' "$part_expanded" | grep -qx "$rt_input"; then
+      printf '    %s is not inside %s\n' "$rt_input" "$part_cpus" >&2
+      continue
+    fi
+    if [ "$rt_input" = "$nic_irq" ]; then
+      printf '    warning: same core as NIC IRQ (%s) — async interrupts may\n' "$nic_irq" >&2
+      printf '    preempt the SOEM loop. Continue with co-located cores? [y/N]: ' >&2
+      local same_ans
+      IFS= read -r same_ans </dev/tty || return 1
+      case "${same_ans,,}" in y|yes) break ;; *) continue ;; esac
+    fi
+    break
+  done
+
+  # Splice dmaRtCpu into the existing JSON; also rename the legacy
+  # nic.rtCore field to nic.irqCore so the next run has no
+  # deprecation warning. Persist the merged block.
+  local merged
+  merged="$(python3 - "$ci_json" "$rt_input" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1] or "{}")
+d["dmaRtCpu"] = int(sys.argv[2])
+nic = d.get("nic") or {}
+if isinstance(nic, dict) and "rtCore" in nic and "irqCore" not in nic:
+    nic["irqCore"] = nic.pop("rtCore")
+    d["nic"] = nic
+print(json.dumps(d))
+PY
+)"
+  if ! _cpu_isolation_persist "$hc" "$merged"; then
+    return 1
+  fi
+  pass "persisted cpuIsolation.dmaRtCpu=$rt_input to $hc"
+}
+
 _cpu_isolation_persist() {
   local hc="$1" json="$2"
   local backup
@@ -2229,8 +2349,21 @@ configure_dma_ethercat_env() {
     # DMA_RT_CPU comes from cpuIsolation.dmaRtCpu (the SOEM loop core).
     # Legacy configs without dmaRtCpu fall back to nic.irqCore so they
     # still produce a usable env file (matches old same-core behaviour).
+    # Phase 8 should have already converted such configs by prompting
+    # the operator for dmaRtCpu — if we still hit this path (e.g.
+    # phase 8 was --skipped), surface a visible warning so it's never
+    # silent.
     rt_cpu="$(cpusets_json_dma_rt_cpu "$ci_json")"
-    if [ -z "$rt_cpu" ]; then rt_cpu="$nic_irq"; fi
+    if [ -z "$rt_cpu" ]; then
+      rt_cpu="$nic_irq"
+      if [ -n "$nic_irq" ]; then
+        info "WARN  cpuIsolation.dmaRtCpu unset; co-locating SOEM loop on nic.irqCore=$nic_irq"
+        info "WARN  add 'dmaRtCpu: <distinct cpu>' under cpuIsolation for low-jitter EtherCAT"
+      fi
+    elif [ -n "$nic_irq" ] && [ "$rt_cpu" = "$nic_irq" ]; then
+      info "WARN  cpuIsolation.dmaRtCpu=$rt_cpu equals nic.irqCore — async NIC IRQs"
+      info "WARN  may preempt the SOEM loop. Pick distinct cores for hard-RT."
+    fi
   fi
 
   # Write DMA_CONFIG (and optionally INTERFACE, DMA_CPU_AFFINITY,
