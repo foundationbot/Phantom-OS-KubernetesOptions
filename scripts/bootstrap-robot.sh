@@ -139,6 +139,20 @@
 #                      Default: /etc/phantomos/argocd-repo-credential.yaml
 #                      Must NOT reside inside a git work tree.
 #
+# Migration (partial-phase) flags — for already-deployed robots:
+#   --gitops-repo-credential-only
+#                      apply only the repo credential Secret (kubectl apply
+#                      -n argocd -f <credential-file>). Skips every other
+#                      phase. Requires --repo-credential-file. Used by the
+#                      migration playbook to re-credential an existing robot
+#                      without re-running deps/cluster/gitops.
+#   --gitops-rbac-only
+#                      apply only the RBAC overlays (argocd-secret-rbac,
+#                      argocd-rbac ConfigMap patches, fleet-operator-kubectl-
+#                      rbac). Skips every other phase. Used by the migration
+#                      playbook to install RBAC on an already-bootstrapped
+#                      robot without a full re-run.
+#
 # Examples:
 #   sudo bash scripts/bootstrap-robot.sh                       # full bootstrap
 #   sudo bash scripts/bootstrap-robot.sh --argocd-users        # rotate passwords
@@ -367,6 +381,10 @@ while [ $# -gt 0 ]; do
                          DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
     --repo-credential-file)
                          REPO_CREDENTIAL_FILE="${2:?value required}"; shift 2 ;;
+    --gitops-repo-credential-only)
+                         SELECTED_PHASES+=(gitops-repo-credential-only); shift ;;
+    --gitops-rbac-only)
+                         SELECTED_PHASES+=(gitops-rbac-only); shift ;;
     --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
     --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
 
@@ -588,7 +606,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-users|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-users|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface|gitops-repo-credential-only|gitops-rbac-only) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -3225,6 +3243,27 @@ EOF
   [ "$ok" = 1 ] && return 0 || return 1
 }
 
+gitops_repo_credential_only() {
+  phase "phase: apply repo credential (only)"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  apply repo credential from $REPO_CREDENTIAL_FILE"
+    return
+  fi
+  _apply_repo_credential "$REPO_CREDENTIAL_FILE"
+}
+
+gitops_rbac_only() {
+  phase "phase: apply argocd RBAC overlays (only)"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  apply argocd-secret-rbac"
+    info "DRY-RUN  apply argocd-rbac"
+    info "DRY-RUN  apply fleet-operator-kubectl-rbac"
+    return
+  fi
+  _gitops_apply_secret_rbac
+  _gitops_apply_argocd_user_rbac
+}
+
 gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 10: gitops  (skipped)"; return; fi
   phase "phase 10: gitops (install argocd + apply per-host Application)"
@@ -4032,6 +4071,21 @@ print_plan() {
 # When BOOTSTRAP_LIB_ONLY=1, just load function definitions and return.
 if [ "${BOOTSTRAP_LIB_ONLY:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
+fi
+
+# Narrow phase invocations short-circuit the full pipeline.
+# These must come AFTER the BOOTSTRAP_LIB_ONLY guard (so library-mode
+# tests that source the script don't trigger them) and BEFORE the normal
+# phase chain below.
+if [[ " ${SELECTED_PHASES[*]:-} " == *" gitops-repo-credential-only "* ]]; then
+  gitops_repo_credential_only
+  summary
+  exit "$FAIL"
+fi
+if [[ " ${SELECTED_PHASES[*]:-} " == *" gitops-rbac-only "* ]]; then
+  gitops_rbac_only
+  summary
+  exit "$FAIL"
 fi
 
 print_plan
