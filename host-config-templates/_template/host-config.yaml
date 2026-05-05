@@ -143,26 +143,29 @@ images:
 #                              when equal.
 #   installAffinityDefaults  bool, default true. Writes
 #                              /etc/systemd/system.conf.d/cpuaffinity.conf
-#                              so systemd-spawned services stay off the
-#                              isolated cores.
-#   migrateCmdline           bool, default false. Removes isolcpus= from
-#                              the kernel cmdline and adds RT flags.
-#                              DESTRUCTIVE on Jetson — no in-place
-#                              rollback after reboot. Reboot required.
+#                              with CPUAffinity=<online − partitions − cpu 0>
+#                              so systemd-spawned services stay off both
+#                              the isolated cores and cpu 0 (which is
+#                              dedicated to kernel housekeeping).
+#
+# Bootstrap phase 8 (under RFC 0004) renders kernel cmdline tokens
+# directly: isolcpus=<partitions>, nohz_full=<dmaRtCpu>,
+# rcu_nocbs=<partitions>, rcu_nocb_poll, skew_tick=1, irqaffinity=0.
+# Reboot required to pick up cmdline changes; bootstrap warns when
+# they're written.
 #
 # cpuIsolation:
 #   enabled: true
 #   partitions:
-#     - {name: ecat, cpus: "10-13", description: "EtherCAT master RT loop"}
+#     - {name: ecat, cpus: "11-13", description: "EtherCAT master RT loop"}
 #   nic:
 #     iface: ecat0
-#     irqCore: 12              # IRQs on a core distinct from the loop
+#     irqCore: 13              # NIC IRQs pinned here (one core, isolated)
 #     selector:
 #       mac: aa:bb:cc:dd:ee:ff # OR pci: "0000:01:00.0"
 #                              # OR {driver: igc, index: 0}
-#   dmaRtCpu: 11               # SOEM cyclic loop core
+#   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
-#   migrateCmdline: false
 
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal

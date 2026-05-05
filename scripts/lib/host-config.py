@@ -809,7 +809,11 @@ def cmd_validate(cfg: dict) -> int:
     #     the loop at the wrong instant when they share a core. Equal
     #     values produce a stderr warning, not an error.
     #   installAffinityDefaults: bool (default true if cpuIsolation.enabled)
-    #   migrateCmdline: bool (default false; opt-in, destructive)
+    #
+    # NOTE: cpuIsolation.migrateCmdline (was opt-in under the cgroup-
+    # partition approach) is dropped under RFC 0004 — kernel cmdline
+    # editing is the primary mechanism and always-on. Validator
+    # accepts the field for back-compat but ignores it.
     import re as _re
     _PART_NAME_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     _CPU_RANGE_RE = _re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
@@ -839,6 +843,16 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(
                         f"cpuIsolation.{boolfield}: must be true or false"
                     )
+            # migrateCmdline is silently ignored under RFC 0004 — emit
+            # a deprecation warning but don't fail validation so existing
+            # host-configs from feat/cpu-isolation-bootstrap keep working.
+            if "migrateCmdline" in ci:
+                print(
+                    "warning: cpuIsolation.migrateCmdline is deprecated under "
+                    "RFC 0004 (kernel cmdline editing is always-on); the field "
+                    "is ignored",
+                    file=sys.stderr,
+                )
 
             partitions = ci.get("partitions") or []
             if not isinstance(partitions, list):
@@ -1011,12 +1025,8 @@ def cmd_validate(cfg: dict) -> int:
                         file=sys.stderr,
                     )
 
-            if ci.get("migrateCmdline") and not ci.get("installAffinityDefaults", True):
-                errors.append(
-                    "cpuIsolation.migrateCmdline=true requires "
-                    "installAffinityDefaults=true (otherwise systemd "
-                    "services will land on isolated cores)"
-                )
+            # (RFC 0004: migrateCmdline cross-validation removed —
+            # cmdline editing is always-on.)
 
     # dmaEthercat is optional. configSet must be a single directory
     # name (no slashes, no '..') — bootstrap interpolates it into

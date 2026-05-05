@@ -1697,141 +1697,320 @@ cpu_isolation() {
     fi
   fi
 
-  # Sanity: cgroup v2 + manage_cpusets.sh present. The kernel writes
-  # /sys/fs/cgroup/cgroup.controllers iff the unified hierarchy is
-  # mounted at that path — more reliable than parsing mount output,
-  # which formats differently between busybox, util-linux, and Jetson.
-  if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
-    fail "cgroup v2 not mounted at /sys/fs/cgroup"
-    info "kernel must be booted with unified cgroup hierarchy (systemd.unified_cgroup_hierarchy=1, default on modern distros)"
-    return
-  fi
-  pass "cgroup v2 mounted"
+  # Sanity: ensure manage_cpusets is present (we still use ethercat-rt
+  # for IRQ pin + governor lock + workqueue mask + boot-time service).
   if [ ! -x "$CPUSETS_SCRIPT" ]; then
     fail "$CPUSETS_SCRIPT not found or not executable"
     return
   fi
 
-  # Render /etc/cpusets.conf from cpuIsolation.partitions.
+  # Compute desired kernel cmdline tokens from host-config:
+  #   isolcpus     = union of cpuIsolation.partitions[].cpus
+  #   nohz_full    = cpuIsolation.dmaRtCpu (single core — narrow tick removal)
+  #   rcu_nocbs    = same as isolcpus (offload RCU callbacks for all isolated)
+  #   rcu_nocb_poll, skew_tick=1: bare flags, always
+  #   irqaffinity  = 0 (boot-time IRQ default → cpu 0)
+  local isolcpus nohz_full rcu_nocbs irqaffinity
+  isolcpus="$(_cpu_isolation_partitions_union "$ci_json")"
+  nohz_full="$_ci_dma_rt"
+  rcu_nocbs="$isolcpus"
+  irqaffinity=0
+  if [ -z "$isolcpus" ] || [ -z "$nohz_full" ]; then
+    fail "cpuIsolation.partitions and cpuIsolation.dmaRtCpu are required"
+    return
+  fi
+
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  render $CPUSETS_CONF from host-config cpuIsolation.partitions"
-    info "DRY-RUN  $CPUSETS_SCRIPT apply $CPUSETS_CONF --yes"
-    info "DRY-RUN  $CPUSETS_SCRIPT install-service $CPUSETS_CONF"
-    info "DRY-RUN  $CPUSETS_SCRIPT install-affinity-defaults"
+    info "DRY-RUN  ensure kernel cmdline tokens:"
+    info "DRY-RUN    isolcpus=$isolcpus  nohz_full=$nohz_full  rcu_nocbs=$rcu_nocbs"
+    info "DRY-RUN    rcu_nocb_poll  skew_tick=1  irqaffinity=$irqaffinity"
+    info "DRY-RUN  write systemd CPUAffinity drop-in (online − partitions − {0})"
     local _nic_iface _nic_irq
     { read -r _nic_iface; read -r _nic_irq; } < <(cpusets_json_nic "$ci_json")
     if [ -n "$_nic_iface" ] && [ -n "$_nic_irq" ]; then
-      info "DRY-RUN  $CPUSETS_SCRIPT ethercat-rt <partition> --nic $_nic_iface --rt-core $_nic_irq"
+      info "DRY-RUN  pin $_nic_iface IRQs to core $_nic_irq + governor lock + workqueue mask + boot service"
     fi
-    if [ "$(cpusets_json_field "$ci_json" migrateCmdline)" = "true" ]; then
-      info "DRY-RUN  $CPUSETS_SCRIPT migrate-cmdline --add-rt-flags --yes"
-    fi
+    info "DRY-RUN  warn REBOOT REQUIRED if cmdline changed"
     return
   fi
 
-  if ! cpusets_render_conf "$ci_json" >/dev/null; then
-    fail "could not render $CPUSETS_CONF"
-    return
-  fi
-  pass "rendered $CPUSETS_CONF"
-
-  # Apply partitions. `apply` is idempotent on matching state.
-  note "applying partitions..."
-  if cpusets_run apply "$CPUSETS_CONF" --yes; then
-    pass "partitions applied"
+  # ---- Step 1: kernel cmdline ----------------------------------------
+  local cmdline_changed=0
+  if _apply_kernel_cmdline \
+        "isolcpus=$isolcpus" \
+        "nohz_full=$nohz_full" \
+        "rcu_nocbs=$rcu_nocbs" \
+        "rcu_nocb_poll" \
+        "skew_tick=1" \
+        "irqaffinity=$irqaffinity"; then
+    cmdline_changed=1
+    pass "kernel cmdline updated (REBOOT REQUIRED for full effect)"
   else
-    fail "manage_cpusets.sh apply failed"
-    info "common cause: docker.slice or user.slice still claims an isolated CPU."
-    info "stop the offending service and re-run, or run install-service first so"
-    info "boot-ordering takes care of it on next reboot."
-    return
+    skip "kernel cmdline already at desired state"
   fi
 
-  # Install boot service so partitions reactivate after reboot.
-  note "installing cpusets.service..."
-  if cpusets_run install-service "$CPUSETS_CONF"; then
-    pass "cpusets.service installed"
-  else
-    fail "manage_cpusets.sh install-service failed"
-    return
-  fi
-
-  # Affinity drop-in keeps systemd-spawned services off isolated cores.
-  # Defaults to true when the cpuIsolation block is enabled — turn off
-  # only when you know you want systemd services on RT cores (rare).
-  local install_aff
+  # ---- Step 2: systemd CPUAffinity drop-in ---------------------------
+  # Compute housekeeping = (online cpus) − (partition cpus) − {0}.
+  # cpu 0 is dropped explicitly so kernel housekeeping (kworker/0,
+  # ksoftirqd/0, RCU callback workers, default IRQs) gets a quiet
+  # cpu without competing with userspace services.
+  local install_aff cpuaffinity_value
   install_aff="$(cpusets_json_field "$ci_json" installAffinityDefaults)"
   if [ -z "$install_aff" ] || [ "$install_aff" = "true" ]; then
-    note "writing /etc/systemd/system.conf.d/cpuaffinity.conf..."
-    if cpusets_run install-affinity-defaults; then
-      pass "systemd CPUAffinity drop-in installed"
-      systemctl daemon-reexec || true
+    cpuaffinity_value="$(_compute_systemd_cpuaffinity "$ci_json")"
+    if [ -n "$cpuaffinity_value" ]; then
+      _install_cpuaffinity_dropin "$cpuaffinity_value" || true
     else
-      fail "manage_cpusets.sh install-affinity-defaults failed"
+      fail "could not compute CPUAffinity value (no online cpus left after exclusions)"
     fi
   else
     skip "cpuIsolation.installAffinityDefaults=false — leaving systemd defaults alone"
   fi
 
-  # NIC IRQ pinning. Optional — only when cpuIsolation.nic is set.
-  # Pins the NIC's IRQs to nic.irqCore (renamed from rtCore). The
-  # SOEM cyclic loop runs on cpuIsolation.dmaRtCpu, which by default
-  # is a *different* core inside the same partition.
+  # ---- Step 3: NIC IRQ pin + governor + workqueue + boot service -----
+  # Use a synthetic state-file entry so ethercat-rt's partition lookup
+  # works without a cgroup partition existing. ethercat-rt only reads
+  # the cpus from the state file; it doesn't validate that the cgroup
+  # exists. This keeps us aligned with the vendored library's API.
   local nic_iface nic_irq
   { read -r nic_iface; read -r nic_irq; } < <(cpusets_json_nic "$ci_json")
   if [ -n "$nic_iface" ] && [ -n "$nic_irq" ]; then
-    local target_part=""
-    while IFS= read -r pname; do
-      [ -z "$pname" ] && continue
-      if cpusets_run list 2>/dev/null | grep -qE "^[[:space:]]*$pname[[:space:]]"; then
-        target_part="$pname"
-        break
-      fi
-    done < <(cpusets_json_partition_names "$ci_json")
-    if [ -z "$target_part" ]; then
-      fail "cpuIsolation.nic set but no active partition to pin onto"
+    local part_name="ecat-cmdline"
+    mkdir -p /var/lib/manage_cpusets
+    printf '%s|%s|%s\n' "$part_name" "$isolcpus" "$(date +%s)" > /var/lib/manage_cpusets/state
+    note "pinning $nic_iface IRQs to core $nic_irq + governor lock + workqueue mask..."
+    if cpusets_run ethercat-rt "$part_name" --nic "$nic_iface" --rt-core "$nic_irq"; then
+      pass "ethercat-rt configured: $nic_iface IRQs on core $nic_irq"
     else
-      note "pinning $nic_iface IRQs to core $nic_irq (partition $target_part)..."
-      # Upstream flag is still --rt-core; semantically it's the IRQ pin
-      # target. Bootstrap renames it to irqCore in our schema for
-      # clarity but uses the same upstream flag here.
-      if cpusets_run ethercat-rt "$target_part" --nic "$nic_iface" --rt-core "$nic_irq"; then
-        pass "ethercat-rt configured: $nic_iface IRQs on core $nic_irq"
-      else
-        fail "manage_cpusets.sh ethercat-rt failed"
-      fi
+      fail "manage_cpusets.sh ethercat-rt failed"
     fi
   else
     skip "cpuIsolation.nic not set — skipping NIC IRQ pinning"
   fi
 
-  # Kernel cmdline migration. Off by default — destructive on Jetson
-  # (no in-place rollback after reboot). When opt-in:
-  #   - run migrate-cmdline --yes
-  #   - drop a marker file so the operator (and re-runs) know a reboot
-  #     is pending; deleted on the next run when the live cmdline is
-  #     already clean of isolcpus=.
-  if [ "$(cpusets_json_field "$ci_json" migrateCmdline)" = "true" ]; then
-    note "migrating kernel cmdline (removing isolcpus=, adding RT flags)..."
-    if cpusets_run migrate-cmdline --add-rt-flags --yes; then
-      pass "cmdline migrated"
-      mkdir -p "$(dirname "$CPU_ISOLATION_REBOOT_MARKER")"
-      printf 'cmdline migration applied at %s — reboot to pick it up\n' \
-        "$(date -u +%FT%TZ)" > "$CPU_ISOLATION_REBOOT_MARKER"
-      info "REBOOT REQUIRED to activate the new kernel cmdline"
-    else
-      fail "manage_cpusets.sh migrate-cmdline failed"
-    fi
-  else
-    skip "cpuIsolation.migrateCmdline=false — cmdline left untouched"
+  # ---- Step 4: reboot marker -----------------------------------------
+  if [ "$cmdline_changed" = 1 ]; then
+    mkdir -p "$(dirname "$CPU_ISOLATION_REBOOT_MARKER")"
+    printf 'cmdline updated at %s — reboot to pick it up\n' \
+      "$(date -u +%FT%TZ)" > "$CPU_ISOLATION_REBOOT_MARKER"
+    info ""
+    info "════════════════════════════════════════════════════════════"
+    info "  REBOOT REQUIRED for kernel cmdline changes to take effect"
+    info "════════════════════════════════════════════════════════════"
+    info ""
   fi
 
-  # Clear stale reboot marker if the cmdline is already clean.
+  # Clear stale reboot marker if the live cmdline already matches.
   if [ -f "$CPU_ISOLATION_REBOOT_MARKER" ] && \
-     ! grep -q 'isolcpus=' /proc/cmdline 2>/dev/null; then
+     grep -q "isolcpus=$isolcpus" /proc/cmdline 2>/dev/null && \
+     grep -q "nohz_full=$nohz_full" /proc/cmdline 2>/dev/null; then
     rm -f "$CPU_ISOLATION_REBOOT_MARKER"
     info "cleared stale reboot marker — cmdline already migrated"
   fi
+}
+
+# ---------- helpers for cpu_isolation -----------------------------------
+
+# Echo the union of cpuIsolation.partitions[].cpus as a kernel cpu-list
+# (e.g. "11-13"). Empty when no partitions declared.
+_cpu_isolation_partitions_union() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1); out.update(range(int(lo), int(hi)+1))
+        else: out.add(int(part))
+    return out
+def compress(cpus):
+    if not cpus: return ""
+    s = sorted(cpus)
+    ranges, lo = [], s[0]
+    for i, c in enumerate(s):
+        if i+1 == len(s) or s[i+1] != c+1:
+            ranges.append((lo, c)); lo = s[i+1] if i+1 < len(s) else None
+    return ",".join(f"{a}" if a==b else f"{a}-{b}" for a,b in ranges)
+acc = set()
+for p in (data.get("partitions") or []):
+    cpus = p.get("cpus", "")
+    if isinstance(cpus, str): acc |= expand(cpus)
+print(compress(acc))
+PY
+}
+
+# Echo the systemd CPUAffinity= value (online cpus minus partition cpus
+# minus cpu 0). Empty if the result would be empty.
+_compute_systemd_cpuaffinity() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1); out.update(range(int(lo), int(hi)+1))
+        else: out.add(int(part))
+    return out
+def compress(cpus):
+    if not cpus: return ""
+    s = sorted(cpus)
+    ranges, lo = [], s[0]
+    for i, c in enumerate(s):
+        if i+1 == len(s) or s[i+1] != c+1:
+            ranges.append((lo, c)); lo = s[i+1] if i+1 < len(s) else None
+    return ",".join(f"{a}" if a==b else f"{a}-{b}" for a,b in ranges)
+try:
+    online = expand(open("/sys/devices/system/cpu/online").read().strip())
+except Exception:
+    online = set()
+managed = set()
+for p in (data.get("partitions") or []):
+    cpus = p.get("cpus", "")
+    if isinstance(cpus, str): managed |= expand(cpus)
+result = online - managed - {0}
+print(compress(result))
+PY
+}
+
+# Write /etc/systemd/system.conf.d/cpuaffinity.conf with the given
+# CPUAffinity value. Idempotent (cmp + skip), runs daemon-reexec on
+# change.
+_install_cpuaffinity_dropin() {
+  local value="$1"
+  local dst=/etc/systemd/system.conf.d/cpuaffinity.conf
+  mkdir -p "$(dirname "$dst")"
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<EOF
+# Managed by scripts/bootstrap-robot.sh phase 8 (cpu-isolation).
+# Restricts default CPU affinity for systemd-spawned services to the
+# k8s pool (online cpus minus host-RT partitions minus cpu 0). cpu 0
+# is left for kernel housekeeping (kworker/0, ksoftirqd/0, default
+# IRQs); the host-RT partitions are governed by isolcpus= in the
+# kernel cmdline. Services that legitimately need to run on cpu 0
+# or the isolated cores must override via their own CPUAffinity= or
+# AllowedCPUs=.
+[Manager]
+CPUAffinity=$value
+EOF
+  if cmp -s "$tmp" "$dst" 2>/dev/null; then
+    skip "systemd CPUAffinity drop-in already at CPUAffinity=$value"
+    rm -f "$tmp"
+    return 0
+  fi
+  install -m 0644 "$tmp" "$dst"
+  rm -f "$tmp"
+  pass "wrote $dst (CPUAffinity=$value)"
+  systemctl daemon-reexec || true
+  return 0
+}
+
+# Ensure each of the given tokens is present in the kernel cmdline.
+# Token forms:
+#   key=value   : strip any existing key=*, then append key=value
+#   bareflag    : strip any existing bare bareflag, then append
+# Detects bootloader (extlinux on Jetson, GRUB on x86), DEFAULT-label
+# scoping for extlinux, atomic write. Returns 0 if the cmdline was
+# changed, 1 if no-op, fails on unknown bootloader.
+_apply_kernel_cmdline() {
+  local tokens=("$@")
+
+  local bootloader config_file line_pattern
+  if [ -f /boot/extlinux/extlinux.conf ]; then
+    bootloader=extlinux
+    config_file=/boot/extlinux/extlinux.conf
+    line_pattern='^[[:space:]]*APPEND[[:space:]]'
+  elif [ -f /etc/default/grub ]; then
+    bootloader=grub
+    config_file=/etc/default/grub
+    line_pattern='^[[:space:]]*GRUB_CMDLINE_LINUX(_DEFAULT)?='
+  else
+    fail "no supported bootloader (/boot/extlinux/extlinux.conf or /etc/default/grub)"
+    return 2
+  fi
+  note "bootloader: $bootloader ($config_file)"
+
+  # Read the active cmdline. extlinux: scope to the DEFAULT label so
+  # we don't touch recovery/fallback labels.
+  local default_label="" current
+  if [ "$bootloader" = "extlinux" ]; then
+    default_label="$(grep -E '^[[:space:]]*DEFAULT[[:space:]]' "$config_file" | head -1 | awk '{print $2}')"
+    if [ -n "$default_label" ]; then
+      current="$(awk -v lbl="$default_label" '
+        /^[[:space:]]*LABEL[[:space:]]/  { in_block = ($2 == lbl) }
+        in_block && /^[[:space:]]*APPEND[[:space:]]/ { print; exit }
+      ' "$config_file")"
+    else
+      current="$(grep -E '^[[:space:]]*APPEND[[:space:]]' "$config_file" | head -1)"
+    fi
+  else
+    current="$(grep -E "$line_pattern" "$config_file" | head -1)"
+  fi
+  [ -z "$current" ] && { fail "no kernel cmdline line found in $config_file"; return 2; }
+
+  # For each token, strip the existing instance, then append the new.
+  local new_line="$current" t key
+  for t in "${tokens[@]}"; do
+    if [[ "$t" == *=* ]]; then
+      key="${t%%=*}"
+      new_line="$(printf '%s' "$new_line" | sed -E "s/[[:space:]]*${key}=[^ \"]*//g")"
+    else
+      key="$t"
+      new_line="$(printf '%s' "$new_line" | sed -E "s/(^|[[:space:]])${key}([[:space:]]|\$|\")/\\1\\2/g")"
+    fi
+    new_line="$(printf '%s' "$new_line" | sed -E 's/[[:space:]]+/ /g')"
+    if [[ "$new_line" =~ \" ]]; then
+      # GRUB-style quoted: insert inside the quotes.
+      new_line="$(printf '%s' "$new_line" | sed -E "s/\"([^\"]*)\"/\"\\1 ${t}\"/")"
+    else
+      new_line="$new_line $t"
+    fi
+  done
+
+  if [ "$current" = "$new_line" ]; then
+    return 1
+  fi
+
+  echo
+  info "current: $current"
+  info "desired: $new_line"
+  echo
+
+  # Atomic write. extlinux: only the DEFAULT label's APPEND. GRUB:
+  # the matching first line.
+  local backup tmp
+  backup="${config_file}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp "$config_file" "$backup"
+  tmp="$(mktemp)"
+  if [ "$bootloader" = "extlinux" ] && [ -n "$default_label" ]; then
+    awk -v pat="$line_pattern" -v repl="$new_line" -v lbl="$default_label" '
+      /^[[:space:]]*LABEL[[:space:]]/ { in_block = ($2 == lbl) }
+      {
+        if (in_block && match($0, pat) && !done) { print repl; done=1 }
+        else { print }
+      }
+    ' "$config_file" > "$tmp"
+  else
+    awk -v pat="$line_pattern" -v repl="$new_line" '
+      {
+        if (match($0, pat) && !done) { print repl; done=1 }
+        else { print }
+      }
+    ' "$config_file" > "$tmp"
+  fi
+  install -m 0644 "$tmp" "$config_file"
+  rm -f "$tmp"
+  pass "backed up to $backup"
+  pass "rewrote $config_file"
+
+  if [ "$bootloader" = "grub" ] && command -v update-grub >/dev/null 2>&1; then
+    note "running update-grub..."
+    update-grub >/dev/null 2>&1 || warn "update-grub failed — check manually"
+  fi
+
+  return 0
 }
 
 # ---- phase 9: install dma-ethercat (gates phase 10) -------------------
@@ -2070,7 +2249,7 @@ _dma_ethercat_prompt_for_config() {
 #   5. NIC IRQ core        (default = first cpu of partition)
 #   6. SOEM RT loop core   (default = a different cpu in the partition)
 #   7. installAffinityDefaults  (default Y)
-#   8. migrateCmdline           (default N — destructive on Jetson)
+#   (Kernel cmdline editing is always-on under RFC 0004 — no toggle.)
 _cpu_isolation_prompt() {
   local hc="$1"
 
@@ -2163,22 +2342,20 @@ _cpu_isolation_prompt() {
 
   printf '  install systemd CPUAffinity drop-in? [Y/n]: ' >&2
   IFS= read -r aff_ans </dev/tty || return 1
-  printf '  migrate kernel cmdline (DESTRUCTIVE on Jetson — needs reboot)? [y/N]: ' >&2
-  IFS= read -r mig_ans </dev/tty || return 1
 
-  local aff_bool="true" mig_bool="false"
+  local aff_bool="true"
   case "${aff_ans,,}" in n|no) aff_bool="false" ;; esac
-  case "${mig_ans,,}" in y|yes) mig_bool="true" ;; esac
 
   # Build JSON. Validator post-persist re-checks the integers fall
-  # inside the partition.
+  # inside the partition. Kernel cmdline editing is now always-on
+  # under RFC 0004 — no migrateCmdline toggle.
   local nic_field=""
   if [ -n "$nic_iface" ]; then
     nic_field=", \"nic\": {\"iface\": \"$nic_iface\", \"irqCore\": $nic_irq}"
   fi
   local json
-  json=$(printf '{"enabled": true, "partitions": [{"name": "%s", "cpus": "%s"}]%s, "dmaRtCpu": %s, "installAffinityDefaults": %s, "migrateCmdline": %s}' \
-    "$partition_name" "$partition_cpus" "$nic_field" "$dma_rt_cpu" "$aff_bool" "$mig_bool")
+  json=$(printf '{"enabled": true, "partitions": [{"name": "%s", "cpus": "%s"}]%s, "dmaRtCpu": %s, "installAffinityDefaults": %s}' \
+    "$partition_name" "$partition_cpus" "$nic_field" "$dma_rt_cpu" "$aff_bool")
 
   if ! _cpu_isolation_persist "$hc" "$json"; then
     return 1
