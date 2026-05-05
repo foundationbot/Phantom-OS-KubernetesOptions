@@ -5,11 +5,10 @@ variable "kubeconfig" {
 }
 
 variable "argocd_chart_version" {
-  # Pinned to 7.6.12 (stable 7.x line, released 2024-10). SA names and RBAC
-  # values (createClusterRoles, dex.enabled, redisSecretInit.enabled) were
-  # verified against this version's values.yaml before the disable directives
-  # in main.tf were written. Bump within 7.x; verify SA names on major bumps.
-  description = "argo-cd Helm chart version (from https://github.com/argoproj/argo-helm). SA names and RBAC values verified against 7.6.12."
+  # Pinned to 7.6.12 (stable 7.x line, released 2024-10). SA names and key
+  # values (dex.enabled, redisSecretInit.enabled) were verified against this
+  # version's values.yaml. Bump within 7.x; verify SA names on major bumps.
+  description = "argo-cd Helm chart version (from https://github.com/argoproj/argo-helm). SA names and key values (dex.enabled, redisSecretInit.enabled) verified against 7.6.12."
   type        = string
   default     = "7.6.12"
 }

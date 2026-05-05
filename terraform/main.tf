@@ -43,18 +43,6 @@ resource "helm_release" "argocd" {
   version    = var.argocd_chart_version
 
   values = [yamlencode({
-    # Disable chart-rendered cluster-wide ClusterRoles so they don't grant a
-    # parallel Secret-read path that bypasses our namespace-scoped
-    # argocd-secret-rbac/ overlay (Role + RoleBinding). Verified key name
-    # against chart 7.6.12 values.yaml.
-    # NOTE: server.clusterAdminAccess does NOT exist in 7.6.12; the correct
-    # top-level key is createClusterRoles.
-    # TODO: verify whether createClusterRoles: false still allows ArgoCD to
-    # manage workloads in the same cluster (may require manual ClusterRole for
-    # application controller). For now this is set intentionally to prevent
-    # cluster-wide Secret reads; adjust if in-cluster app management breaks.
-    createClusterRoles = false
-
     server = {
       service = {
         type          = "NodePort"

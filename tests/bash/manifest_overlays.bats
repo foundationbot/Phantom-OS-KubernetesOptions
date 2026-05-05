@@ -40,7 +40,7 @@ setup() { setup_common; }
   ! echo "$out" | grep -qE '^\s+name: argocd-dex-server\s*$'
 }
 
-@test "argocd-secret-rbac is the only path to Secrets in argocd ns (no overlay-side ClusterRole)" {
+@test "argocd-secret-rbac overlay grants only namespace-scoped access (no ClusterRole/ClusterRoleBinding)" {
   out="$(kustomize build "$REPO_ROOT/manifests/base/argocd-secret-rbac")"
   # The overlay must NOT contain a ClusterRole or ClusterRoleBinding —
   # all Secret-read access must be namespace-scoped.
