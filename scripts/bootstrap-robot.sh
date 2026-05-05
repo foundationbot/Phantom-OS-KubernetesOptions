@@ -3168,6 +3168,63 @@ _gitops_render_app() {
   info "$inject_out"
 }
 
+_gitops_apply_secret_rbac() {
+  if "${KUBECTL[@]}" apply -k "$REPO_ROOT/manifests/base/argocd-secret-rbac" >/dev/null; then
+    pass "applied argocd-secret-rbac overlay"
+    return 0
+  fi
+  fail "could not apply argocd-secret-rbac overlay"
+  return 1
+}
+
+# argocd-rbac overlay is rendered, then applied as `kubectl patch --type merge`
+# per-ConfigMap (not `kubectl apply -k`) so it merges into the chart-installed
+# ConfigMaps without stomping their data: blocks. See
+# manifests/base/argocd-rbac/kustomization.yaml header for rationale.
+_gitops_apply_argocd_user_rbac() {
+  local rendered cm name patch
+  rendered=$(kustomize build "$REPO_ROOT/manifests/base/argocd-rbac" 2>/dev/null) || {
+    fail "kustomize build manifests/base/argocd-rbac failed"; return 1
+  }
+
+  # Split rendered output into per-document patches and apply each via
+  # kubectl patch on the named ConfigMap.
+  local ok=1
+  while IFS= read -r doc_name; do
+    [ -z "$doc_name" ] && continue
+    # Extract just this document.
+    cm=$(printf '%s\n' "$rendered" | awk -v n="$doc_name" '
+      BEGIN {RS="---\n"; ORS=""}
+      $0 ~ "name: "n {print}
+    ')
+    [ -z "$cm" ] && continue
+    # Convert YAML data: block to a JSON merge-patch.
+    # Simpler: use kubectl patch --type merge with --patch-file.
+    local tmp; tmp=$(mktemp)
+    printf '%s\n' "$cm" > "$tmp"
+    if "${KUBECTL[@]}" -n argocd patch configmap "$doc_name" --type merge --patch-file "$tmp" </dev/null >/dev/null 2>&1; then
+      pass "patched ConfigMap $doc_name"
+    else
+      fail "could not patch ConfigMap $doc_name"
+      ok=0
+    fi
+    rm -f "$tmp"
+  done <<EOF
+argocd-cm
+argocd-rbac-cm
+EOF
+
+  # fleet-operator kubectl RBAC is a normal kustomize apply.
+  if "${KUBECTL[@]}" apply -k "$REPO_ROOT/manifests/base/fleet-operator-kubectl-rbac" >/dev/null; then
+    pass "applied fleet-operator-kubectl-rbac"
+  else
+    fail "could not apply fleet-operator-kubectl-rbac"
+    ok=0
+  fi
+
+  [ "$ok" = 1 ] && return 0 || return 1
+}
+
 gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 10: gitops  (skipped)"; return; fi
   phase "phase 10: gitops (install argocd + apply per-host Application)"
@@ -3241,6 +3298,9 @@ PY
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
+    info "DRY-RUN  apply argocd-secret-rbac overlay"
+    info "DRY-RUN  apply argocd-rbac (operator + fleet-operator accounts)"
+    info "DRY-RUN  apply fleet-operator-kubectl-rbac"
     info "DRY-RUN  apply repo credential from $REPO_CREDENTIAL_FILE"
     info "DRY-RUN  enabled stacks: $(printf '%s' "$enabled_stacks" | tr '\n' ' ')"
     while IFS= read -r stack; do
@@ -3272,6 +3332,9 @@ PY
     terraform apply -input=false -auto-approve -var="kubeconfig=$kc"
   ) || { fail "terraform apply"; return; }
   pass "terraform apply (argocd Helm install)"
+
+  _gitops_apply_secret_rbac || guard
+  _gitops_apply_argocd_user_rbac || guard
 
   # Apply repo credential so argocd-repo-server can clone the (private) repo
   # before any Application CR is reconciled.
