@@ -57,3 +57,25 @@ YAML
   STUB_KUBECTL_FAIL=1 run _apply_repo_credential "$f"
   [ "$FAIL" -gt 0 ] || [ "$status" -ne 0 ]
 }
+
+@test "gitops() honors --repo-credential-file via REPO_CREDENTIAL_FILE env" {
+  # Source bootstrap in lib mode and stub functions whose real implementations
+  # would touch the real cluster / require a working environment.
+  BOOTSTRAP_LIB_ONLY=1 source "$REPO_ROOT/scripts/bootstrap-robot.sh"
+
+  # Build a valid credential file outside the git tree.
+  f="$BATS_TEST_TMPDIR/creds.yaml"
+  cat > "$f" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata: {name: phantomos-kos-repo, namespace: argocd, labels: {argocd.argoproj.io/secret-type: repository}}
+stringData: {type: git, url: "https://github.com/foundationbot/Phantom-OS-KubernetesOptions", username: x-access-token, password: ghp_x}
+YAML
+  chmod 0600 "$f"
+  REPO_CREDENTIAL_FILE="$f"
+  KUBECTL=(kubectl)
+
+  # Call _apply_repo_credential directly — full gitops() depends on terraform.
+  _apply_repo_credential "$REPO_CREDENTIAL_FILE"
+  grep -q 'apply -n argocd' "$STUB_LOG_KUBECTL"
+}

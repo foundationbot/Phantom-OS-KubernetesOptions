@@ -130,6 +130,14 @@
 #                      inline `auths` (credsStore-only), phase 5 falls
 #                      back to copying an existing `dockerhub-creds`
 #                      Secret from the `phantom` namespace.
+#   --repo-credential-file <path>
+#                      path to a mode-0600 YAML file containing the ArgoCD
+#                      `repository`-typed Secret for the (private) git
+#                      source. Applied by the gitops phase before any
+#                      Application CR is reconciled so argocd-repo-server
+#                      can authenticate on first sync.
+#                      Default: /etc/phantomos/argocd-repo-credential.yaml
+#                      Must NOT reside inside a git work tree.
 #
 # Examples:
 #   sudo bash scripts/bootstrap-robot.sh                       # full bootstrap
@@ -357,6 +365,8 @@ while [ $# -gt 0 ]; do
     --host-config)       HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
     --dockerhub-secret-file)
                          DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
+    --repo-credential-file)
+                         REPO_CREDENTIAL_FILE="${2:?value required}"; shift 2 ;;
     --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
     --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
 
@@ -473,6 +483,8 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # Load extracted user-mgmt helpers (RFC 0002).
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/argocd_users.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/repo_credential.sh"
 
 # host-config.yaml — single per-host source-of-truth. If --host-config
 # was passed, copy it to the canonical location so subsequent runs use
@@ -3035,6 +3047,7 @@ APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_templa
 RENDERED_APP_DIR="${RENDERED_APP_DIR:-/etc/phantomos}"
 DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
 DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
+REPO_CREDENTIAL_FILE="${REPO_CREDENTIAL_FILE:-/etc/phantomos/argocd-repo-credential.yaml}"
 
 _rendered_app_path() {
   local stack="${1:?stack required}"
@@ -3213,6 +3226,7 @@ PY
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
+    info "DRY-RUN  apply repo credential from $REPO_CREDENTIAL_FILE"
     info "DRY-RUN  enabled stacks: $(printf '%s' "$enabled_stacks" | tr '\n' ' ')"
     while IFS= read -r stack; do
       [ -z "$stack" ] && continue
@@ -3243,6 +3257,15 @@ PY
     terraform apply -input=false -auto-approve -var="kubeconfig=$kc"
   ) || { fail "terraform apply"; return; }
   pass "terraform apply (argocd Helm install)"
+
+  # Apply repo credential so argocd-repo-server can clone the (private) repo
+  # before any Application CR is reconciled.
+  if [ -r "$REPO_CREDENTIAL_FILE" ]; then
+    _apply_repo_credential "$REPO_CREDENTIAL_FILE" || guard
+  else
+    fail "repo credential not found at $REPO_CREDENTIAL_FILE — pass --repo-credential-file or pre-stage the file"
+    return
+  fi
 
   # Migrate from any pre-existing root-app or umbrella Application.
   _gitops_migrate_legacy_apps
