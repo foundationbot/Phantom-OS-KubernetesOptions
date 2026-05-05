@@ -113,16 +113,27 @@ nic_resolve_target_mac() {
 #     mac=$(nic_resolve_target_mac_interactive ecat0)
 # sees only the MAC on stdout.
 #
-# Requires the nic_rt.sh helpers (find_usb_ethernet, find_native_ethernet,
-# display_all_adapters) to already be sourced by the caller.
+# Lazy-loads its dependency on nic_rt.sh helpers (find_usb_ethernet,
+# find_native_ethernet, display_all_adapters) so callers — bootstrap
+# phase 7 included — don't have to source nic_rt.sh up front. The
+# library is large and only this one function needs it.
 nic_resolve_target_mac_interactive() {
     local iface="${1:-ecat0}"
 
     if ! declare -F find_usb_ethernet >/dev/null \
        || ! declare -F find_native_ethernet >/dev/null \
        || ! declare -F display_all_adapters >/dev/null; then
-        echo "nic_resolve_target_mac_interactive: nic_rt.sh helpers not sourced" >&2
-        return 1
+        # shellcheck source=./nic_rt.sh
+        if ! source "$__NIC_SETUP_LIB_DIR/nic_rt.sh" 2>/dev/null; then
+            echo "nic_resolve_target_mac_interactive: cannot source $__NIC_SETUP_LIB_DIR/nic_rt.sh" >&2
+            return 1
+        fi
+        if ! declare -F find_usb_ethernet >/dev/null \
+           || ! declare -F find_native_ethernet >/dev/null \
+           || ! declare -F display_all_adapters >/dev/null; then
+            echo "nic_resolve_target_mac_interactive: nic_rt.sh did not define the expected helpers" >&2
+            return 1
+        fi
     fi
 
     if [[ ! -t 0 ]]; then
