@@ -197,6 +197,30 @@ images:
 #     frequency: daily
 #     compress: true
 
+# Per-host node labels. Bootstrap applies these to the k8s Node
+# object so DaemonSets gating on nodeSelector can target subsets of
+# the fleet — yovariable-server, cpp-state-estimator, dma-recorder,
+# future has-imu workloads, etc.
+#
+# Bootstrap manages the foundation.bot/ prefix as a CLOSED SET: every
+# label in this block is applied; any label on the node under the same
+# prefix that's NOT in this block gets removed on the next bootstrap
+# re-run. Labels outside foundation.bot/ are not touched (k8s built-ins,
+# k0s built-ins, ad-hoc operator labels are all safe).
+#
+# Reserved: foundation.bot/robot is applied unconditionally as 'true'
+# by the cluster phase. The validator rejects any attempt to set or
+# override it via this block.
+#
+# Values must be strings — quote 'true' / 'false' or the YAML parser
+# turns them into Python booleans, which the validator rejects with
+# a clear error.
+#
+# nodeLabels:
+#   foundation.bot/has-state-estimator: "true"
+#   foundation.bot/has-recorder: "false"
+#   foundation.bot/has-imu: "true"
+
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal
 # kernel/runtime mounts (/dev, /dev/shm, /tmp); EVERY OTHER host path

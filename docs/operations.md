@@ -413,6 +413,37 @@ rotation runbook. Short version: re-`docker login`, then re-run
 `bootstrap-robot.sh --seed-pull-secrets` to propagate the refreshed
 `dockerhub-creds` Secret to every namespace that pulls private images.
 
+### 3.10 Toggle an optional workload on a robot
+
+Optional DaemonSets (yovariable-server, cpp-state-estimator,
+dma-recorder, future has-imu workloads, ...) gate on
+`foundation.bot/has-X=true` node labels. Bootstrap reconciles the
+`foundation.bot/` label namespace from `host-config.yaml`'s
+`nodeLabels:` block on every cluster-phase run.
+
+Enable a workload on `<robot>`:
+
+1. Edit `/etc/phantomos/host-config.yaml`, add to `nodeLabels:`:
+   ```yaml
+   nodeLabels:
+     foundation.bot/has-state-estimator: "true"
+   ```
+2. Re-run the cluster phase:
+   ```bash
+   sudo bash scripts/bootstrap-robot.sh --cluster -y
+   ```
+   Bootstrap calls `kubectl label node` for every entry and removes any
+   `foundation.bot/*` label on the node that's no longer in the block.
+3. The DaemonSet's controller picks up the new label within seconds
+   and schedules a pod.
+
+To disable: remove the entry from `nodeLabels:` and re-run the cluster
+phase. The label is dropped, the DaemonSet evicts the pod.
+
+Bootstrap only manages the `foundation.bot/` prefix. Labels outside
+that prefix (`kubernetes.io/*`, k0s built-ins, ad-hoc operator labels)
+are never touched.
+
 ---
 
 ## 4. Bootstrap phases reference
@@ -421,7 +452,7 @@ rotation runbook. Short version: re-`docker login`, then re-run
 |---|---|---|
 | 1. preflight | (always) | OS / arch / kernel / disk / sudo / port collisions |
 | 2. deps | `--deps` | apt installs, k0s binary, terraform binary |
-| 3. cluster | `--cluster` | `k0s install controller --single --enable-worker`; systemd start; write `/root/.kube/config` |
+| 3. cluster | `--cluster` | require Tailscale; pin `spec.api.address` in `/etc/k0s/k0s.yaml`; `k0s install controller --single --enable-worker -c …`; systemd start; write `/root/.kube/config` (server pinned to `127.0.0.1`); reconcile `foundation.bot/*` node labels from `host-config.yaml`'s `nodeLabels:`. Self-heals already-installed clusters that bake the `1.1.1.1` sentinel — see [§3.10](#310-toggle-an-optional-workload-on-a-robot) for the day-2 toggle workflow. |
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
 | 6. operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
