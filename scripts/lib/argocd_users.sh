@@ -29,7 +29,10 @@ _argocd_set_account_password() {
 
   local hash mtime password_key mtime_key
   hash=$(htpasswd -nbBC 10 "" "$pw" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
-  mtime=$(date +%FT%T%Z)
+  # RFC3339 numeric offset, not the abbreviation. ArgoCD parses
+  # passwordMtime with Go's time.RFC3339 which accepts 'Z' or numeric
+  # offsets (e.g. -07:00); 'PDT' from %Z fails parsing.
+  mtime=$(date -u +%FT%TZ)
 
   case "$account" in
     admin)
