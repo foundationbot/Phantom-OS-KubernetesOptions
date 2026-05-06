@@ -15,6 +15,7 @@ Usage:
   host-config.py <path> set-dma-ethercat-config-path <value>
   host-config.py <path> get-cpu-isolation-json
   host-config.py <path> set-cpu-isolation-json <json>
+  host-config.py <path> get-log-management-json
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -55,6 +56,23 @@ except ModuleNotFoundError:
 KNOWN_STACKS: tuple[str, ...] = ("core", "operator")
 # Stacks that cannot be disabled — robot is non-functional without them.
 REQUIRED_STACKS: frozenset[str] = frozenset({"core"})
+
+
+# logManagement defaults. Applied when the host-config block is absent
+# or has missing children. Opt-out (set enabled: false), not opt-in,
+# because the failure mode (793 GB /var/log/syslog filling the disk)
+# is severe — a fresh robot should never ship without these caps.
+LOG_MANAGEMENT_DEFAULTS: dict = {
+    "enabled": True,
+    "journald": {"systemMaxUse": "2G", "systemMaxFileSize": "100M"},
+    "rsyslog": {
+        "maxsize": "500M",
+        "rotate": 7,
+        "frequency": "daily",
+        "compress": True,
+    },
+}
+LOG_MANAGEMENT_VALID_FREQUENCIES: frozenset[str] = frozenset({"daily", "weekly"})
 
 
 def _stack_spec(cfg: dict, name: str) -> dict:
@@ -181,6 +199,31 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
     out.append(f"  configPath: {value}\n")
 
     p.write_text("".join(out))
+    return 0
+
+
+def cmd_get_log_management_json(cfg: dict) -> int:
+    """Emit the merged logManagement settings as JSON. Operator overrides
+    are layered on top of LOG_MANAGEMENT_DEFAULTS so bootstrap can
+    consume a single shape regardless of which fields the host-config
+    actually sets. When the operator sets enabled: false, only that
+    field is emitted (bootstrap interprets it as 'remove drop-ins')."""
+    block = cfg.get("logManagement") or {}
+    if block.get("enabled") is False:
+        print(json.dumps({"enabled": False}))
+        return 0
+    merged = {
+        "enabled": True,
+        "journald": {
+            **LOG_MANAGEMENT_DEFAULTS["journald"],
+            **(block.get("journald") or {}),
+        },
+        "rsyslog": {
+            **LOG_MANAGEMENT_DEFAULTS["rsyslog"],
+            **(block.get("rsyslog") or {}),
+        },
+    }
+    print(json.dumps(merged))
     return 0
 
 
@@ -1028,6 +1071,68 @@ def cmd_validate(cfg: dict) -> int:
             # (RFC 0004: migrateCmdline cross-validation removed —
             # cmdline editing is always-on.)
 
+    # logManagement is optional; defaults are filled in by
+    # cmd_get_log_management_json when fields are absent. Validation
+    # is purely shape/type — no cross-field checks.
+    lm = cfg.get("logManagement")
+    if lm is not None:
+        if not isinstance(lm, dict):
+            errors.append("'logManagement' must be a mapping")
+        else:
+            _journald_size_re = _re.compile(r"^\d+(K|M|G|T)?$")
+            _logrotate_size_re = _re.compile(r"^\d+(k|M|G)?$")
+            if "enabled" in lm and not isinstance(lm["enabled"], bool):
+                errors.append("logManagement.enabled: must be true or false")
+            jd = lm.get("journald")
+            if jd is not None:
+                if not isinstance(jd, dict):
+                    errors.append("logManagement.journald: must be a mapping")
+                else:
+                    for key in ("systemMaxUse", "systemMaxFileSize"):
+                        val = jd.get(key)
+                        if val is None:
+                            continue
+                        if not isinstance(val, str) or not _journald_size_re.match(val):
+                            errors.append(
+                                f"logManagement.journald.{key}: must match "
+                                f"\\d+[KMGT]? (got {val!r})"
+                            )
+            rs = lm.get("rsyslog")
+            if rs is not None:
+                if not isinstance(rs, dict):
+                    errors.append("logManagement.rsyslog: must be a mapping")
+                else:
+                    ms = rs.get("maxsize")
+                    if ms is not None:
+                        if not isinstance(ms, str) or not _logrotate_size_re.match(ms):
+                            errors.append(
+                                f"logManagement.rsyslog.maxsize: must match "
+                                f"\\d+[kMG]? (got {ms!r})"
+                            )
+                    rot = rs.get("rotate")
+                    if rot is not None:
+                        if (
+                            not isinstance(rot, int)
+                            or isinstance(rot, bool)
+                            or rot < 1
+                        ):
+                            errors.append(
+                                f"logManagement.rsyslog.rotate: must be int >= 1 "
+                                f"(got {rot!r})"
+                            )
+                    freq = rs.get("frequency")
+                    if freq is not None and freq not in LOG_MANAGEMENT_VALID_FREQUENCIES:
+                        errors.append(
+                            f"logManagement.rsyslog.frequency: must be one of "
+                            f"{sorted(LOG_MANAGEMENT_VALID_FREQUENCIES)} "
+                            f"(got {freq!r})"
+                        )
+                    comp = rs.get("compress")
+                    if comp is not None and not isinstance(comp, bool):
+                        errors.append(
+                            "logManagement.rsyslog.compress: must be true or false"
+                        )
+
     # dmaEthercat is optional. configSet must be a single directory
     # name (no slashes, no '..') — bootstrap interpolates it into
     # /usr/share/dma-ethercat/config/<configSet>/<robot>.json, so
@@ -1169,6 +1274,8 @@ def main() -> int:
             print("usage: host-config.py <path> get <field>", file=sys.stderr)
             return 2
         return cmd_get(cfg, sys.argv[3])
+    if cmd == "get-log-management-json":
+        return cmd_get_log_management_json(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":
