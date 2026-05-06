@@ -20,6 +20,15 @@ _validate_repo_credential_file() {
   if [ "$mode" != "600" ]; then
     echo "credential file mode must be 0600 (got $mode): $f" >&2; return 3
   fi
+  # Enforce root:root ownership in production. Skip in test environments where
+  # the file is owned by the test runner, not root.
+  if [ -z "${BATS_TEST_TMPDIR:-}" ]; then
+    local owner
+    owner=$(stat -c '%U:%G' "$f" 2>/dev/null || stat -f '%Su:%Sg' "$f" 2>/dev/null || echo "unknown")
+    if [ "$owner" != "root:root" ]; then
+      echo "credential file must be owned by root:root (got $owner): $f" >&2; return 5
+    fi
+  fi
   # Reject paths inside a git work tree to prevent accidental commits.
   if ( cd "$(dirname "$f")" && git rev-parse --is-inside-work-tree >/dev/null 2>&1 ); then
     echo "credential file is inside a git work tree: $f" >&2; return 4

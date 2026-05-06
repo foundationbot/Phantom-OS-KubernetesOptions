@@ -45,6 +45,17 @@ YAML
   [[ "$output" =~ git ]] || [[ "$output" =~ work ]]
 }
 
+@test "_validate_repo_credential_file rejects non-root owner (production)" {
+  f="$(_make_creds)"
+  # Simulate production by clearing BATS_TEST_TMPDIR for this assertion
+  saved_tmpdir="$BATS_TEST_TMPDIR"
+  unset BATS_TEST_TMPDIR
+  run _validate_repo_credential_file "$f"
+  export BATS_TEST_TMPDIR="$saved_tmpdir"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ root:root ]] || [[ "$output" =~ owned ]]
+}
+
 @test "_apply_repo_credential applies via kubectl and polls argocd repo list" {
   f="$(_make_creds)"
   _apply_repo_credential "$f"
