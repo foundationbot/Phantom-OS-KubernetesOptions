@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# STATUS: Authored but not yet integrated into CI. The Q2 2026 v1 e2e
+# validation on mk11000009 was driven manually rather than via this
+# harness due to known dev-machine assumptions (requires kubectl/argocd/
+# helm locally even in TEST_ROBOT_HOST mode). Kept as documentation +
+# starting-point for v2 automation. Do not delete without replacement.
+#
 # tests/system/run.sh — end-to-end harness for RFC-0002 v1 verification.
 #
 # Exercises the complete RFC-0002 implementation on a real (or VM) k0s install:
