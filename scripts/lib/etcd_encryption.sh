@@ -33,7 +33,17 @@ resources:
               secret: $key
       - identity: {}
 EOF
-  chmod 0600 "$ETCD_ENCRYPTION_CONFIG_PATH"
+  # kube-apiserver runs as user 'kube-apiserver' on k0s and reads this file
+  # at startup. mode 0600 root:root would EACCES the apiserver. Match the
+  # k0s pki convention (compare /var/lib/k0s/pki/apiserver-kubelet-client.key):
+  # owner kube-apiserver:root, mode 0640. Fall back to mode 0600 in test
+  # environments where the user does not exist.
+  if id kube-apiserver >/dev/null 2>&1; then
+    chown kube-apiserver:root "$ETCD_ENCRYPTION_CONFIG_PATH"
+    chmod 0640 "$ETCD_ENCRYPTION_CONFIG_PATH"
+  else
+    chmod 0600 "$ETCD_ENCRYPTION_CONFIG_PATH"
+  fi
 
   mkdir -p "$(dirname "$ETCD_ENCRYPTION_KEY_BACKUP_PATH")"
   printf '%s\n' "$key" > "$ETCD_ENCRYPTION_KEY_BACKUP_PATH"
