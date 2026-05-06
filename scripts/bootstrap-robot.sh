@@ -1146,23 +1146,167 @@ host_config() {
 
 # ---- phase 3: cluster ---------------------------------------------------
 
+# Tailscale is a hard requirement for the cluster phase: spec.api.address
+# is pinned to the Tailscale IP, and operator tooling reaches the AI PC
+# over the Tailscale mesh. Returns 0 if a Tailscale IPv4 address is
+# resolvable RIGHT NOW; emits a fail() and returns 1 otherwise.
+_require_tailscale() {
+  if ! command -v tailscale >/dev/null 2>&1; then
+    fail "tailscale CLI not installed. Install with: curl -fsSL https://tailscale.com/install.sh | sh"
+    return 1
+  fi
+  local state
+  state=$(tailscale status --json 2>/dev/null | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("BackendState","Unknown"))' 2>/dev/null || echo Unknown)
+  if [ "$state" != "Running" ]; then
+    fail "tailscale not running (BackendState=$state). Run: tailscale up"
+    return 1
+  fi
+  local ip
+  ip=$(tailscale ip -4 2>/dev/null | head -1)
+  if [ -z "$ip" ]; then
+    fail "tailscale running but no IPv4 address advertised. Re-auth: tailscale up"
+    return 1
+  fi
+  return 0
+}
+
+# Resolve the Tailscale IPv4 address for spec.api.address. Polls for up
+# to API_ADDRESS_WAIT_SECS so the cluster phase can run during a cold
+# boot before tailscaled has finished associating. Echoes the IP, or
+# returns 1 if Tailscale never produces one.
+_resolve_api_address() {
+  local wait_secs=${API_ADDRESS_WAIT_SECS:-60}
+  local elapsed=0
+  while [ "$elapsed" -lt "$wait_secs" ]; do
+    local ts_ip
+    ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
+    if [ -n "$ts_ip" ]; then
+      printf '%s\n' "$ts_ip"
+      return 0
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  return 1
+}
+
+# Detect the install-time race: kube-apiserver running with the '1.1.1.1'
+# sentinel. Pods can't reach the API via the cluster service IP because
+# kube-proxy DNATs to advertise-address.
+_apiserver_advertises_sentinel() {
+  pgrep -af kube-apiserver 2>/dev/null \
+    | grep -q -- "--advertise-address=1\.1\.1\.1"
+}
+
+# Heal an already-installed cluster whose advertise-address is the
+# sentinel. Writes /etc/k0s/k0s.yaml + a systemd drop-in pointing
+# k0scontroller's ExecStart at it, then restarts k0scontroller. Idempotent.
+_repair_advertise_address() {
+  local api_ip
+  if ! api_ip=$(_resolve_api_address); then
+    fail "could not resolve a Tailscale IP after ${API_ADDRESS_WAIT_SECS:-60}s — repair aborted"
+    return 1
+  fi
+  note "repairing advertise-address: 1.1.1.1 -> $api_ip"
+
+  if [ ! -f /etc/k0s/k0s.yaml ]; then
+    mkdir -p /etc/k0s
+    cat >/etc/k0s/k0s.yaml <<EOF
+# Managed by scripts/bootstrap-robot.sh phase cluster (self-heal path).
+apiVersion: k0s.k0sproject.io/v1beta1
+kind: ClusterConfig
+metadata:
+  name: k0s
+spec:
+  api:
+    address: $api_ip
+EOF
+    info "wrote /etc/k0s/k0s.yaml"
+  else
+    info "/etc/k0s/k0s.yaml already present — leaving as-is"
+  fi
+
+  # Make the systemd unit reference the config file.
+  local dropin=/etc/systemd/system/k0scontroller.service.d/use-config.conf
+  mkdir -p "$(dirname "$dropin")"
+  cat >"$dropin" <<EOF
+# Managed by scripts/bootstrap-robot.sh phase cluster (self-heal path).
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/k0s controller --enable-worker=true --single=true -c /etc/k0s/k0s.yaml
+EOF
+  systemctl daemon-reload
+
+  if ! systemctl restart k0scontroller; then
+    fail "systemctl restart k0scontroller failed"
+    return 1
+  fi
+
+  # Wait up to 60s for the API to come back.
+  local i
+  for i in $(seq 1 30); do
+    if k0s kubectl get nodes >/dev/null 2>&1; then
+      pass "k0scontroller restarted; API reachable (api.address=$api_ip)"
+      return 0
+    fi
+    sleep 2
+  done
+  fail "k0scontroller restarted but API didn't come back within 60s"
+  return 1
+}
+
 cluster() {
   if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
   phase "phase 3: cluster"
+
+  # Tailscale is a hard prerequisite — spec.api.address pins to it.
+  if [ "$DRY_RUN" = 0 ]; then
+    _require_tailscale || return
+  fi
 
   local already_running=0
   systemctl is-active --quiet k0scontroller && already_running=1
   systemctl is-active --quiet k0sworker     && already_running=1
 
   if [ "$already_running" = 1 ]; then
-    skip "k0s already running ($(systemctl is-active k0scontroller k0sworker 2>/dev/null | tr '\n' ' '))"
+    # Self-heal path: detect the install-time race.
+    if [ "$DRY_RUN" = 0 ] && _apiserver_advertises_sentinel; then
+      _repair_advertise_address || return
+    else
+      skip "k0s already running ($(systemctl is-active k0scontroller k0sworker 2>/dev/null | tr '\n' ' '))"
+    fi
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  k0s install controller --single --enable-worker  (if /etc/k0s/k0s.yaml absent)"
+    info "DRY-RUN  require tailscale + resolve api IP"
+    info "DRY-RUN  write /etc/k0s/k0s.yaml with spec.api.address=<tailscale_ip>"
+    info "DRY-RUN  k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml"
     info "DRY-RUN  systemctl enable --now k0scontroller"
   else
     if [ ! -e /etc/k0s/k0s.yaml ]; then
-      if k0s install controller --single --enable-worker; then
-        pass "k0s installed"
+      local api_ip
+      if ! api_ip=$(_resolve_api_address); then
+        fail "could not resolve a Tailscale IP after ${API_ADDRESS_WAIT_SECS:-60}s. Bring tailscale up and re-run."
+        return
+      fi
+      info "API server address: $api_ip"
+      mkdir -p /etc/k0s
+      cat >/etc/k0s/k0s.yaml <<EOF
+# Managed by scripts/bootstrap-robot.sh phase cluster.
+# Pinning spec.api.address prevents k0s from baking '1.1.1.1' (its
+# 'no default route' sentinel) into kine when the network isn't fully
+# up at install time. Edit at your own risk; bootstrap respects an
+# operator-modified file (re-runs skip the install path entirely when
+# this file is present).
+apiVersion: k0s.k0sproject.io/v1beta1
+kind: ClusterConfig
+metadata:
+  name: k0s
+spec:
+  api:
+    address: $api_ip
+EOF
+      if k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml; then
+        pass "k0s installed (api.address=$api_ip)"
       else
         fail "k0s install"; return
       fi
@@ -1198,17 +1342,44 @@ cluster() {
     done
   fi
 
+  # Apply the fleet-wide robot label. Robot-specific DaemonSets
+  # (yovariable-server, future has-imu workloads, ...) select on
+  # foundation.bot/robot=true; without this label the DaemonSet's
+  # desired count is 0 and the workload silently never schedules.
+  # --overwrite so re-runs are idempotent.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  kubectl label node <hostname> foundation.bot/robot=true --overwrite"
+  else
+    local node_name
+    node_name=$("${KUBECTL[@]}" get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -n "$node_name" ] && "${KUBECTL[@]}" label node "$node_name" \
+         foundation.bot/robot=true --overwrite >/dev/null 2>&1; then
+      pass "node $node_name labeled foundation.bot/robot=true"
+    else
+      fail "could not label node foundation.bot/robot=true"
+    fi
+  fi
+
   # Write a kubeconfig for root so kubectl + terraform have one to read.
   # `k0s kubeconfig admin` regenerates from the cluster CA every time —
-  # safe to run repeatedly.
+  # safe to run repeatedly. We pin the server URL to 127.0.0.1: the only
+  # consumers are local (kubectl, terraform, both run on this host),
+  # the cert SANs include 127.0.0.1, and loopback is immune to wifi
+  # DHCP changes / network moves that would otherwise stale the file.
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  k0s kubeconfig admin > /root/.kube/config (chmod 600)"
+    info "DRY-RUN  k0s kubeconfig admin > /root/.kube/config (server=127.0.0.1, chmod 600)"
   else
     mkdir -p /root/.kube
-    if k0s kubeconfig admin > /root/.kube/config 2>/dev/null && [ -s /root/.kube/config ]; then
-      chmod 600 /root/.kube/config
-      pass "/root/.kube/config written ($(wc -c </root/.kube/config) bytes)"
+    local kc_tmp
+    kc_tmp=$(mktemp)
+    if k0s kubeconfig admin 2>/dev/null \
+         | sed 's|server: https://[^:]*:6443|server: https://127.0.0.1:6443|' \
+         > "$kc_tmp" && [ -s "$kc_tmp" ]; then
+      install -m 0600 "$kc_tmp" /root/.kube/config
+      rm -f "$kc_tmp"
+      pass "/root/.kube/config written (server=127.0.0.1, $(wc -c </root/.kube/config) bytes)"
     else
+      rm -f "$kc_tmp"
       fail "k0s kubeconfig admin failed"
     fi
   fi
