@@ -37,6 +37,7 @@ spec:
       # Variable endpoints are dialed directly via the robot's IP, so
       # the pod sits in the host's network namespace.
       hostNetwork: true
+      hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
 
       # Host-level singleton — no point starting a second copy.
@@ -78,6 +79,7 @@ spec:
             # owned by root on the host; matching UID inside the
             # container avoids permission gymnastics.
             runAsUser: 0
+            privileged: true
 
           resources:
             requests:
