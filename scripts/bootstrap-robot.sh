@@ -3195,42 +3195,29 @@ _gitops_apply_secret_rbac() {
   return 1
 }
 
-# argocd-rbac overlay is rendered, then applied as `kubectl patch --type merge`
-# per-ConfigMap (not `kubectl apply -k`) so it merges into the chart-installed
+# argocd-rbac patch files are applied directly as `kubectl patch --type merge`
+# per-ConfigMap (not `kubectl apply -k`) so they merge into the chart-installed
 # ConfigMaps without stomping their data: blocks. See
 # manifests/base/argocd-rbac/kustomization.yaml header for rationale.
+# The two patch files are strategic-merge patches (apiVersion: v1, kind:
+# ConfigMap, name: <cm>, data: ...) which kubectl patch --patch-file accepts
+# directly when --type=merge.  No kustomize build or awk needed.
 _gitops_apply_argocd_user_rbac() {
-  local rendered cm name patch
-  rendered=$(kustomize build "$REPO_ROOT/manifests/base/argocd-rbac" 2>/dev/null) || {
-    fail "kustomize build manifests/base/argocd-rbac failed"; return 1
-  }
-
-  # Split rendered output into per-document patches and apply each via
-  # kubectl patch on the named ConfigMap.
+  local cm_patch_dir="$REPO_ROOT/manifests/base/argocd-rbac"
   local ok=1
-  while IFS= read -r doc_name; do
-    [ -z "$doc_name" ] && continue
-    # Extract just this document.
-    cm=$(printf '%s\n' "$rendered" | awk -v n="$doc_name" '
-      BEGIN {RS="---\n"; ORS=""}
-      $0 ~ "name: "n {print}
-    ')
-    [ -z "$cm" ] && continue
-    # Convert YAML data: block to a JSON merge-patch.
-    # Simpler: use kubectl patch --type merge with --patch-file.
-    local tmp; tmp=$(mktemp)
-    printf '%s\n' "$cm" > "$tmp"
-    if "${KUBECTL[@]}" -n argocd patch configmap "$doc_name" --type merge --patch-file "$tmp" </dev/null >/dev/null 2>&1; then
-      pass "patched ConfigMap $doc_name"
-    else
-      fail "could not patch ConfigMap $doc_name"
-      ok=0
+  local entry cm_name patch_file
+  for entry in "argocd-cm:argocd-cm-patch.yaml" "argocd-rbac-cm:argocd-rbac-cm-patch.yaml"; do
+    cm_name="${entry%%:*}"
+    patch_file="$cm_patch_dir/${entry##*:}"
+    if [ ! -r "$patch_file" ]; then
+      fail "argocd-rbac patch missing: $patch_file"; ok=0; continue
     fi
-    rm -f "$tmp"
-  done <<EOF
-argocd-cm
-argocd-rbac-cm
-EOF
+    if "${KUBECTL[@]}" -n argocd patch configmap "$cm_name" --type merge --patch-file "$patch_file" >/dev/null 2>&1; then
+      pass "patched ConfigMap $cm_name"
+    else
+      fail "could not patch ConfigMap $cm_name"; ok=0
+    fi
+  done
 
   # fleet-operator kubectl RBAC is a normal kustomize apply.
   if "${KUBECTL[@]}" apply -k "$REPO_ROOT/manifests/base/fleet-operator-kubectl-rbac" >/dev/null; then
