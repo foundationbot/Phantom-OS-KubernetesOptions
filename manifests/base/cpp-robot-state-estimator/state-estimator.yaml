@@ -1,0 +1,98 @@
+# cpp-robot-state-estimator — DaemonSet running the IMU + kinematic
+# state estimator (foundation/DMA/cpp-robot-state-estimator). Replaces
+# its docker-compose.yml on robots that opt in via
+# foundation.bot/has-state-estimator.
+#
+# Independent of the positronic / locomotion choice — both consume
+# /state_estimator output from the same shm queues this writer
+# publishes to. Operators enable wherever state estimation is wanted.
+#
+# ── Image ────────────────────────────────────────────────────────────────
+# foundationbot/cpp-robot-state-estimator. CI publishes
+# <branch>-latest-<arch> tags; per-robot tag rewritten via host-config
+# images.cpp-robot-state-estimator.
+#
+# ── Args ────────────────────────────────────────────────────────────────
+# Image ENTRYPOINT is `state_estimator_node`. Defaults below mirror the
+# docker-compose:
+#   --urdf, --config — paths to files baked into the image at
+#                      /usr/local/share/phantom/urdf|config/.
+#   --body-frame-rotation enabled — expect DMA.ethercat to publish IMU
+#                      body-frame fields. Pair with DMA.ethercat's
+#                      --enable-body-frame-rotation flag.
+#
+# Override per-robot by adding cpp-robot-state-estimator to the
+# host-config deployments block once DEPLOYMENT_TARGETS gets it (not
+# in this PR — file an op when needed).
+#
+# ── CPU pinning ──────────────────────────────────────────────────────────
+# The compose pins to a dedicated RT helper core via cpuset:. k8s has no
+# direct equivalent. Operators wanting hard pinning configure the
+# cpu-isolation phase to dedicate a partition core and pin via the
+# host-RT mechanism. Resource requests below are scheduler hints, not
+# RT guarantees.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cpp-robot-state-estimator
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: cpp-robot-state-estimator
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cpp-robot-state-estimator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cpp-robot-state-estimator
+    spec:
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-state-estimator: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        - name: state-estimator
+          image: foundationbot/cpp-robot-state-estimator:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # ENTRYPOINT in the image is state_estimator_node — args below
+          # match the docker-compose defaults. Files referenced are
+          # baked into the image at /usr/local/share/phantom/.
+          args:
+            - --urdf
+            - /usr/local/share/phantom/urdf/20250206_phantom_mk1_clean.urdf
+            - --config
+            - /usr/local/share/phantom/config/state_estimator_params.json
+            - --body-frame-rotation
+            - enabled
+          env:
+            - { name: ROS_DOMAIN_ID,      value: "0" }
+            - { name: RMW_IMPLEMENTATION, value: "rmw_fastrtps_cpp" }
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            # Scheduler hint only — not real RT pinning. The compose
+            # uses cpuset:19; replicate that via cpu-isolation if
+            # the robot's cpuset partitions allow.
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "1", memory: "2Gi" }
+          securityContext:
+            capabilities:
+              add:
+                - SYS_NICE   # set RT scheduling priority
+                - IPC_LOCK   # mlock for FastDDS shared memory
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
