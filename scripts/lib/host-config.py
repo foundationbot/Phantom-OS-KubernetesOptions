@@ -488,6 +488,25 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "phantom",
         "container": "api",
     },
+    # DMA.streams recorder DaemonSet — patches go to the `recorder` container
+    # (not the `janitor` sidecar). Typical override: redirect /recordings to
+    # a dedicated data partition (e.g. /data2/recordings) on hosts where
+    # /root sits on the OS disk.
+    "dma-recorder": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "phantom",
+        "container": "recorder",
+    },
+    # DMA.streams live web visualization. Deployed but inert by default
+    # (foundation.bot/has-streamer label not set). Override channel here
+    # is mainly for adding a URDF mount or swapping image tags per host.
+    "rerun-streamer": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "phantom",
+        "container": "streamer",
+    },
 }
 
 

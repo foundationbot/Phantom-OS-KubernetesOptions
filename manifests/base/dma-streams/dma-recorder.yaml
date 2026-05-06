@@ -1,0 +1,190 @@
+# dma-recorder — DaemonSet that records DMA EtherCAT IPC queues to Rerun .rrd
+# files on the robot host.
+#
+# Source: foundation/DMA/DMA.streams (binary `dma_recorder`, image
+# foundationbot/dma-streams:<tag>). The recorder consumes /actuals,
+# /desired, /desireds_controller, /config, /raw_imu_actuals,
+# /motor_diagnostics, /errors, /state_estimator, /commands, and
+# /command_responses from /dev/shm and writes timestamped .rrd files
+# to /recordings (mounted from the host /root/recordings hostPath).
+#
+# ── Lifecycle ────────────────────────────────────────────────────────────
+# Pod-level on/off: this DaemonSet schedules only on nodes that carry
+#   foundation.bot/has-recorder=true
+# Flip the label to start/stop. Per-session arm/disarm is also possible
+# via /commands opcodes RECORDING_START (0x0700) / RECORDING_STOP (0x0701)
+# without restarting the pod — set --manual-arm in args to opt in.
+#
+# Recording lifecycle is owned by THIRD PARTIES (operator-UI, test
+# harnesses, AI app, the bundled dma-cmd CLI). DMA.ethercat only ACKs.
+# Trigger a recording window from any host with kubectl access:
+#
+#   POD=$(kubectl -n phantom get pod -l app.kubernetes.io/name=dma-recorder \
+#                                    --field-selector spec.nodeName=<robot> \
+#                                    -o jsonpath='{.items[0].metadata.name}')
+#   kubectl -n phantom exec -c recorder $POD -- dma-cmd record start
+#   # ... do interesting things ...
+#   kubectl -n phantom exec -c recorder $POD -- dma-cmd record stop
+#
+# The same dma-cmd works from any pod that mounts /dev/shm with hostIPC,
+# including any sidecar in this DaemonSet.
+#
+# ── Retention ────────────────────────────────────────────────────────────
+# The recorder rolls a NEW .rrd file every --max-duration seconds or
+# when the file passes --max-size MB. It does NOT delete old files.
+# The `janitor` sidecar in this pod enforces:
+#   - lifetime cap:   files older than RETENTION_DAYS get removed
+#   - folder budget:  oldest files removed until folder ≤ MAX_BYTES
+#
+# ── Pinning ──────────────────────────────────────────────────────────────
+# Stays out of the EtherCAT RT cores. Keep cpuset-affinity off-loop on
+# the host (16 = dma_main, 17 = recorder, 18 = streamer is the convention
+# in DMA.ethercat OPERATIONS_GUIDE.md). Adjust the cpuManagerPolicy /
+# nodeSelector if a robot uses a different layout.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dma-recorder
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: dma-recorder
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dma-recorder
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dma-recorder
+    spec:
+      # Schedule only where the host owns dma_main shm + opted in via label.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-recorder: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # The recorder shares /dev/shm with the host's dma_main process.
+      # hostIPC is required so POSIX shm primitives (futex sync, named
+      # semaphores) backing the queue see the same kernel namespace as
+      # the host writer; the hostPath /dev/shm mount alone exposes the
+      # shm files but not the underlying IPC namespace.
+      hostPID: false
+      hostNetwork: false
+      hostIPC: true
+
+      # Give the writer thread time to flush the in-flight columnar batch
+      # and close the current .rrd cleanly on SIGTERM.
+      terminationGracePeriodSeconds: 30
+
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        # ── Recorder ───────────────────────────────────────────────────
+        - name: recorder
+          # Built and pushed by .circleci/config.yml under DMA.streams.
+          # Bump the tag through host-config kustomize.images, not here.
+          image: foundationbot/dma-streams:main-latest
+          imagePullPolicy: IfNotPresent
+          command: ["dma_recorder"]
+          args:
+            - --output=/recordings
+            - --max-duration=60       # seconds per .rrd file
+            - --max-size=100          # MB per .rrd file
+            - --decimate=1            # 1 = full 500Hz, 5 = 100Hz
+            # Recorder waits idle until a third party (operator-UI, test
+            # harness, AI app, dma-cmd CLI) writes a CommandMessage with
+            # opcode=RECORDING_START to /commands. RECORDING_STOP flushes
+            # and closes the current .rrd. Remove this flag to revert to
+            # always-armed (start recording as soon as queues appear).
+            - --manual-arm
+
+          securityContext:
+            # /dev/shm segments produced by host dma_main are root-owned;
+            # match UID inside container to read them without games.
+            runAsUser: 0
+            # privileged: required to access the host's POSIX IPC objects
+            # backing the shm queues (cross-namespace mmap + futex). The
+            # alternative — capability-only (CAP_IPC_OWNER + CAP_SYS_NICE)
+            # — fails on k0s/containerd default seccomp; privileged is the
+            # known-working path on this fleet.
+            privileged: true
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+            - name: recordings
+              mountPath: /recordings
+
+        # ── Janitor sidecar — enforces retention + folder budget ───────
+        - name: janitor
+          image: alpine:3.19
+          imagePullPolicy: IfNotPresent
+          # Loop forever: every CHECK_INTERVAL_SECONDS, prune files older
+          # than RETENTION_DAYS, then trim oldest until folder ≤ MAX_BYTES.
+          # Filename pattern recording_YYYYMMDD_HHMMSS.rrd sorts
+          # chronologically under lexical sort, so `ls -1tr` is safe.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              : "${RETENTION_DAYS:=7}"
+              : "${MAX_BYTES:=107374182400}"      # 100 GiB
+              : "${CHECK_INTERVAL_SECONDS:=300}"  # 5 min
+              echo "[janitor] retention=${RETENTION_DAYS}d max_bytes=${MAX_BYTES} interval=${CHECK_INTERVAL_SECONDS}s"
+              while true; do
+                # 1) Lifetime cap
+                find /recordings -maxdepth 1 -type f -name 'recording_*.rrd' \
+                     -mtime +"${RETENTION_DAYS}" -print -delete || true
+
+                # 2) Folder size cap — remove oldest until under MAX_BYTES
+                while :; do
+                  used=$(du -sb /recordings 2>/dev/null | cut -f1 || echo 0)
+                  if [ "${used:-0}" -le "${MAX_BYTES}" ]; then break; fi
+                  oldest=$(ls -1tr /recordings/recording_*.rrd 2>/dev/null | head -1 || true)
+                  if [ -z "${oldest}" ]; then break; fi
+                  echo "[janitor] over budget (used=${used}); removing $(basename "${oldest}")"
+                  rm -f "${oldest}"
+                done
+
+                sleep "${CHECK_INTERVAL_SECONDS}"
+              done
+          env:
+            - name: RETENTION_DAYS
+              value: "7"
+            - name: MAX_BYTES
+              value: "107374182400"     # 100 GiB
+            - name: CHECK_INTERVAL_SECONDS
+              value: "300"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: recordings
+              mountPath: /recordings
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+        - name: recordings
+          hostPath:
+            path: /root/recordings
+            type: DirectoryOrCreate
