@@ -34,6 +34,18 @@
 #   --operator-ui-config render+apply the operator-ui-pairing ConfigMap
 #                        (currently holds AI_PC_URL; reserved for any
 #                        future per-host operator-ui env)
+#   --ecat-interface     resolve the EtherCAT NIC adapter and rename it
+#                        to cpuIsolation.nic.iface via persistent udev
+#                        rules. Driven by cpuIsolation.nic.selector
+#                        (mac/pci/driver+index); falls back to the
+#                        vendored interactive picker on a TTY.
+#                        See docs/cpu-isolation.md.
+#   --cpu-isolation      activate cpuset partitions, install cpusets.service,
+#                        write systemd CPUAffinity drop-in, optionally pin
+#                        EtherCAT NIC IRQs and migrate kernel cmdline. Reads
+#                        host-config.yaml's cpuIsolation: block; no-op when
+#                        cpuIsolation.enabled is unset/false.
+#                        See docs/cpu-isolation.md.
 #   --gitops             terraform apply (argocd Helm) + render+apply
 #                        the per-host phantomos-<robot> Application
 #   --argocd-admin       install argocd CLI; prompt and set admin
@@ -48,6 +60,8 @@
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
+#   --skip-ecat-interface skip the phase 7 ecat-interface setup
+#   --skip-cpu-isolation skip the phase 8 cpu-isolation setup
 #   --skip-validate      skip the final validate-local-registry.sh run
 #
 # Other flags:
@@ -114,63 +128,109 @@
 #   sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets   # re-seed creds
 #   sudo bash scripts/bootstrap-robot.sh --image-overrides     # push tag changes
 #   sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
+#   sudo bash scripts/bootstrap-robot.sh --ecat-interface --cpu-isolation
+#                                                              # rerun realtime setup only
+#   sudo bash scripts/bootstrap-robot.sh --skip-cpu-isolation --skip-ecat-interface
+#                                                              # full bootstrap, skip RT setup
 #
 #   -h, --help         this help
 #
-# Phases:
-#   1. preflight    OS / arch / kernel / disk / sudo / port collisions
-#   2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
-#                   pciutils, unzip; k0s binary; terraform binary
-#   3. cluster      k0s install controller --single --enable-worker;
-#                   systemctl enable --now k0scontroller; wait Ready;
-#                   write /root/.kube/config from `k0s kubeconfig admin`
-#                   (so kubectl + terraform have a config to read).
-#                   Runs BEFORE host config because the host-config scripts
-#                   edit /etc/k0s/containerd.toml, which only exists after
-#                   k0s has started at least once.
-#   4. host config  configure-k0s-containerd-mirror.sh +
-#                   configure-k0s-nvidia-runtime.sh (if a GPU is detected
-#                   via lspci or /dev/nvidia0). Restarts k0s; waits for
-#                   node Ready before returning so later phases don't race.
-#   5. seed pull secrets
-#                   ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
-#                   exists in `argus`, `dma-video`, `nimbus` so private
-#                   foundationbot/* images can be pulled. Source order:
-#                   --dockerhub-secret-file, then ~/.docker/config.json
-#                   (default), then existing Secret in the `phantom`
-#                   namespace, then no-op if already present in every
-#                   target namespace. Creates the namespace if it doesn't
-#                   exist yet. Idempotent.
-#   5.5 operator-ui-config
-#                   create/refresh the operator-ui-pairing ConfigMap in
-#                   the `argus` namespace from
-#                   /etc/phantomos/operator-ui-pairing.yaml. The base
-#                   operator-ui Deployment reads AI_PC_URL via
-#                   configMapKeyRef. On first bringup --ai-pc-url is
-#                   required; subsequent runs without the flag re-apply
-#                   the existing local file. Rolls out operator-ui if
-#                   the value changed.
-#   6. gitops       cd terraform && terraform init && terraform apply
-#                   (installs ArgoCD via the official Helm chart). Then
-#                   render the per-host Application CR from
-#                   host-config-templates/_template/phantomos-app.yaml.tpl
-#                   into /etc/phantomos/phantomos-app.yaml using the
-#                   resolved robot identity, repo URL, and
-#                   targetRevision (from host-config.yaml, default
-#                   'main'), and kubectl-apply it. Migrates away from
-#                   any pre-existing root-app + child-app topology
-#                   without pruning workload state. The repo carries no
-#                   per-robot Application files; that data is per-host.
-#   6.5 argocd admin install argocd CLI (latest release) under
-#                   /usr/local/bin/argocd and reset the admin password
-#                   to "1984" by patching argocd-secret with a bcrypt
-#                   hash. Idempotent (always rewrites the hash). Also
-#                   removes argocd-initial-admin-secret since it is no
-#                   longer authoritative.
-#   7. setup-positronic (optional, --setup-positronic)
-#                   Push positronic-control image to local registry,
-#                   build phantom-models, and redeploy the pod.
-#   8. validate     bash scripts/validate-local-registry.sh
+# Phases (bootstrap runs all of them in order; --<phase> selects one):
+#   pre-phases (run before phase 1; default-on, opt out via --skip-*):
+#     stop docker containers     (--skip-docker-stop)
+#     stop system services       (--skip-stop-services)
+#     uninstall dma-ethercat     (--skip-ethercat-uninstall)
+#
+#    1. preflight    OS / arch / kernel / disk / sudo / port collisions
+#    2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
+#                    pciutils, unzip; k0s binary; terraform binary
+#    3. cluster      k0s install controller --single --enable-worker;
+#                    systemctl enable --now k0scontroller; wait Ready;
+#                    write /root/.kube/config from `k0s kubeconfig admin`
+#                    (so kubectl + terraform have a config to read).
+#                    Runs BEFORE host config because the host-config scripts
+#                    edit /etc/k0s/containerd.toml, which only exists after
+#                    k0s has started at least once.
+#    4. host config  configure-k0s-containerd-mirror.sh +
+#                    configure-k0s-nvidia-runtime.sh (if a GPU is detected
+#                    via lspci or /dev/nvidia0). Restarts k0s; waits for
+#                    node Ready before returning so later phases don't race.
+#    5. seed pull secrets
+#                    ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
+#                    exists in `argus`, `dma-video`, `nimbus`, `phantom` so
+#                    private foundationbot/* images can be pulled. Source
+#                    order: --dockerhub-secret-file, then ~/.docker/config.json
+#                    (default), then existing Secret in the `phantom`
+#                    namespace, then no-op if already present in every
+#                    target namespace. Idempotent.
+#    6. operator-ui-config
+#                    create/refresh the operator-ui-pairing ConfigMap in
+#                    the `argus` namespace from
+#                    /etc/phantomos/operator-ui-pairing.yaml. The base
+#                    operator-ui Deployment reads AI_PC_URL via
+#                    configMapKeyRef. On first bringup --ai-pc-url is
+#                    required; subsequent runs without the flag re-apply
+#                    the existing local file. Rolls out operator-ui if
+#                    the value changed.
+#    7. ecat-interface (gates phase 8)
+#                    resolve the EtherCAT NIC adapter and rename it to
+#                    cpuIsolation.nic.iface via a persistent udev rule
+#                    (/etc/udev/rules.d/70-ecat.rules). Driven by
+#                    cpuIsolation.nic.selector (mac/pci/driver+index) in
+#                    host-config.yaml; falls back to the vendored
+#                    interactive picker on a TTY. Idempotent — fast-paths
+#                    when `ip link show <iface>` already succeeds.
+#                    See docs/cpu-isolation.md.
+#    8. cpu-isolation (gates phase 9)
+#                    activate cgroup v2 cpuset partitions; install
+#                    cpusets.service so they reactivate at boot
+#                    (ordered Before docker / user@ / k0scontroller /
+#                    k0sworker); write systemd CPUAffinity drop-in;
+#                    pin EtherCAT NIC IRQs to cpuIsolation.nic.irqCore;
+#                    optionally migrate kernel cmdline (--migrateCmdline).
+#                    Default-on: missing cpuIsolation: block prompts on
+#                    a TTY and persists answers. enabled: false skips.
+#                    See docs/cpu-isolation.md.
+#    9. install dma-ethercat (gates phase 10)
+#                    render the bootstrap-managed installer Job from the
+#                    foundationbot/dma-ethercat tag in host-config images:,
+#                    apply, dpkg-i the .deb extracted to the host, then
+#                    write DMA_CONFIG / INTERFACE / DMA_CPU_AFFINITY /
+#                    DMA_RT_CPU into /etc/dma/dma-ethercat.env (preserving
+#                    operator edits) and `systemctl enable --now
+#                    dma-ethercat.service`. ANY failure halts bootstrap;
+#                    --skip-ethercat-install bypasses.
+#   10. gitops       cd terraform && terraform init && terraform apply
+#                    (installs ArgoCD via the official Helm chart). Then
+#                    render per-host Application CRs (one per enabled
+#                    stack — phantomos-<robot>-core, phantomos-<robot>-operator)
+#                    from host-config-templates/_template/phantomos-app.yaml.tpl
+#                    into /etc/phantomos/phantomos-app-<stack>.yaml and
+#                    kubectl-apply each. Migrates from any pre-existing
+#                    root-app + child-app topology without pruning workload
+#                    state.
+#   11. argocd admin install argocd CLI (latest release) under
+#                    /usr/local/bin/argocd and reset the admin password
+#                    to "1984" by patching argocd-secret with a bcrypt
+#                    hash. Idempotent (always rewrites the hash). Also
+#                    removes argocd-initial-admin-secret since it is no
+#                    longer authoritative.
+#   12. image overrides
+#                    inject host-config.yaml's images: list into the live
+#                    per-stack Argo Applications via
+#                    spec.source.kustomize.images. Filtered per stack —
+#                    each Application only sees images its manifests
+#                    actually reference. foundationbot/dma-ethercat is
+#                    NOT routed (consumed directly by phase 9).
+#   13. deployments  inject host-config.yaml's deployments: block as
+#                    strategic-merge patches into the live per-stack
+#                    Applications via spec.source.kustomize.patches.
+#                    Currently routes positronic-control + phantomos-api-server
+#                    mounts onto the core stack. Alias: --dev-mounts.
+#   14. setup-positronic (optional, --setup-positronic)
+#                    push positronic-control image to local registry,
+#                    build phantom-models, and redeploy the pod.
+#   15. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
@@ -220,20 +280,22 @@ SKIP_NVIDIA=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
 SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ECAT_INTERFACE=0
+SKIP_CPU_ISOLATION=0
 SKIP_INSTALL_DMA_ETHERCAT=0
 SELECTED_PHASES=()
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
 # `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom)
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic)
 PULL_SECRET_NAME="dockerhub-creds"
 
 # Host-systemd services to stop + disable before bringing up the cluster.
 # Each entry is an ERE substring matched case-insensitively against
 # `systemctl list-unit-files --state=enabled` output. Append to extend.
 #   - api.*server   — host-systemd copy of phantomos-api-server (replaced by pod)
-#   - dma.*ethercat — replaced by phase 7 .deb install
+#   - dma.*ethercat — replaced by phase 9 .deb install
 SYSTEM_SERVICE_PATTERNS=(
   'api.*server'
   'dma.*ethercat'
@@ -249,6 +311,8 @@ while [ $# -gt 0 ]; do
     --host)              SELECTED_PHASES+=(host); shift ;;
     --seed-pull-secrets) SELECTED_PHASES+=(seed-pull-secrets); shift ;;
     --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
+    --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
+    --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
@@ -265,6 +329,10 @@ while [ $# -gt 0 ]; do
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
                          SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+    --skip-ecat-interface)
+                         SKIP_ECAT_INTERFACE=1; shift ;;
+    --skip-cpu-isolation)
+                         SKIP_CPU_ISOLATION=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
 
@@ -373,6 +441,20 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/lib/robot-id.sh
 . "$SCRIPT_DIR/lib/robot-id.sh"
 
+# CPU isolation (cpuset partitions, NIC IRQ pinning, kernel cmdline
+# migration). Helper wraps the vendored scripts/cpusets/manage_cpusets.sh
+# and renders /etc/cpusets.conf from host-config.yaml.
+# shellcheck source=scripts/lib/cpusets.sh
+. "$SCRIPT_DIR/lib/cpusets.sh"
+
+# EtherCAT NIC setup library — phase 7 sources these helpers and drives
+# the workflow directly rather than shelling out to
+# setup_ethercat_interface.sh (which kept its own decision tree). Lets
+# bootstrap make the idempotency call (rule already present + iface
+# already named -> no-op) BEFORE invoking the write path.
+# shellcheck source=scripts/cpusets/lib/nic_setup.sh
+. "$SCRIPT_DIR/cpusets/lib/nic_setup.sh"
+
 # host-config.yaml — single per-host source-of-truth. If --host-config
 # was passed, copy it to the canonical location so subsequent runs use
 # the same file. Then, if the file exists, harvest defaults for fields
@@ -433,6 +515,8 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_HOST=1
   SKIP_SEED_PULL_SECRETS=1
   SKIP_OPERATOR_UI_CONFIG=1
+  SKIP_ECAT_INTERFACE=1
+  SKIP_CPU_ISOLATION=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
@@ -446,6 +530,8 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       host)              SKIP_HOST=0 ;;
       seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
       operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
+      ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
+      cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
@@ -466,7 +552,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|ecat-interface) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -608,7 +694,7 @@ stop_existing_services() {
 
 # ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall) ----
 
-# Tear down the dma-ethercat realtime control service so phase 7's
+# Tear down the dma-ethercat realtime control service so phase 9's
 # install lands on a clean slate.
 #   1. systemctl stop dma-ethercat.service     (if active)
 #   2. systemctl disable dma-ethercat.service  (if enabled)
@@ -1335,11 +1421,603 @@ operator_ui_config() {
   fi
 }
 
-# ---- phase 7: install dma-ethercat (gates phase 8) -------------------
+# ---- phase 7: ecat-interface (gates phase 8) -------------------------
+
+# Resolve the EtherCAT NIC adapter and rename it to the requested
+# kernel iface name (e.g. ecat0 / ecat1) via persistent udev rules.
+# Runs BEFORE phase 8's cpu-isolation because phase 8's NIC IRQ pin
+# step (`ethercat-rt --nic <iface>`) requires the named iface to
+# already exist.
+#
+# Driven by host-config cpuIsolation.nic.{iface, selector}. Selector
+# block must contain exactly one of {mac, pci, {driver,index}};
+# validator enforces this. When selector is absent and stdin is a TTY,
+# bootstrap drops to nic_resolve_target_mac_interactive (vendored
+# library) and persists the chosen MAC back to host-config so re-runs
+# are non-interactive.
+#
+# Workflow (sources scripts/cpusets/lib/nic_setup.sh — no shell-out):
+#   1. resolve target MAC: from selector (mac/pci/driver+index) OR
+#      interactive picker on TTY
+#   2. nic_already_named && nic_udev_rule_present  -> no-op
+#   3. nic_write_udev_rule   (idempotent line-scoped rewrite)
+#   4. nic_apply_udev        (reload+trigger+wait for iface)
+#
+# This explicit guard sequence is what fixes the prior bug where the
+# entire shell-out re-ran on every bootstrap and re-renamed an already
+# correctly-named interface.
+ecat_interface() {
+  if [ "$SKIP_ECAT_INTERFACE" = 1 ]; then
+    phase "phase 7: ecat-interface  (skipped — --skip-ecat-interface)"
+    return
+  fi
+
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    phase "phase 7: ecat-interface  (skipped — no host-config.yaml)"
+    return
+  fi
+
+  local ci_json iface
+  ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  if [ -z "$ci_json" ] || [ "$ci_json" = "{}" ]; then
+    phase "phase 7: ecat-interface  (skipped — no cpuIsolation block)"
+    info "phase 8 (cpu-isolation) will prompt for cpuIsolation.nic.iface;"
+    info "the ecat-interface phase becomes active once that block exists."
+    return
+  fi
+  { read -r iface; } < <(cpusets_json_nic "$ci_json")
+  if [ -z "$iface" ]; then
+    phase "phase 7: ecat-interface  (skipped — cpuIsolation.nic.iface not set)"
+    return
+  fi
+  phase "phase 7: ecat-interface (gates phase 8)"
+
+  # --- Step 1: resolve target MAC --------------------------------------
+  local mac="" sel_kind sel_value sel_index
+  read -r sel_kind sel_value sel_index < <(_ecat_selector_fields "$ci_json")
+
+  if [ "$DRY_RUN" = 1 ]; then
+    if [ -n "$sel_kind" ]; then
+      info "DRY-RUN  resolve MAC via selector: $sel_kind=$sel_value${sel_index:+ (index=$sel_index)}"
+    else
+      info "DRY-RUN  resolve MAC via interactive picker (TTY) and persist to host-config"
+    fi
+    info "DRY-RUN  if iface $iface already exists with that MAC and udev rule binds it -> no-op"
+    info "DRY-RUN  else: write /etc/udev/rules.d/70-ecat.rules entry, udevadm reload+trigger, wait for iface"
+    return
+  fi
+
+  if [ -n "$sel_kind" ]; then
+    case "$sel_kind" in
+      mac)    mac="$(nic_resolve_target_mac --mac "$sel_value")" ;;
+      pci)    mac="$(nic_resolve_target_mac --pci "$sel_value")" ;;
+      driver) mac="$(nic_resolve_target_mac --driver "$sel_value" --index "$sel_index")" ;;
+    esac
+    if [ -z "$mac" ]; then
+      fail "selector $sel_kind=$sel_value did not match any NIC"
+      info "check 'ip -br link' output and update cpuIsolation.nic.selector in $hc"
+      return
+    fi
+    pass "selector $sel_kind=$sel_value resolves to MAC $mac"
+  else
+    if [ ! -t 0 ] || [ ! -t 2 ]; then
+      fail "no cpuIsolation.nic.selector and shell is not interactive"
+      info "add a selector (mac/pci/driver+index) to $hc, or rerun on a TTY"
+      return
+    fi
+    if ! mac="$(nic_resolve_target_mac_interactive "$iface")" || [ -z "$mac" ]; then
+      fail "operator did not pick a NIC"
+      return
+    fi
+    pass "operator picked MAC $mac via interactive picker"
+    # Persist the choice as cpuIsolation.nic.selector.mac so the next
+    # run is non-interactive.
+    if _ecat_persist_selector_mac "$hc" "$ci_json" "$mac"; then
+      pass "persisted selector.mac=$mac to $hc"
+    else
+      info "could not persist selector — next bootstrap will re-prompt"
+    fi
+  fi
+
+  # --- Step 2: idempotency guard ---------------------------------------
+  if nic_already_named "$iface" "$mac" && nic_udev_rule_present "$iface" "$mac"; then
+    pass "iface $iface already named for MAC $mac and udev rule binds it — no-op"
+    return
+  fi
+
+  # --- Step 3: write rule ----------------------------------------------
+  note "writing udev rule binding $iface -> $mac..."
+  if ! nic_write_udev_rule "$iface" "$mac"; then
+    fail "could not write /etc/udev/rules.d/70-ecat.rules"
+    return
+  fi
+  pass "udev rule installed"
+
+  # --- Step 4: apply --------------------------------------------------
+  # nic_apply_iface handles all three cases: already correct (no-op),
+  # current iface has the right MAC under a different name (in-kernel
+  # rename), or hot-plug wait. The library's nic_apply_udev alone is
+  # not enough — udevadm trigger --action=change does not re-fire
+  # rename rules, only hotplug add does.
+  note "applying iface $iface (in-kernel rename or udev hotplug-wait)..."
+  if nic_apply_iface "$iface" "$mac"; then
+    pass "iface $iface up"
+  else
+    fail "iface $iface did not appear / could not be renamed"
+    info "check 'ip -br link' for the actual name + MAC, and"
+    info "'journalctl -u systemd-udevd' for udev errors"
+    return
+  fi
+}
+
+# Echo three space-separated tokens to stdout: <kind> <value> <index>.
+# kind is one of {mac, pci, driver} or empty when no selector is set.
+# index is empty unless kind=driver. Used by ecat_interface to dispatch
+# to the right nic_resolve_target_mac flag combination.
+_ecat_selector_fields() {
+  python3 - "$1" <<'PY' 2>/dev/null || echo ""
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+sel = ((data.get("nic") or {}).get("selector") or {})
+if sel.get("mac"):
+    print(f"mac {sel['mac']} ")
+elif sel.get("pci"):
+    print(f"pci {sel['pci']} ")
+elif sel.get("driver"):
+    print(f"driver {sel['driver']} {sel.get('index', 0)}")
+else:
+    print("")
+PY
+}
+
+# Splice cpuIsolation.nic.selector.mac into host-config.yaml after the
+# operator picks a NIC interactively. Replaces any existing selector
+# block. Returns 0 on success.
+_ecat_persist_selector_mac() {
+  local hc="$1" ci_json="$2" mac="$3"
+  local merged
+  merged="$(python3 - "$ci_json" "$mac" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1] or "{}")
+nic = d.get("nic") or {}
+nic["selector"] = {"mac": sys.argv[2]}
+d["nic"] = nic
+print(json.dumps(d))
+PY
+)"
+  _cpu_isolation_persist "$hc" "$merged"
+}
+
+# ---- phase 8: cpu-isolation (gates phase 9) --------------------------
+
+# Carve isolated cpuset partitions out of the running kernel, pin the
+# EtherCAT NIC's IRQs (optional), and persist via systemd. Runs BEFORE
+# phase 9's dma-ethercat install because the .deb's systemd unit pins
+# itself to the RT cores — if the partition isn't there yet, the unit
+# starts unisolated.
+#
+# Host-config-driven. The cpuIsolation: block in host-config.yaml is
+# the source of truth. Default-on: if the cpuIsolation block is missing
+# entirely AND stdin is a TTY, bootstrap prompts the operator and
+# persists the answers back to host-config.yaml. Only an explicit
+# `enabled: false` skips the phase. See docs/cpu-isolation.md for the
+# schema and lifecycle.
+#
+# Idempotent: re-runs are safe. The vendored manage_cpusets.sh skips
+# already-active partitions with matching CPUs; install-service and
+# install-affinity-defaults overwrite their target files in place.
+cpu_isolation() {
+  if [ "$SKIP_CPU_ISOLATION" = 1 ]; then
+    phase "phase 8: cpu-isolation  (skipped — --skip-cpu-isolation)"
+    return
+  fi
+
+  # Read the cpuIsolation block.
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    phase "phase 8: cpu-isolation  (skipped — no host-config.yaml)"
+    return
+  fi
+  local ci_json enabled
+  ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+
+  # Empty block? Default-on flow:
+  #   - DRY_RUN: skip (don't mutate host-config in dry-run)
+  #   - TTY    : prompt operator, persist, reload
+  #   - else   : skip with a clear actionable message
+  if [ "$ci_json" = "{}" ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block, dry-run won't prompt)"
+      return
+    fi
+    if [ -t 0 ] && [ -t 2 ]; then
+      phase "phase 8: cpu-isolation (first-bringup setup)"
+      if ! _cpu_isolation_prompt "$hc"; then
+        fail "cpu-isolation interactive setup aborted"
+        info "rerun and complete the prompts, or set cpuIsolation.enabled=false in $hc to opt out"
+        return
+      fi
+      ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+    else
+      phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
+      info "first bringup needs an interactive shell to configure CPU isolation,"
+      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/cpu-isolation.md),"
+      info "OR set cpuIsolation.enabled=false to opt out persistently."
+      return
+    fi
+  fi
+
+  # Block presence implies enabled-by-default — only an explicit
+  # `enabled: false` opts out. Matches stacks.<name>.enabled semantics.
+  enabled="$(cpusets_json_field "$ci_json" enabled)"
+  if [ -n "$enabled" ] && [ "$enabled" != "true" ]; then
+    phase "phase 8: cpu-isolation  (skipped — cpuIsolation.enabled=false)"
+    return
+  fi
+  phase "phase 8: cpu-isolation (gates phase 9)"
+
+  # Detect legacy single-core configs (cpuIsolation.nic.irqCore set,
+  # but no top-level cpuIsolation.dmaRtCpu). These typically come from
+  # bootstrap runs that pre-date the irqCore/dmaRtCpu split — the old
+  # prompt persisted nic.rtCore only, validator translates it to
+  # nic.irqCore for back-compat, and the env-write helper falls back to
+  # using irqCore as DMA_RT_CPU. Net effect: NIC IRQs and the SOEM RT
+  # loop end up co-located, defeating the whole point of distinct
+  # cores. On a TTY we prompt for the missing dmaRtCpu; off-TTY we
+  # fail loudly.
+  local _ci_iface _ci_irq _ci_dma_rt
+  { read -r _ci_iface; read -r _ci_irq; } < <(cpusets_json_nic "$ci_json")
+  _ci_dma_rt="$(cpusets_json_dma_rt_cpu "$ci_json")"
+  if [ -n "$_ci_irq" ] && [ -z "$_ci_dma_rt" ]; then
+    info "host-config has nic.irqCore=$_ci_irq but no cpuIsolation.dmaRtCpu."
+    info "for low-jitter EtherCAT the SOEM RT loop core SHOULD differ from"
+    info "the NIC IRQ core — async interrupts can preempt the cyclic loop."
+    if [ -t 0 ] && [ -t 2 ] && [ "$DRY_RUN" != 1 ]; then
+      if ! _cpu_isolation_prompt_dma_rt_cpu "$hc" "$ci_json" "$_ci_irq"; then
+        fail "operator declined to set dmaRtCpu — bootstrap would silently"
+        info "co-locate IRQs and the RT loop. Re-run and pick a distinct core,"
+        info "or hand-edit $hc to add 'dmaRtCpu: <core>' under cpuIsolation."
+        return
+      fi
+      ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+    else
+      fail "cpuIsolation.dmaRtCpu missing and shell is not interactive"
+      info "add 'dmaRtCpu: <core>' under cpuIsolation in $hc and re-run,"
+      info "or rerun on a TTY to be prompted. To deliberately co-locate"
+      info "(soft-RT only), set dmaRtCpu to the same value as nic.irqCore"
+      info "— validator will warn but not fail."
+      return
+    fi
+  fi
+
+  # Sanity: ensure manage_cpusets is present (we still use ethercat-rt
+  # for IRQ pin + governor lock + workqueue mask + boot-time service).
+  if [ ! -x "$CPUSETS_SCRIPT" ]; then
+    fail "$CPUSETS_SCRIPT not found or not executable"
+    return
+  fi
+
+  # Compute desired kernel cmdline tokens from host-config:
+  #   isolcpus     = union of cpuIsolation.partitions[].cpus
+  #   nohz_full    = cpuIsolation.dmaRtCpu (single core — narrow tick removal)
+  #   rcu_nocbs    = same as isolcpus (offload RCU callbacks for all isolated)
+  #   rcu_nocb_poll, skew_tick=1: bare flags, always
+  #   irqaffinity  = 0 (boot-time IRQ default → cpu 0)
+  local isolcpus nohz_full rcu_nocbs irqaffinity
+  isolcpus="$(_cpu_isolation_partitions_union "$ci_json")"
+  nohz_full="$_ci_dma_rt"
+  rcu_nocbs="$isolcpus"
+  irqaffinity=0
+  if [ -z "$isolcpus" ] || [ -z "$nohz_full" ]; then
+    fail "cpuIsolation.partitions and cpuIsolation.dmaRtCpu are required"
+    return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  ensure kernel cmdline tokens:"
+    info "DRY-RUN    isolcpus=$isolcpus  nohz_full=$nohz_full  rcu_nocbs=$rcu_nocbs"
+    info "DRY-RUN    rcu_nocb_poll  skew_tick=1  irqaffinity=$irqaffinity"
+    info "DRY-RUN  write systemd CPUAffinity drop-in (online − partitions − {0})"
+    local _nic_iface _nic_irq
+    { read -r _nic_iface; read -r _nic_irq; } < <(cpusets_json_nic "$ci_json")
+    if [ -n "$_nic_iface" ] && [ -n "$_nic_irq" ]; then
+      info "DRY-RUN  pin $_nic_iface IRQs to core $_nic_irq + governor lock + workqueue mask + boot service"
+    fi
+    info "DRY-RUN  warn REBOOT REQUIRED if cmdline changed"
+    return
+  fi
+
+  # ---- Step 1: kernel cmdline ----------------------------------------
+  local cmdline_changed=0
+  if _apply_kernel_cmdline \
+        "isolcpus=$isolcpus" \
+        "nohz_full=$nohz_full" \
+        "rcu_nocbs=$rcu_nocbs" \
+        "rcu_nocb_poll" \
+        "skew_tick=1" \
+        "irqaffinity=$irqaffinity"; then
+    cmdline_changed=1
+    pass "kernel cmdline updated (REBOOT REQUIRED for full effect)"
+  else
+    skip "kernel cmdline already at desired state"
+  fi
+
+  # ---- Step 2: systemd CPUAffinity drop-in ---------------------------
+  # Compute housekeeping = (online cpus) − (partition cpus) − {0}.
+  # cpu 0 is dropped explicitly so kernel housekeeping (kworker/0,
+  # ksoftirqd/0, RCU callback workers, default IRQs) gets a quiet
+  # cpu without competing with userspace services.
+  local install_aff cpuaffinity_value
+  install_aff="$(cpusets_json_field "$ci_json" installAffinityDefaults)"
+  if [ -z "$install_aff" ] || [ "$install_aff" = "true" ]; then
+    cpuaffinity_value="$(_compute_systemd_cpuaffinity "$ci_json")"
+    if [ -n "$cpuaffinity_value" ]; then
+      _install_cpuaffinity_dropin "$cpuaffinity_value" || true
+    else
+      fail "could not compute CPUAffinity value (no online cpus left after exclusions)"
+    fi
+  else
+    skip "cpuIsolation.installAffinityDefaults=false — leaving systemd defaults alone"
+  fi
+
+  # ---- Step 3: NIC IRQ pin + governor + workqueue + boot service -----
+  # Use a synthetic state-file entry so ethercat-rt's partition lookup
+  # works without a cgroup partition existing. ethercat-rt only reads
+  # the cpus from the state file; it doesn't validate that the cgroup
+  # exists. This keeps us aligned with the vendored library's API.
+  local nic_iface nic_irq
+  { read -r nic_iface; read -r nic_irq; } < <(cpusets_json_nic "$ci_json")
+  if [ -n "$nic_iface" ] && [ -n "$nic_irq" ]; then
+    local part_name="ecat-cmdline"
+    mkdir -p /var/lib/manage_cpusets
+    printf '%s|%s|%s\n' "$part_name" "$isolcpus" "$(date +%s)" > /var/lib/manage_cpusets/state
+    note "pinning $nic_iface IRQs to core $nic_irq + governor lock + workqueue mask..."
+    if cpusets_run ethercat-rt "$part_name" --nic "$nic_iface" --rt-core "$nic_irq"; then
+      pass "ethercat-rt configured: $nic_iface IRQs on core $nic_irq"
+    else
+      fail "manage_cpusets.sh ethercat-rt failed"
+    fi
+  else
+    skip "cpuIsolation.nic not set — skipping NIC IRQ pinning"
+  fi
+
+  # ---- Step 4: reboot marker -----------------------------------------
+  if [ "$cmdline_changed" = 1 ]; then
+    mkdir -p "$(dirname "$CPU_ISOLATION_REBOOT_MARKER")"
+    printf 'cmdline updated at %s — reboot to pick it up\n' \
+      "$(date -u +%FT%TZ)" > "$CPU_ISOLATION_REBOOT_MARKER"
+    info ""
+    info "════════════════════════════════════════════════════════════"
+    info "  REBOOT REQUIRED for kernel cmdline changes to take effect"
+    info "════════════════════════════════════════════════════════════"
+    info ""
+  fi
+
+  # Clear stale reboot marker if the live cmdline already matches.
+  if [ -f "$CPU_ISOLATION_REBOOT_MARKER" ] && \
+     grep -q "isolcpus=$isolcpus" /proc/cmdline 2>/dev/null && \
+     grep -q "nohz_full=$nohz_full" /proc/cmdline 2>/dev/null; then
+    rm -f "$CPU_ISOLATION_REBOOT_MARKER"
+    info "cleared stale reboot marker — cmdline already migrated"
+  fi
+}
+
+# ---------- helpers for cpu_isolation -----------------------------------
+
+# Echo the union of cpuIsolation.partitions[].cpus as a kernel cpu-list
+# (e.g. "11-13"). Empty when no partitions declared.
+_cpu_isolation_partitions_union() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1); out.update(range(int(lo), int(hi)+1))
+        else: out.add(int(part))
+    return out
+def compress(cpus):
+    if not cpus: return ""
+    s = sorted(cpus)
+    ranges, lo = [], s[0]
+    for i, c in enumerate(s):
+        if i+1 == len(s) or s[i+1] != c+1:
+            ranges.append((lo, c)); lo = s[i+1] if i+1 < len(s) else None
+    return ",".join(f"{a}" if a==b else f"{a}-{b}" for a,b in ranges)
+acc = set()
+for p in (data.get("partitions") or []):
+    cpus = p.get("cpus", "")
+    if isinstance(cpus, str): acc |= expand(cpus)
+print(compress(acc))
+PY
+}
+
+# Echo the systemd CPUAffinity= value (online cpus minus partition cpus
+# minus cpu 0). Empty if the result would be empty.
+_compute_systemd_cpuaffinity() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1); out.update(range(int(lo), int(hi)+1))
+        else: out.add(int(part))
+    return out
+def compress(cpus):
+    if not cpus: return ""
+    s = sorted(cpus)
+    ranges, lo = [], s[0]
+    for i, c in enumerate(s):
+        if i+1 == len(s) or s[i+1] != c+1:
+            ranges.append((lo, c)); lo = s[i+1] if i+1 < len(s) else None
+    return ",".join(f"{a}" if a==b else f"{a}-{b}" for a,b in ranges)
+try:
+    online = expand(open("/sys/devices/system/cpu/online").read().strip())
+except Exception:
+    online = set()
+managed = set()
+for p in (data.get("partitions") or []):
+    cpus = p.get("cpus", "")
+    if isinstance(cpus, str): managed |= expand(cpus)
+result = online - managed - {0}
+print(compress(result))
+PY
+}
+
+# Write /etc/systemd/system.conf.d/cpuaffinity.conf with the given
+# CPUAffinity value. Idempotent (cmp + skip), runs daemon-reexec on
+# change.
+_install_cpuaffinity_dropin() {
+  local value="$1"
+  local dst=/etc/systemd/system.conf.d/cpuaffinity.conf
+  mkdir -p "$(dirname "$dst")"
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<EOF
+# Managed by scripts/bootstrap-robot.sh phase 8 (cpu-isolation).
+# Restricts default CPU affinity for systemd-spawned services to the
+# k8s pool (online cpus minus host-RT partitions minus cpu 0). cpu 0
+# is left for kernel housekeeping (kworker/0, ksoftirqd/0, default
+# IRQs); the host-RT partitions are governed by isolcpus= in the
+# kernel cmdline. Services that legitimately need to run on cpu 0
+# or the isolated cores must override via their own CPUAffinity= or
+# AllowedCPUs=.
+[Manager]
+CPUAffinity=$value
+EOF
+  if cmp -s "$tmp" "$dst" 2>/dev/null; then
+    skip "systemd CPUAffinity drop-in already at CPUAffinity=$value"
+    rm -f "$tmp"
+    return 0
+  fi
+  install -m 0644 "$tmp" "$dst"
+  rm -f "$tmp"
+  pass "wrote $dst (CPUAffinity=$value)"
+  systemctl daemon-reexec || true
+  return 0
+}
+
+# Ensure each of the given tokens is present in the kernel cmdline.
+# Token forms:
+#   key=value   : strip any existing key=*, then append key=value
+#   bareflag    : strip any existing bare bareflag, then append
+# Detects bootloader (extlinux on Jetson, GRUB on x86), DEFAULT-label
+# scoping for extlinux, atomic write. Returns 0 if the cmdline was
+# changed, 1 if no-op, fails on unknown bootloader.
+_apply_kernel_cmdline() {
+  local tokens=("$@")
+
+  local bootloader config_file line_pattern
+  if [ -f /boot/extlinux/extlinux.conf ]; then
+    bootloader=extlinux
+    config_file=/boot/extlinux/extlinux.conf
+    line_pattern='^[[:space:]]*APPEND[[:space:]]'
+  elif [ -f /etc/default/grub ]; then
+    bootloader=grub
+    config_file=/etc/default/grub
+    line_pattern='^[[:space:]]*GRUB_CMDLINE_LINUX(_DEFAULT)?='
+  else
+    fail "no supported bootloader (/boot/extlinux/extlinux.conf or /etc/default/grub)"
+    return 2
+  fi
+  note "bootloader: $bootloader ($config_file)"
+
+  # Read the active cmdline. extlinux: scope to the DEFAULT label so
+  # we don't touch recovery/fallback labels.
+  local default_label="" current
+  if [ "$bootloader" = "extlinux" ]; then
+    default_label="$(grep -E '^[[:space:]]*DEFAULT[[:space:]]' "$config_file" | head -1 | awk '{print $2}')"
+    if [ -n "$default_label" ]; then
+      current="$(awk -v lbl="$default_label" '
+        /^[[:space:]]*LABEL[[:space:]]/  { in_block = ($2 == lbl) }
+        in_block && /^[[:space:]]*APPEND[[:space:]]/ { print; exit }
+      ' "$config_file")"
+    else
+      current="$(grep -E '^[[:space:]]*APPEND[[:space:]]' "$config_file" | head -1)"
+    fi
+  else
+    current="$(grep -E "$line_pattern" "$config_file" | head -1)"
+  fi
+  [ -z "$current" ] && { fail "no kernel cmdline line found in $config_file"; return 2; }
+
+  # For each token, strip the existing instance, then append the new.
+  local new_line="$current" t key
+  for t in "${tokens[@]}"; do
+    if [[ "$t" == *=* ]]; then
+      key="${t%%=*}"
+      new_line="$(printf '%s' "$new_line" | sed -E "s/[[:space:]]*${key}=[^ \"]*//g")"
+    else
+      key="$t"
+      new_line="$(printf '%s' "$new_line" | sed -E "s/(^|[[:space:]])${key}([[:space:]]|\$|\")/\\1\\2/g")"
+    fi
+    new_line="$(printf '%s' "$new_line" | sed -E 's/[[:space:]]+/ /g')"
+    if [[ "$new_line" =~ \" ]]; then
+      # GRUB-style quoted: insert inside the quotes.
+      new_line="$(printf '%s' "$new_line" | sed -E "s/\"([^\"]*)\"/\"\\1 ${t}\"/")"
+    else
+      new_line="$new_line $t"
+    fi
+  done
+
+  if [ "$current" = "$new_line" ]; then
+    return 1
+  fi
+
+  echo
+  info "current: $current"
+  info "desired: $new_line"
+  echo
+
+  # Atomic write. extlinux: only the DEFAULT label's APPEND. GRUB:
+  # the matching first line.
+  local backup tmp
+  backup="${config_file}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp "$config_file" "$backup"
+  tmp="$(mktemp)"
+  if [ "$bootloader" = "extlinux" ] && [ -n "$default_label" ]; then
+    awk -v pat="$line_pattern" -v repl="$new_line" -v lbl="$default_label" '
+      /^[[:space:]]*LABEL[[:space:]]/ { in_block = ($2 == lbl) }
+      {
+        if (in_block && match($0, pat) && !done) { print repl; done=1 }
+        else { print }
+      }
+    ' "$config_file" > "$tmp"
+  else
+    awk -v pat="$line_pattern" -v repl="$new_line" '
+      {
+        if (match($0, pat) && !done) { print repl; done=1 }
+        else { print }
+      }
+    ' "$config_file" > "$tmp"
+  fi
+  install -m 0644 "$tmp" "$config_file"
+  rm -f "$tmp"
+  pass "backed up to $backup"
+  pass "rewrote $config_file"
+
+  if [ "$bootloader" = "grub" ] && command -v update-grub >/dev/null 2>&1; then
+    note "running update-grub..."
+    update-grub >/dev/null 2>&1 || warn "update-grub failed — check manually"
+  fi
+
+  return 0
+}
+
+# ---- phase 9: install dma-ethercat (gates phase 10) -------------------
 
 # Install the dma-ethercat .deb baked into the foundationbot/dma-ethercat
 # container image, then enable+start the bare-metal service. Runs strictly
-# BEFORE phase 8 (gitops) — the realtime stack must be up before
+# BEFORE phase 10 (gitops) — the realtime stack must be up before
 # positronic-control / dma-video / nimbus pods come up because they read
 # EtherCAT shared memory via hostIPC.
 #
@@ -1360,10 +2038,10 @@ DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-inst
 
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
-    phase "phase 7: install dma-ethercat  (skipped — --skip-ethercat-install)"
+    phase "phase 9: install dma-ethercat  (skipped — --skip-ethercat-install)"
     return
   fi
-  phase "phase 7: install dma-ethercat (gates phase 8)"
+  phase "phase 9: install dma-ethercat (gates phase 10)"
 
   if [ ! -f "$DMA_ETHERCAT_TEMPLATE" ]; then
     fail "$DMA_ETHERCAT_TEMPLATE missing"
@@ -1382,39 +2060,35 @@ install_dma_ethercat() {
     ethercat_die "no host-config.yaml — first bringup needs the wizard or --host-config"
   fi
 
-  local tag
-  tag="$(python3 - "$hc" <<'PY' 2>/dev/null
-import sys, yaml
-try:
-    cfg = yaml.safe_load(open(sys.argv[1])) or {}
-except Exception:
-    sys.exit(0)
-for entry in (cfg.get("images") or []):
-    if isinstance(entry, dict) and entry.get("name") == "foundationbot/dma-ethercat":
-        print(entry.get("newTag", ""))
-        break
-PY
-)"
-  if [ -z "$tag" ]; then
-    fail "host-config.yaml has no images entry for foundationbot/dma-ethercat"
-    ethercat_die "add 'foundationbot/dma-ethercat' to host-config.yaml's images: list (e.g. newTag: main-latest-aarch64) and re-run"
+  # Resolve the full image ref via the new container-keyed schema.
+  # Operators write `images.dma-ethercat.image: <repo:tag>`; we plug
+  # the whole thing into the Job template (replacing the
+  # `foundationbot/dma-ethercat:PLACEHOLDER` placeholder), so swapping
+  # to a private registry just works.
+  local image_ref
+  image_ref="$(python3 "$HOST_CONFIG_HELPER" "$hc" \
+                 get-image-for-container dma-ethercat 2>/dev/null || true)"
+  if [ -z "$image_ref" ]; then
+    fail "host-config.yaml has no images.dma-ethercat.image entry"
+    ethercat_die "add 'images.dma-ethercat.image: foundationbot/dma-ethercat:<tag>' to host-config.yaml and re-run"
   fi
-  pass "resolved dma-ethercat tag: $tag"
+  pass "resolved dma-ethercat image: $image_ref"
 
   # Render the Job manifest (sed-substitute PLACEHOLDER -> tag).
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  render $DMA_ETHERCAT_TEMPLATE -> $DMA_ETHERCAT_RENDERED  (tag=$tag)"
+    info "DRY-RUN  render $DMA_ETHERCAT_TEMPLATE -> $DMA_ETHERCAT_RENDERED  (image=$image_ref)"
     info "DRY-RUN  kubectl create ns phantom (if missing)"
     info "DRY-RUN  kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
     info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    info "DRY-RUN  resolve+write DMA_CONFIG, INTERFACE, DMA_CPU_AFFINITY, DMA_RT_CPU into $DMA_ETHERCAT_ENV_FILE"
     info "DRY-RUN  systemctl enable --now dma-ethercat.service"
     return
   fi
 
   mkdir -p "$(dirname "$DMA_ETHERCAT_RENDERED")"
-  sed -e "s#foundationbot/dma-ethercat:PLACEHOLDER#foundationbot/dma-ethercat:$tag#" \
+  sed -e "s#foundationbot/dma-ethercat:PLACEHOLDER#$image_ref#" \
     "$DMA_ETHERCAT_TEMPLATE" > "$DMA_ETHERCAT_RENDERED"
   chmod 0644 "$DMA_ETHERCAT_RENDERED"
   pass "rendered $DMA_ETHERCAT_RENDERED"
@@ -1561,6 +2235,259 @@ _dma_ethercat_prompt_for_config() {
   printf '%s\n' "${files[$((choice-1))]}"
 }
 
+# Interactive setup for the cpuIsolation: block when host-config.yaml
+# doesn't have one yet. Persists the answers back to host-config.yaml
+# so re-runs are non-interactive. Returns 0 when the block was written
+# and validates; returns 1 on operator opt-out, EOF, or validation
+# failure (the caller skips the phase in those cases).
+#
+# Prompts (with sensible defaults):
+#   1. enable now? — N writes `enabled: false` and returns 1
+#   2. partition cpus      (default 11-13)
+#   3. partition name      (default ecat)
+#   4. NIC iface           (empty = skip NIC pinning)
+#   5. NIC IRQ core        (default = first cpu of partition)
+#   6. SOEM RT loop core   (default = a different cpu in the partition)
+#   7. installAffinityDefaults  (default Y)
+#   (Kernel cmdline editing is always-on under RFC 0004 — no toggle.)
+_cpu_isolation_prompt() {
+  local hc="$1"
+
+  {
+    printf '\n  CPU isolation carves cpuset partitions for the EtherCAT realtime\n'
+    printf '  control loop. Required for production robots — answer the prompts\n'
+    printf '  below to populate cpuIsolation: in %s.\n' "$hc"
+    printf '  See docs/cpu-isolation.md for the full schema.\n\n'
+  } >&2
+
+  local ans
+  printf '  configure CPU isolation now? [Y/n]: ' >&2
+  IFS= read -r ans </dev/tty || return 1
+  case "${ans,,}" in
+    n|no)
+      if _cpu_isolation_persist "$hc" '{"enabled": false}'; then
+        info "wrote cpuIsolation.enabled=false to $hc — phase will skip on re-runs"
+      fi
+      return 1
+      ;;
+  esac
+
+  local partition_cpus partition_name nic_iface nic_irq dma_rt_cpu aff_ans mig_ans
+  while :; do
+    printf '  partition cpus (e.g. 11-13, 10,12-13) [11-13]: ' >&2
+    IFS= read -r partition_cpus </dev/tty || return 1
+    [ -z "$partition_cpus" ] && partition_cpus="11-13"
+    if printf '%s' "$partition_cpus" | grep -Eq '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'; then
+      break
+    fi
+    printf '    invalid — must match kernel cpu-list syntax\n' >&2
+  done
+
+  printf '  partition name [ecat]: ' >&2
+  IFS= read -r partition_name </dev/tty || return 1
+  [ -z "$partition_name" ] && partition_name="ecat"
+
+  printf '  EtherCAT NIC interface (empty to skip NIC pinning) [ecat0]: ' >&2
+  IFS= read -r nic_iface </dev/tty || return 1
+  if [ -z "$nic_iface" ]; then
+    # Empty input means use default. Operators who really want "no nic"
+    # can hand-edit later — most robots want the NIC pinned.
+    nic_iface="ecat0"
+  fi
+
+  # Compute partition's expanded cpu list and pick two distinct
+  # defaults: first cpu for IRQs, second (or last) for the SOEM loop.
+  # For minimum jitter the IRQ core and the loop core SHOULD differ —
+  # async NIC interrupts can preempt the cyclic loop at the wrong
+  # microsecond when they share a core.
+  local part_cpus_expanded first_cpu second_cpu
+  part_cpus_expanded="$(_cpu_isolation_expand_cpus "$partition_cpus")"
+  first_cpu="$(printf '%s\n' "$part_cpus_expanded" | head -n1)"
+  second_cpu="$(printf '%s\n' "$part_cpus_expanded" | sed -n '2p')"
+  [ -z "$second_cpu" ] && second_cpu="$first_cpu"  # 1-cpu partition fallback
+
+  if [ -n "$nic_iface" ]; then
+    while :; do
+      printf '  NIC IRQ core (integer inside %s) [%s]: ' "$partition_cpus" "$first_cpu" >&2
+      IFS= read -r nic_irq </dev/tty || return 1
+      [ -z "$nic_irq" ] && nic_irq="$first_cpu"
+      case "$nic_irq" in
+        ''|*[!0-9]*) printf '    not a number\n' >&2 ;;
+        *) break ;;
+      esac
+    done
+  fi
+
+  # SOEM RT loop core. Default to a *different* core from nic_irq.
+  local rt_default="$second_cpu"
+  if [ -n "$nic_irq" ] && [ "$nic_irq" = "$second_cpu" ]; then
+    rt_default="$first_cpu"
+  fi
+  while :; do
+    printf '  SOEM RT loop core (integer inside %s) [%s]: ' "$partition_cpus" "$rt_default" >&2
+    IFS= read -r dma_rt_cpu </dev/tty || return 1
+    [ -z "$dma_rt_cpu" ] && dma_rt_cpu="$rt_default"
+    case "$dma_rt_cpu" in
+      ''|*[!0-9]*) printf '    not a number\n' >&2; continue ;;
+    esac
+    if [ -n "$nic_irq" ] && [ "$dma_rt_cpu" = "$nic_irq" ]; then
+      printf '    warning: same core as NIC IRQ (%s) — async interrupts may\n' "$nic_irq" >&2
+      printf '    preempt the SOEM loop. Continue anyway? [y/N]: ' >&2
+      local same_ans
+      IFS= read -r same_ans </dev/tty || return 1
+      case "${same_ans,,}" in y|yes) break ;; *) continue ;; esac
+    fi
+    break
+  done
+
+  printf '  install systemd CPUAffinity drop-in? [Y/n]: ' >&2
+  IFS= read -r aff_ans </dev/tty || return 1
+
+  local aff_bool="true"
+  case "${aff_ans,,}" in n|no) aff_bool="false" ;; esac
+
+  # Build JSON. Validator post-persist re-checks the integers fall
+  # inside the partition. Kernel cmdline editing is now always-on
+  # under RFC 0004 — no migrateCmdline toggle.
+  local nic_field=""
+  if [ -n "$nic_iface" ]; then
+    nic_field=", \"nic\": {\"iface\": \"$nic_iface\", \"irqCore\": $nic_irq}"
+  fi
+  local json
+  json=$(printf '{"enabled": true, "partitions": [{"name": "%s", "cpus": "%s"}]%s, "dmaRtCpu": %s, "installAffinityDefaults": %s}' \
+    "$partition_name" "$partition_cpus" "$nic_field" "$dma_rt_cpu" "$aff_bool")
+
+  if ! _cpu_isolation_persist "$hc" "$json"; then
+    return 1
+  fi
+  pass "persisted cpuIsolation block to $hc"
+}
+
+# Expand a kernel cpu-list ("11-13", "10,12-13") to one CPU per line.
+_cpu_isolation_expand_cpus() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys
+spec = sys.argv[1]
+out = []
+for part in spec.split(","):
+    if "-" in part:
+        lo, hi = part.split("-", 1)
+        out.extend(range(int(lo), int(hi) + 1))
+    else:
+        out.append(int(part))
+for c in out:
+    print(c)
+PY
+}
+
+# Persist a JSON cpuIsolation blob, then validate the resulting file.
+# Reverts the file on validation failure (writes through a tmp copy).
+# Prompt the operator for cpuIsolation.dmaRtCpu only — used when an
+# existing host-config has nic.irqCore (or legacy nic.rtCore) but no
+# top-level dmaRtCpu (i.e. it was persisted by an old prompt before
+# the irqCore/dmaRtCpu split landed). Reads the existing JSON, splices
+# in dmaRtCpu, persists the merged block, returns 0. Aborts via
+# return 1 on EOF / non-numeric input / out-of-partition / explicit
+# operator opt-out.
+#
+# Args:
+#   $1  host-config path
+#   $2  current cpuIsolation JSON blob
+#   $3  current nic.irqCore (so we can default the loop core to a
+#        distinct cpu and warn on collision)
+_cpu_isolation_prompt_dma_rt_cpu() {
+  local hc="$1" ci_json="$2" nic_irq="$3"
+  local part_cpus first_cpu second_cpu rt_default rt_input
+
+  # Pull the first declared partition's cpus and pick a default rt
+  # loop core that differs from nic_irq.
+  part_cpus="$(python3 - "$ci_json" <<'PY' 2>/dev/null
+import json, sys
+d = json.loads(sys.argv[1] or "{}")
+parts = d.get("partitions") or []
+print(parts[0].get("cpus", "") if parts else "")
+PY
+)"
+  if [ -z "$part_cpus" ]; then
+    fail "no partitions declared — cannot suggest a default dmaRtCpu"
+    return 1
+  fi
+
+  local part_expanded
+  part_expanded="$(_cpu_isolation_expand_cpus "$part_cpus")"
+  first_cpu="$(printf '%s\n' "$part_expanded" | head -n1)"
+  second_cpu="$(printf '%s\n' "$part_expanded" | sed -n '2p')"
+  [ -z "$second_cpu" ] && second_cpu="$first_cpu"
+
+  rt_default="$second_cpu"
+  if [ "$nic_irq" = "$second_cpu" ]; then
+    rt_default="$first_cpu"
+  fi
+
+  while :; do
+    printf '\n  SOEM RT loop core (integer inside %s, distinct from nic.irqCore=%s) [%s]: ' \
+      "$part_cpus" "$nic_irq" "$rt_default" >&2
+    IFS= read -r rt_input </dev/tty || return 1
+    [ -z "$rt_input" ] && rt_input="$rt_default"
+    case "$rt_input" in
+      ''|*[!0-9]*) printf '    not a number\n' >&2; continue ;;
+    esac
+    # Must be inside the partition.
+    if ! printf '%s\n' "$part_expanded" | grep -qx "$rt_input"; then
+      printf '    %s is not inside %s\n' "$rt_input" "$part_cpus" >&2
+      continue
+    fi
+    if [ "$rt_input" = "$nic_irq" ]; then
+      printf '    warning: same core as NIC IRQ (%s) — async interrupts may\n' "$nic_irq" >&2
+      printf '    preempt the SOEM loop. Continue with co-located cores? [y/N]: ' >&2
+      local same_ans
+      IFS= read -r same_ans </dev/tty || return 1
+      case "${same_ans,,}" in y|yes) break ;; *) continue ;; esac
+    fi
+    break
+  done
+
+  # Splice dmaRtCpu into the existing JSON; also rename the legacy
+  # nic.rtCore field to nic.irqCore so the next run has no
+  # deprecation warning. Persist the merged block.
+  local merged
+  merged="$(python3 - "$ci_json" "$rt_input" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1] or "{}")
+d["dmaRtCpu"] = int(sys.argv[2])
+nic = d.get("nic") or {}
+if isinstance(nic, dict) and "rtCore" in nic and "irqCore" not in nic:
+    nic["irqCore"] = nic.pop("rtCore")
+    d["nic"] = nic
+print(json.dumps(d))
+PY
+)"
+  if ! _cpu_isolation_persist "$hc" "$merged"; then
+    return 1
+  fi
+  pass "persisted cpuIsolation.dmaRtCpu=$rt_input to $hc"
+}
+
+_cpu_isolation_persist() {
+  local hc="$1" json="$2"
+  local backup
+  backup="$(mktemp)"
+  cp "$hc" "$backup" || return 1
+  if ! python3 "$HOST_CONFIG_HELPER" "$hc" set-cpu-isolation-json "$json" >/dev/null 2>&1; then
+    cp "$backup" "$hc"; rm -f "$backup"
+    fail "could not write cpuIsolation block to $hc"
+    return 1
+  fi
+  if ! python3 "$HOST_CONFIG_HELPER" "$hc" validate >/dev/null 2>&1; then
+    cp "$backup" "$hc"; rm -f "$backup"
+    fail "cpuIsolation block did not validate — restored $hc"
+    info "validator output:"
+    python3 "$HOST_CONFIG_HELPER" "$hc" validate >&2 || true
+    return 1
+  fi
+  rm -f "$backup"
+}
+
 configure_dma_ethercat_env() {
   local hc="$1"
   local robot="${ROBOT:-}"
@@ -1643,11 +2570,50 @@ configure_dma_ethercat_env() {
   fi
   pass "resolved DMA_CONFIG: $candidate"
 
-  # Write DMA_CONFIG into the env file in place. Preserve every other
-  # line. Create the file if missing (defensive — dpkg -i should have
-  # placed it already, but the package layout may evolve).
+  # Resolve cpuset values from host-config cpuIsolation (read by phase
+  # 7). The .deb's dma-ethercat.service unit reads INTERFACE,
+  # DMA_CPU_AFFINITY, and DMA_RT_CPU from /etc/dma/dma-ethercat.env;
+  # phase 9 here is the place to land them so the unit's first start
+  # has the right pinning. Empty when cpuIsolation is absent — those
+  # keys are simply not written (existing values in the conffile are
+  # preserved if they predate this run).
+  local ci_json="" iface="" rt_cpu="" cpu_affinity="" nic_irq=""
+  if [ -r "$hc" ]; then
+    ci_json="$(python3 "$REPO_ROOT/scripts/lib/host-config.py" \
+                 "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  fi
+  if [ -n "$ci_json" ] && [ "$ci_json" != "{}" ]; then
+    cpu_affinity="$(_resolve_dma_cpu_affinity "$ci_json")"
+    { read -r iface; read -r nic_irq; } < <(cpusets_json_nic "$ci_json")
+    # DMA_RT_CPU comes from cpuIsolation.dmaRtCpu (the SOEM loop core).
+    # Legacy configs without dmaRtCpu fall back to nic.irqCore so they
+    # still produce a usable env file (matches old same-core behaviour).
+    # Phase 8 should have already converted such configs by prompting
+    # the operator for dmaRtCpu — if we still hit this path (e.g.
+    # phase 8 was --skipped), surface a visible warning so it's never
+    # silent.
+    rt_cpu="$(cpusets_json_dma_rt_cpu "$ci_json")"
+    if [ -z "$rt_cpu" ]; then
+      rt_cpu="$nic_irq"
+      if [ -n "$nic_irq" ]; then
+        info "WARN  cpuIsolation.dmaRtCpu unset; co-locating SOEM loop on nic.irqCore=$nic_irq"
+        info "WARN  add 'dmaRtCpu: <distinct cpu>' under cpuIsolation for low-jitter EtherCAT"
+      fi
+    elif [ -n "$nic_irq" ] && [ "$rt_cpu" = "$nic_irq" ]; then
+      info "WARN  cpuIsolation.dmaRtCpu=$rt_cpu equals nic.irqCore — async NIC IRQs"
+      info "WARN  may preempt the SOEM loop. Pick distinct cores for hard-RT."
+    fi
+  fi
+
+  # Write DMA_CONFIG (and optionally INTERFACE, DMA_CPU_AFFINITY,
+  # DMA_RT_CPU) into the env file in place. Preserve every other line —
+  # the file is a dpkg conffile, so unrelated comments and operator
+  # tweaks must survive.
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  set DMA_CONFIG=$candidate in $DMA_ETHERCAT_ENV_FILE"
+    [ -n "$iface" ]        && info "DRY-RUN  set INTERFACE=$iface"
+    [ -n "$cpu_affinity" ] && info "DRY-RUN  set DMA_CPU_AFFINITY=$cpu_affinity"
+    [ -n "$rt_cpu" ]       && info "DRY-RUN  set DMA_RT_CPU=$rt_cpu"
     return
   fi
 
@@ -1655,19 +2621,69 @@ configure_dma_ethercat_env() {
   local tmp
   tmp="$(mktemp)"
   if [ -r "$DMA_ETHERCAT_ENV_FILE" ]; then
-    grep -v '^[[:space:]]*DMA_CONFIG=' "$DMA_ETHERCAT_ENV_FILE" > "$tmp" || true
+    # Strip every key we're about to rewrite. Preserves comments,
+    # other variables, and blank lines.
+    grep -vE '^[[:space:]]*(DMA_CONFIG|INTERFACE|DMA_CPU_AFFINITY|DMA_RT_CPU)=' \
+      "$DMA_ETHERCAT_ENV_FILE" > "$tmp" || true
   fi
   printf 'DMA_CONFIG=%s\n' "$candidate" >> "$tmp"
+  [ -n "$iface" ]        && printf 'INTERFACE=%s\n' "$iface" >> "$tmp"
+  [ -n "$cpu_affinity" ] && printf 'DMA_CPU_AFFINITY=%s\n' "$cpu_affinity" >> "$tmp"
+  [ -n "$rt_cpu" ]       && printf 'DMA_RT_CPU=%s\n' "$rt_cpu" >> "$tmp"
   if ! mv "$tmp" "$DMA_ETHERCAT_ENV_FILE"; then
     rm -f "$tmp"
     fail "could not write $DMA_ETHERCAT_ENV_FILE"
     ethercat_die "could not update $DMA_ETHERCAT_ENV_FILE — check permissions"
   fi
   chmod 0644 "$DMA_ETHERCAT_ENV_FILE"
-  pass "wrote DMA_CONFIG to $DMA_ETHERCAT_ENV_FILE"
+  if [ -n "$iface" ] || [ -n "$cpu_affinity" ] || [ -n "$rt_cpu" ]; then
+    pass "wrote DMA_CONFIG, cpuset (INTERFACE=$iface DMA_CPU_AFFINITY=$cpu_affinity DMA_RT_CPU=$rt_cpu) to $DMA_ETHERCAT_ENV_FILE"
+  else
+    pass "wrote DMA_CONFIG to $DMA_ETHERCAT_ENV_FILE"
+  fi
 }
 
-# ---- phase 8: gitops ----------------------------------------------------
+# Pick the partition cpus that should populate DMA_CPU_AFFINITY. When
+# nic.rtCore is set, prefer the partition that contains it (so the RT
+# loop and its affinity superset stay coherent). Otherwise fall back
+# to the first declared partition. Echoes the cpus string ("10-13",
+# "11,12,13", etc.) or empty when cpuIsolation has no partitions.
+_resolve_dma_cpu_affinity() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, sys
+
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+data = json.loads(sys.argv[1] or "{}")
+parts = data.get("partitions") or []
+if not parts:
+    sys.exit(0)
+
+rt = (data.get("nic") or {}).get("rtCore")
+chosen = None
+if isinstance(rt, int):
+    for p in parts:
+        try:
+            if rt in expand(p.get("cpus", "")):
+                chosen = p
+                break
+        except (ValueError, AttributeError):
+            continue
+if chosen is None:
+    chosen = parts[0]
+print(chosen.get("cpus", ""))
+PY
+}
+
+# ---- phase 10: gitops ----------------------------------------------------
 
 # Phase 6 has two pieces:
 #   6a. terraform install of argocd Helm chart
@@ -1793,8 +2809,8 @@ _gitops_render_app() {
 }
 
 gitops() {
-  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 8: gitops  (skipped)"; return; fi
-  phase "phase 8: gitops (install argocd + apply per-host Application)"
+  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 10: gitops  (skipped)"; return; fi
+  phase "phase 10: gitops (install argocd + apply per-host Application)"
 
   if [ ! -d "$REPO_ROOT/terraform" ]; then
     fail "terraform/ not found at $REPO_ROOT/terraform"; return
@@ -1948,7 +2964,7 @@ PY
   # place. The validate phase confirms Healthy.
 }
 
-# ---- phase 10: kustomize image overrides (per-host, per-stack) ---------
+# ---- phase 12: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
 # Bootstrap discovers the mapping by running kustomize on each enabled
@@ -2048,8 +3064,8 @@ _stack_for_image() {
 }
 
 image_overrides() {
-  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 10: image overrides  (skipped)"; return; fi
-  phase "phase 10: image overrides (inject kustomize.images per stack)"
+  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 12: image overrides  (skipped)"; return; fi
+  phase "phase 12: image overrides (inject kustomize.images per stack)"
 
   # In dry-run before --host-config has actually been installed, fall
   # back to the input path the operator passed.
@@ -2116,7 +3132,7 @@ for line in mapping_raw.splitlines():
 # Job) and intentionally don't route to a stack's kustomize.images.
 # Skip silently rather than warn.
 NON_STACK_IMAGES = {
-    "foundationbot/dma-ethercat",  # phase 7 install_dma_ethercat
+    "foundationbot/dma-ethercat",  # phase 9 install_dma_ethercat
 }
 
 per_stack: dict[str, list[str]] = {}
@@ -2198,7 +3214,7 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
   done <<< "$stacks_with_overrides"
 }
 
-# ---- phase 11: dev hostPath mounts (per-host) --------------------------
+# ---- phase 13: dev hostPath mounts (per-host) --------------------------
 
 # Inject strategic-merge patches derived from
 # /etc/phantomos/host-config.yaml's `deployments:` block into the live
@@ -2213,8 +3229,8 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
 # fewer mounts in host-config reverts the cluster to that smaller set.
 
 deployments_phase() {
-  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 11: deployments  (skipped)"; return; fi
-  phase "phase 11: deployments (inject kustomize.patches per stack)"
+  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 13: deployments  (skipped)"; return; fi
+  phase "phase 13: deployments (inject kustomize.patches per stack)"
 
   # Same dry-run/canonical fallback as image_overrides.
   local hc="$HOST_CONFIG_FILE"
@@ -2311,7 +3327,7 @@ PY
   done <<< "$entries"
 }
 
-# ---- phase 9: argocd admin (install CLI + reset password) -------------
+# ---- phase 11: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
 # the admin password by writing a bcrypt hash into argocd-secret. Done
@@ -2329,8 +3345,8 @@ PY
 _argocd_default_password="1984"
 
 argocd_admin() {
-  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 9: argocd admin  (skipped)"; return; fi
-  phase "phase 9: argocd admin (install CLI + set admin password)"
+  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 11: argocd admin  (skipped)"; return; fi
+  phase "phase 11: argocd admin (install CLI + set admin password)"
 
   # 1) install argocd CLI if missing
   #
@@ -2458,11 +3474,11 @@ argocd_admin() {
   fi
 }
 
-# ---- phase 12: setup-positronic (optional) --------------------------------
+# ---- phase 14: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
   if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 12: setup-positronic"
+  phase "phase 14: setup-positronic"
 
   if [ -z "$POSITRONIC_IMAGE" ]; then
     fail "--setup-positronic requires --positronic-image <image>"
@@ -2515,11 +3531,11 @@ setup_positronic() {
   fi
 }
 
-# ---- phase 13: validate --------------------------------------------------
+# ---- phase 15: validate --------------------------------------------------
 
 validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 13: validate  (skipped)"; return; fi
-  phase "phase 13: validate"
+  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 15: validate  (skipped)"; return; fi
+  phase "phase 15: validate"
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
@@ -2583,13 +3599,15 @@ print_plan() {
   _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase  4  host config"                  "--host not selected"
   _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase  5  seed pull secrets"            "--seed-pull-secrets not selected"
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
-  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  7  install dma-ethercat (gates 8)" "--install-dma-ethercat not selected"
-  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase  8  gitops"                       "--gitops not selected"
-  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase  9  argocd-admin"                 "--argocd-admin not selected"
-  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 10  image-overrides"              "--image-overrides not selected"
-  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 11  deployments"                  "--deployments not selected"
-  _step "$SETUP_POSITRONIC"                                         "phase 12  setup-positronic"             "--setup-positronic not set"
-  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 13  validate"                     "--validate not selected"
+  _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  7  ecat-interface (gates 8)"     "--skip-ecat-interface"
+  _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  8  cpu-isolation (gates 9)"      "--skip-cpu-isolation"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--install-dma-ethercat not selected"
+  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
+  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
+  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 12  image-overrides"              "--image-overrides not selected"
+  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 13  deployments"                  "--deployments not selected"
+  _step "$SETUP_POSITRONIC"                                         "phase 14  setup-positronic"             "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 15  validate"                     "--validate not selected"
   printf '\n'
 }
 
@@ -2644,6 +3662,8 @@ cluster            ; guard
 host_config        ; guard
 seed_pull_secrets  ; guard
 operator_ui_config ; guard
+ecat_interface     ; guard
+cpu_isolation      ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
 argocd_admin       ; guard

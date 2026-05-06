@@ -8,3 +8,4 @@ __pycache__/
 # off the remote.
 docs/plans/
 docs/research/
+.claude/worktrees/

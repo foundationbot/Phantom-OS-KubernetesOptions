@@ -13,7 +13,10 @@ Usage:
   host-config.py <path> get-dma-ethercat-config-set
   host-config.py <path> get-dma-ethercat-config-path
   host-config.py <path> set-dma-ethercat-config-path <value>
+  host-config.py <path> get-cpu-isolation-json
+  host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-images-json
+  host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
@@ -181,37 +184,209 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
     return 0
 
 
+def cmd_get_cpu_isolation_json(cfg: dict) -> int:
+    """Emit the cpuIsolation: block as JSON, or {} if absent. Bootstrap's
+    cpu-isolation phase consumes this and renders /etc/cpusets.conf +
+    drives manage_cpusets.sh subcommands."""
+    block = cfg.get("cpuIsolation")
+    if block is None:
+        print("{}")
+        return 0
+    if not isinstance(block, dict):
+        print("error: 'cpuIsolation' must be a mapping", file=sys.stderr)
+        return 2
+    print(json.dumps(block))
+    return 0
+
+
+def cmd_set_cpu_isolation_json(path: str, blob: str) -> int:
+    """Persist a cpuIsolation block into the host-config file in place.
+    Strips any existing top-level cpuIsolation: block and appends a
+    fresh block at EOF. Comments and ordering elsewhere are preserved.
+
+    Input is a JSON object — the same shape get-cpu-isolation-json
+    emits (so an interactive prompt can build a dict, JSON-encode it,
+    and round-trip through this command)."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+    try:
+        block = json.loads(blob or "{}")
+    except json.JSONDecodeError as exc:
+        print(f"error: invalid JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(block, dict):
+        print("error: cpuIsolation must be a JSON object", file=sys.stderr)
+        return 2
+
+    src = p.read_text().splitlines(keepends=True)
+    out: list[str] = []
+    skipping = False
+    for line in src:
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if skipping:
+            if (
+                indent == 0
+                and stripped.strip()
+                and not stripped.startswith("#")
+            ):
+                skipping = False
+                out.append(line)
+            continue
+        if indent == 0 and stripped.startswith("cpuIsolation:"):
+            skipping = True
+            continue
+        out.append(line)
+
+    if out and not out[-1].endswith("\n"):
+        out[-1] = out[-1] + "\n"
+    out.append("cpuIsolation:\n")
+    out.append(yaml.safe_dump({"_": block}, sort_keys=False)
+               .split("_:\n", 1)[1])
+
+    p.write_text("".join(out))
+    return 0
+
+
+# Registry of known containers addressable from host-config.yaml's
+# `images:` block. Adding a new entry here is the entire change needed
+# to make a new workload's image host-configurable.
+#
+#   stack:           which Application stack owns the workload — used by
+#                    bootstrap to route the kustomize.images entry to
+#                    that stack's per-host Application. None means the
+#                    image is consumed directly by bootstrap (currently
+#                    only dma-ethercat for the .deb installer Job).
+#   manifest_image:  the image string the BASE manifest uses, sans tag.
+#                    This is the find-key kustomize.images uses to
+#                    locate and rewrite container references. The
+#                    operator's `image:` value in host-config is the
+#                    REPLACEMENT — bootstrap derives the kustomize
+#                    string by combining this find-key with the
+#                    operator's repo+tag.
+CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
+    "positronic-control": {
+        "stack": "core",
+        "manifest_image": "localhost:5443/positronic-control",
+    },
+    "phantom-models": {
+        "stack": "core",
+        "manifest_image": "localhost:5443/phantom-models",
+    },
+    "operator-ui": {
+        "stack": "operator",
+        "manifest_image": "foundationbot/argus.operator-ui",
+    },
+    "dma-ethercat": {
+        # Not stack-routed. Phase 9 reads images.dma-ethercat.image
+        # directly to render the bootstrap-managed installer Job.
+        "stack": None,
+        "manifest_image": "foundationbot/dma-ethercat",
+    },
+}
+
+
+def _split_image_ref(ref: str) -> tuple[str, str]:
+    """Split 'foo/bar:tag' or 'host:port/foo/bar:tag' into
+    (repo, tag). The tag is everything after the LAST colon, but only
+    when that colon comes after the last slash (otherwise it's a
+    registry port and there is no tag)."""
+    last_slash = ref.rfind("/")
+    last_colon = ref.rfind(":")
+    if last_colon < 0 or last_colon < last_slash:
+        raise ValueError(f"image ref {ref!r} has no tag")
+    return ref[:last_colon], ref[last_colon + 1 :]
+
+
+def _container_kustomize_string(cname: str, spec: dict) -> str:
+    """Build the kustomize.images string for one container.
+       repo == manifest_image (just retag) -> "manifest_image:tag"
+       repo != manifest_image (swap repo)  -> "manifest_image=repo:tag"
+    """
+    target = CONTAINER_TARGETS[cname]
+    manifest_image = target["manifest_image"]
+    repo, tag = _split_image_ref(spec["image"])
+    if repo == manifest_image:
+        return f"{manifest_image}:{tag}"
+    return f"{manifest_image}={repo}:{tag}"
+
+
+def _images_dict(cfg: dict) -> dict:
+    """Return the images: block as a dict, or {} if absent.
+    Raises ValueError with a migration hint if the legacy list shape
+    is detected. Callers should propagate the error string."""
+    images = cfg.get("images")
+    if images is None:
+        return {}
+    if isinstance(images, list):
+        raise ValueError(
+            "'images' is now a container-keyed mapping, not a list. "
+            "Migrate to: 'images: { <container>: { image: <ref:tag> } }'. "
+            "See host-config-templates/_template/host-config.yaml. "
+            "Known containers: " + ", ".join(sorted(CONTAINER_TARGETS))
+        )
+    if not isinstance(images, dict):
+        raise ValueError("'images' must be a mapping")
+    return images
+
+
 def cmd_get_images_json(cfg: dict) -> int:
-    """Emit the images list as a compact JSON array suitable for
-    `kubectl patch ... --type=merge -p '{"spec":{"source":{"kustomize":
-    {"images":[...]}}}}'`. Argo Application's kustomize.images expects
-    an array of strings of the form 'name=newName:newTag' OR the old
-    'name:tag' form. We emit 'name:newTag' pairs."""
-    images = cfg.get("images") or []
-    if not isinstance(images, list):
-        print("error: 'images' must be a list", file=sys.stderr)
+    """Emit ALL kustomize.images entries derived from the images:
+    block, as a compact JSON array. Container entries with stack=None
+    (bootstrap-managed, e.g. dma-ethercat) are skipped — they are not
+    routed to any Application's kustomize.images."""
+    try:
+        images = _images_dict(cfg)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     out: list[str] = []
-    for entry in images:
-        if not isinstance(entry, dict):
-            print(f"error: image entry not a mapping: {entry!r}", file=sys.stderr)
-            return 2
-        name = entry.get("name")
-        new_tag = entry.get("newTag")
-        new_name = entry.get("newName")
-        if not name or not new_tag:
+    for cname, spec in images.items():
+        if cname not in CONTAINER_TARGETS:
             print(
-                f"error: image entry needs 'name' and 'newTag': {entry!r}",
+                f"error: images.{cname}: unknown container "
+                f"(known: {', '.join(sorted(CONTAINER_TARGETS))})",
                 file=sys.stderr,
             )
             return 2
-        # Argo accepts "name=newName:newTag" or "name:newTag". Use the
-        # latter when newName is omitted (the common case).
-        if new_name:
-            out.append(f"{name}={new_name}:{new_tag}")
-        else:
-            out.append(f"{name}:{new_tag}")
+        if not isinstance(spec, dict) or not spec.get("image"):
+            continue
+        if CONTAINER_TARGETS[cname]["stack"] is None:
+            continue
+        try:
+            out.append(_container_kustomize_string(cname, spec))
+        except ValueError as exc:
+            print(f"error: images.{cname}: {exc}", file=sys.stderr)
+            return 2
     print(json.dumps(out))
+    return 0
+
+
+def cmd_get_image_for_container(cfg: dict, container: str) -> int:
+    """Echo the full image ref (repo:tag) for one container. Exit 1
+    when the container is not overridden in host-config (caller can
+    fall back to the manifest's default). Exit 2 on schema error."""
+    if container not in CONTAINER_TARGETS:
+        print(
+            f"error: unknown container {container!r} "
+            f"(known: {', '.join(sorted(CONTAINER_TARGETS))})",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        images = _images_dict(cfg)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    spec = images.get(container)
+    if not isinstance(spec, dict):
+        return 1
+    img = spec.get("image")
+    if not img:
+        return 1
+    print(img)
     return 0
 
 
@@ -483,25 +658,46 @@ def cmd_inject_kustomize_block(
         return 2
 
     # Filter host-config images to those owned by this stack.
-    raw_images = cfg.get("images") or []
-    if not isinstance(raw_images, list):
-        print("error: 'images' must be a list", file=sys.stderr)
+    # Container-keyed schema: each entry is keyed by container name and
+    # the registry tells us which stack it lives in. Cross-check
+    # against the rendered manifest's actual image references — a
+    # container whose manifest_image isn't found in the rendered output
+    # is a hint that CONTAINER_TARGETS is stale, surface a stderr
+    # warning so the operator notices.
+    try:
+        raw_images = _images_dict(cfg)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     images_block: list[str] = []
-    for entry in raw_images:
-        if not isinstance(entry, dict):
+    image_warnings: list[str] = []
+    for cname, spec in raw_images.items():
+        if cname not in CONTAINER_TARGETS:
+            image_warnings.append(
+                f"images.{cname}: unknown container — ignored "
+                f"(known: {', '.join(sorted(CONTAINER_TARGETS))})"
+            )
             continue
-        name = entry.get("name")
-        new_tag = entry.get("newTag")
-        new_name = entry.get("newName")
-        if not name or not new_tag:
+        target = CONTAINER_TARGETS[cname]
+        if target["stack"] != stack:
             continue
-        if name not in stack_images:
+        if not isinstance(spec, dict) or not spec.get("image"):
             continue
-        if new_name:
-            images_block.append(f"{name}={new_name}:{new_tag}")
-        else:
-            images_block.append(f"{name}:{new_tag}")
+        manifest_image = target["manifest_image"]
+        if manifest_image not in stack_images:
+            image_warnings.append(
+                f"images.{cname}: manifest_image={manifest_image!r} not "
+                f"referenced by any rendered {stack} manifest — registry "
+                f"is stale (CONTAINER_TARGETS in host-config.py)"
+            )
+            continue
+        try:
+            images_block.append(_container_kustomize_string(cname, spec))
+        except ValueError as exc:
+            print(f"error: images.{cname}: {exc}", file=sys.stderr)
+            return 2
+    for w in image_warnings:
+        print(f"warning: {w}", file=sys.stderr)
 
     # Build patches from `deployments:` filtered to this stack.
     patches_block: list[dict] = []
@@ -603,6 +799,235 @@ def cmd_validate(cfg: dict) -> int:
                         )
                 if "selfHeal" in spec and not isinstance(spec["selfHeal"], bool):
                     errors.append(f"stacks.{name}.selfHeal: must be true or false")
+    # cpuIsolation is optional. Schema:
+    #   enabled: bool
+    #   partitions: list of {name: str, cpus: str, description?: str}
+    #   nic: optional {iface: str, irqCore: int}
+    #     (legacy alias `rtCore` accepted with a stderr warning)
+    #   dmaRtCpu: int — core for the SOEM cyclic loop (DMA_RT_CPU).
+    #     Should differ from nic.irqCore: the IRQ handler can preempt
+    #     the loop at the wrong instant when they share a core. Equal
+    #     values produce a stderr warning, not an error.
+    #   installAffinityDefaults: bool (default true if cpuIsolation.enabled)
+    #
+    # NOTE: cpuIsolation.migrateCmdline (was opt-in under the cgroup-
+    # partition approach) is dropped under RFC 0004 — kernel cmdline
+    # editing is the primary mechanism and always-on. Validator
+    # accepts the field for back-compat but ignores it.
+    import re as _re
+    _PART_NAME_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    _CPU_RANGE_RE = _re.compile(r"^\d+(-\d+)?(,\d+(-\d+)?)*$")
+
+    def _expand_cpus(spec: str) -> set[int]:
+        out: set[int] = set()
+        for part in spec.split(","):
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                a, b = int(lo), int(hi)
+                if a > b:
+                    raise ValueError(f"reversed range {part!r}")
+                out.update(range(a, b + 1))
+            else:
+                out.add(int(part))
+        return out
+
+    ci = cfg.get("cpuIsolation")
+    if ci is not None:
+        if not isinstance(ci, dict):
+            errors.append("'cpuIsolation' must be a mapping")
+        else:
+            if "enabled" in ci and not isinstance(ci["enabled"], bool):
+                errors.append("cpuIsolation.enabled: must be true or false")
+            for boolfield in ("installAffinityDefaults", "migrateCmdline"):
+                if boolfield in ci and not isinstance(ci[boolfield], bool):
+                    errors.append(
+                        f"cpuIsolation.{boolfield}: must be true or false"
+                    )
+            # migrateCmdline is silently ignored under RFC 0004 — emit
+            # a deprecation warning but don't fail validation so existing
+            # host-configs from feat/cpu-isolation-bootstrap keep working.
+            if "migrateCmdline" in ci:
+                print(
+                    "warning: cpuIsolation.migrateCmdline is deprecated under "
+                    "RFC 0004 (kernel cmdline editing is always-on); the field "
+                    "is ignored",
+                    file=sys.stderr,
+                )
+
+            partitions = ci.get("partitions") or []
+            if not isinstance(partitions, list):
+                errors.append("cpuIsolation.partitions: must be a list")
+                partitions = []
+            seen_names: set[str] = set()
+            seen_cpus: set[int] = set()
+            for i, p in enumerate(partitions):
+                label = f"cpuIsolation.partitions[{i}]"
+                if not isinstance(p, dict):
+                    errors.append(f"{label}: must be a mapping")
+                    continue
+                pname = p.get("name")
+                if not pname or not isinstance(pname, str):
+                    errors.append(f"{label}.name: required, must be a string")
+                elif not _PART_NAME_RE.match(pname):
+                    errors.append(
+                        f"{label}.name={pname!r}: must be alnum/underscore "
+                        f"(matches manage_cpusets.sh INI section rules)"
+                    )
+                elif pname in seen_names:
+                    errors.append(f"{label}.name: duplicate {pname!r}")
+                else:
+                    seen_names.add(pname)
+                cpus = p.get("cpus")
+                if not cpus or not isinstance(cpus, str):
+                    errors.append(f"{label}.cpus: required, must be a string")
+                elif not _CPU_RANGE_RE.match(cpus):
+                    errors.append(
+                        f"{label}.cpus={cpus!r}: must match kernel cpu-list "
+                        f"syntax (e.g. '10-13', '10,12', '10-11,13')"
+                    )
+                else:
+                    try:
+                        cpuset = _expand_cpus(cpus)
+                    except ValueError as exc:
+                        errors.append(f"{label}.cpus: {exc}")
+                        cpuset = set()
+                    overlap = cpuset & seen_cpus
+                    if overlap:
+                        errors.append(
+                            f"{label}.cpus: overlaps existing partition on "
+                            f"CPUs {sorted(overlap)}"
+                        )
+                    seen_cpus.update(cpuset)
+                if "description" in p and not isinstance(p["description"], str):
+                    errors.append(f"{label}.description: must be a string")
+
+            nic = ci.get("nic")
+            irq_core: int | None = None
+            if nic is not None:
+                if not isinstance(nic, dict):
+                    errors.append("cpuIsolation.nic: must be a mapping")
+                else:
+                    iface = nic.get("iface")
+                    if not iface or not isinstance(iface, str):
+                        errors.append("cpuIsolation.nic.iface: required, must be a string")
+                    # `irqCore` is canonical; `rtCore` is the deprecated
+                    # name from before we split IRQ-pin from RT-loop core.
+                    raw_irq = nic.get("irqCore")
+                    raw_legacy = nic.get("rtCore")
+                    field_name = "irqCore"
+                    if raw_irq is None and raw_legacy is not None:
+                        print(
+                            "warning: cpuIsolation.nic.rtCore is deprecated, "
+                            "use cpuIsolation.nic.irqCore instead "
+                            "(this field pins the NIC's IRQs)",
+                            file=sys.stderr,
+                        )
+                        raw_irq = raw_legacy
+                        field_name = "rtCore"
+                    elif raw_irq is not None and raw_legacy is not None:
+                        errors.append(
+                            "cpuIsolation.nic: set either irqCore or rtCore "
+                            "(legacy), not both"
+                        )
+                    if raw_irq is None:
+                        errors.append(
+                            "cpuIsolation.nic.irqCore: required when nic block "
+                            "present (bootstrap is non-interactive)"
+                        )
+                    elif not isinstance(raw_irq, int) or isinstance(raw_irq, bool):
+                        errors.append(f"cpuIsolation.nic.{field_name}: must be an integer")
+                    elif raw_irq not in seen_cpus:
+                        errors.append(
+                            f"cpuIsolation.nic.{field_name}={raw_irq}: not in any "
+                            f"declared partition cpus ({sorted(seen_cpus) or 'none'})"
+                        )
+                    else:
+                        irq_core = raw_irq
+
+                    # selector — optional sub-block driving the
+                    # one-time ecat-interface setup phase. Exactly one
+                    # of {mac, pci, {driver,index}} must be set when
+                    # the selector block is present.
+                    sel = nic.get("selector")
+                    if sel is not None:
+                        if not isinstance(sel, dict):
+                            errors.append("cpuIsolation.nic.selector: must be a mapping")
+                        else:
+                            keys_set = sum(
+                                1 for k in ("mac", "pci", "driver") if sel.get(k)
+                            )
+                            if keys_set != 1:
+                                errors.append(
+                                    "cpuIsolation.nic.selector: set exactly one "
+                                    "of mac, pci, or driver+index "
+                                    "(got " + str(keys_set) + ")"
+                                )
+                            mac = sel.get("mac")
+                            if mac is not None:
+                                if not isinstance(mac, str) or not _re.match(
+                                    r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", mac
+                                ):
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.mac: must be "
+                                        "aa:bb:cc:dd:ee:ff"
+                                    )
+                            pci = sel.get("pci")
+                            if pci is not None:
+                                if not isinstance(pci, str) or not _re.match(
+                                    r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:"
+                                    r"[0-9a-fA-F]{2}\.[0-9]$",
+                                    pci,
+                                ):
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.pci: must be "
+                                        "BDF format 0000:01:00.0"
+                                    )
+                            drv = sel.get("driver")
+                            if drv is not None:
+                                if not isinstance(drv, str) or not drv:
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.driver: "
+                                        "non-empty string required"
+                                    )
+                                idx = sel.get("index")
+                                if idx is None:
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.index: "
+                                        "required when driver is set"
+                                    )
+                                elif (
+                                    not isinstance(idx, int)
+                                    or isinstance(idx, bool)
+                                    or idx < 0
+                                ):
+                                    errors.append(
+                                        "cpuIsolation.nic.selector.index: "
+                                        "must be a non-negative integer"
+                                    )
+
+            # dmaRtCpu — top-level. Core where dma_main pins its
+            # cyclic loop. Different from nic.irqCore by default.
+            if "dmaRtCpu" in ci:
+                rt_cpu = ci["dmaRtCpu"]
+                if not isinstance(rt_cpu, int) or isinstance(rt_cpu, bool):
+                    errors.append("cpuIsolation.dmaRtCpu: must be an integer")
+                elif rt_cpu not in seen_cpus:
+                    errors.append(
+                        f"cpuIsolation.dmaRtCpu={rt_cpu}: not in any declared "
+                        f"partition cpus ({sorted(seen_cpus) or 'none'})"
+                    )
+                elif irq_core is not None and rt_cpu == irq_core:
+                    print(
+                        f"warning: cpuIsolation.dmaRtCpu={rt_cpu} equals "
+                        f"cpuIsolation.nic.irqCore — async NIC IRQs can "
+                        f"preempt the SOEM RT loop. For minimum jitter, "
+                        f"pick distinct cores inside the partition.",
+                        file=sys.stderr,
+                    )
+
+            # (RFC 0004: migrateCmdline cross-validation removed —
+            # cmdline editing is always-on.)
+
     # dmaEthercat is optional. configSet must be a single directory
     # name (no slashes, no '..') — bootstrap interpolates it into
     # /usr/share/dma-ethercat/config/<configSet>/<robot>.json, so
@@ -630,17 +1055,43 @@ def cmd_validate(cfg: dict) -> int:
                         "dmaEthercat.configPath: '..' not allowed in path components"
                     )
 
-    images = cfg.get("images") or []
-    if not isinstance(images, list):
-        errors.append("'images' must be a list")
-    for i, entry in enumerate(images if isinstance(images, list) else []):
-        if not isinstance(entry, dict):
-            errors.append(f"images[{i}]: not a mapping")
-            continue
-        if not entry.get("name"):
-            errors.append(f"images[{i}]: missing 'name'")
-        if not entry.get("newTag"):
-            errors.append(f"images[{i}]: missing 'newTag'")
+    # images: is the container-keyed override map. Operators name the
+    # container they want to retag/swap and supply the full image ref;
+    # bootstrap looks up CONTAINER_TARGETS to find the manifest-side
+    # name kustomize.images uses as its find-key.
+    images_raw = cfg.get("images")
+    if images_raw is not None:
+        if isinstance(images_raw, list):
+            errors.append(
+                "'images' is now a container-keyed mapping, not a list. "
+                "Migrate to: images: { <container>: { image: <ref:tag> } }. "
+                "Known containers: " + ", ".join(sorted(CONTAINER_TARGETS))
+            )
+        elif not isinstance(images_raw, dict):
+            errors.append("'images' must be a mapping")
+        else:
+            for cname, spec in images_raw.items():
+                if cname not in CONTAINER_TARGETS:
+                    errors.append(
+                        f"images.{cname}: unknown container "
+                        f"(known: {', '.join(sorted(CONTAINER_TARGETS))})"
+                    )
+                    continue
+                if spec is None:
+                    continue
+                if not isinstance(spec, dict):
+                    errors.append(f"images.{cname}: must be a mapping")
+                    continue
+                img = spec.get("image")
+                if not img:
+                    errors.append(f"images.{cname}.image: required")
+                elif not isinstance(img, str):
+                    errors.append(f"images.{cname}.image: must be a string")
+                else:
+                    try:
+                        _split_image_ref(img)
+                    except ValueError as exc:
+                        errors.append(f"images.{cname}.image: {exc}")
 
     # deployments is optional. Each key must be a known deployment.
     # Reject relative paths and '~' — bootstrap runs as root, so '~'
@@ -718,8 +1169,26 @@ def main() -> int:
             print("usage: host-config.py <path> get <field>", file=sys.stderr)
             return 2
         return cmd_get(cfg, sys.argv[3])
+    if cmd == "get-cpu-isolation-json":
+        return cmd_get_cpu_isolation_json(cfg)
+    if cmd == "set-cpu-isolation-json":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> set-cpu-isolation-json <json>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_set_cpu_isolation_json(path, sys.argv[3])
     if cmd == "get-images-json":
         return cmd_get_images_json(cfg)
+    if cmd == "get-image-for-container":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> get-image-for-container <container>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_get_image_for_container(cfg, sys.argv[3])
     if cmd == "get-dma-ethercat-config-set":
         return cmd_get_dma_ethercat_config_set(cfg)
     if cmd == "get-dma-ethercat-config-path":
