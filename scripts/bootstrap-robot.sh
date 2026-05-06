@@ -1133,6 +1133,43 @@ host_config() {
 
 # ---- phase 3: cluster ---------------------------------------------------
 
+# Resolve a stable IP for spec.api.address before `k0s install`. Without
+# this, k0s reads the kernel routing table at install time; if no
+# default route exists yet (cold boot, slow wifi DHCP) it bakes its
+# '1.1.1.1' sentinel into kine — silently, permanently, and with no
+# automatic recovery on a later reboot. We prefer the Tailscale IP
+# because it's stable across DHCP changes, wifi network moves, and
+# reboots; tailscaled brings the interface up early in boot. Fall back
+# to the default-route source IP if Tailscale isn't available.
+#
+# Polls for up to API_ADDRESS_WAIT_SECS to tolerate the cold-boot race.
+# Echoes the chosen IP on stdout, returns 1 if neither resolves.
+_resolve_api_address() {
+  local wait_secs=${API_ADDRESS_WAIT_SECS:-60}
+  local elapsed=0
+  while [ "$elapsed" -lt "$wait_secs" ]; do
+    if command -v tailscale >/dev/null 2>&1; then
+      local ts_ip
+      ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
+      if [ -n "$ts_ip" ]; then
+        printf '%s\n' "$ts_ip"
+        return 0
+      fi
+    fi
+    # Default-route source IP — the IP we'd source-from to reach 0.0.0.0/0.
+    local src
+    src=$(ip -4 route get 1.1.1.1 2>/dev/null \
+            | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')
+    if [ -n "$src" ] && [ "$src" != "1.1.1.1" ]; then
+      printf '%s\n' "$src"
+      return 0
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  return 1
+}
+
 cluster() {
   if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
   phase "phase 3: cluster"
@@ -1144,12 +1181,37 @@ cluster() {
   if [ "$already_running" = 1 ]; then
     skip "k0s already running ($(systemctl is-active k0scontroller k0sworker 2>/dev/null | tr '\n' ' '))"
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  k0s install controller --single --enable-worker  (if /etc/k0s/k0s.yaml absent)"
+    info "DRY-RUN  resolve API address (tailscale ip -4 || default route src)"
+    info "DRY-RUN  write /etc/k0s/k0s.yaml with spec.api.address=<resolved>"
+    info "DRY-RUN  k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml"
     info "DRY-RUN  systemctl enable --now k0scontroller"
   else
     if [ ! -e /etc/k0s/k0s.yaml ]; then
-      if k0s install controller --single --enable-worker; then
-        pass "k0s installed"
+      local api_ip
+      if ! api_ip=$(_resolve_api_address); then
+        fail "could not resolve a stable API server IP after ${API_ADDRESS_WAIT_SECS:-60}s — \
+no Tailscale auth and no default route. Bring the network up and re-run."
+        return
+      fi
+      info "API server address: $api_ip"
+      mkdir -p /etc/k0s
+      cat >/etc/k0s/k0s.yaml <<EOF
+# Managed by scripts/bootstrap-robot.sh phase cluster.
+# Pinning spec.api.address prevents k0s from baking '1.1.1.1' (its
+# 'no default route' sentinel) into kine when the network isn't fully
+# up at install time. Edit at your own risk; bootstrap respects an
+# operator-modified file (re-runs skip the install path entirely when
+# this file is present).
+apiVersion: k0s.k0sproject.io/v1beta1
+kind: ClusterConfig
+metadata:
+  name: k0s
+spec:
+  api:
+    address: $api_ip
+EOF
+      if k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml; then
+        pass "k0s installed (api.address=$api_ip)"
       else
         fail "k0s install"; return
       fi
@@ -1187,15 +1249,24 @@ cluster() {
 
   # Write a kubeconfig for root so kubectl + terraform have one to read.
   # `k0s kubeconfig admin` regenerates from the cluster CA every time —
-  # safe to run repeatedly.
+  # safe to run repeatedly. We pin the server URL to 127.0.0.1: the only
+  # consumers are local (kubectl, terraform, both run on this host),
+  # the cert SANs include 127.0.0.1, and loopback is immune to wifi
+  # DHCP changes / network moves that would otherwise stale the file.
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  k0s kubeconfig admin > /root/.kube/config (chmod 600)"
+    info "DRY-RUN  k0s kubeconfig admin > /root/.kube/config (server=127.0.0.1, chmod 600)"
   else
     mkdir -p /root/.kube
-    if k0s kubeconfig admin > /root/.kube/config 2>/dev/null && [ -s /root/.kube/config ]; then
-      chmod 600 /root/.kube/config
-      pass "/root/.kube/config written ($(wc -c </root/.kube/config) bytes)"
+    local kc_tmp
+    kc_tmp=$(mktemp)
+    if k0s kubeconfig admin 2>/dev/null \
+         | sed 's|server: https://[^:]*:6443|server: https://127.0.0.1:6443|' \
+         > "$kc_tmp" && [ -s "$kc_tmp" ]; then
+      install -m 0600 "$kc_tmp" /root/.kube/config
+      rm -f "$kc_tmp"
+      pass "/root/.kube/config written (server=127.0.0.1, $(wc -c </root/.kube/config) bytes)"
     else
+      rm -f "$kc_tmp"
       fail "k0s kubeconfig admin failed"
     fi
   fi
