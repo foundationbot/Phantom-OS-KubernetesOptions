@@ -1361,6 +1361,17 @@ spec:
 EOF
       if k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml; then
         pass "k0s installed (api.address=$api_ip, etcd encryption-at-rest enabled)"
+        # `k0s install` creates the kube-apiserver system user. Re-assert
+        # ownership of the EncryptionConfiguration now: deps()'s
+        # _ensure_etcd_encryption_config tries this too, but on a --reset
+        # re-bootstrap the user briefly does not exist when deps runs and
+        # the chown silently no-ops. Without this, kube-apiserver fails to
+        # read the config at startup with EACCES.
+        local _ec="${ETCD_ENCRYPTION_CONFIG_PATH:-/var/lib/k0s/pki/encryption-config.yaml}"
+        if [ -f "$_ec" ] && id kube-apiserver >/dev/null 2>&1; then
+          chown kube-apiserver:root "$_ec" 2>/dev/null || true
+          chmod 0640 "$_ec" 2>/dev/null || true
+        fi
       else
         fail "k0s install"; return
       fi
