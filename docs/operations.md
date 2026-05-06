@@ -427,6 +427,7 @@ rotation runbook. Short version: re-`docker login`, then re-run
 | 6. operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
 | 7. ecat-interface | `--ecat-interface` (default-on; `--skip-ecat-interface` to opt out) | resolve the EtherCAT NIC adapter and rename it to `cpuIsolation.nic.iface` via persistent udev rules. Driven by `cpuIsolation.nic.selector` (mac/pci/driver+index); falls back to the vendored interactive picker on a TTY. **Gates phase 8.** |
 | 8. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | activate cpuset partitions, install `cpusets.service`, write systemd `CPUAffinity` drop-in, optionally pin EtherCAT NIC IRQs and migrate kernel cmdline. **Gates phase 9.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. |
+| 8.5 log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.18](#718-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
 | 9. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the .deb, enable + start `dma-ethercat.service`. **Gates phase 10.** |
 | 10. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
 | 11. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
@@ -955,6 +956,52 @@ To skip the validation step during bootstrap on a known-good host:
 ```bash
 sudo bash scripts/bootstrap-robot.sh --skip-validate
 ```
+
+### 7.18 Recovering a robot with a full `/var/log/syslog`
+
+Symptom: `df -h /` reports the root partition at 100%, and
+`du -sh /var/log/*` shows `/var/log/syslog` (or `syslog.1`) at
+hundreds of GB.
+
+Cause on robots bootstrapped before the `log-management` phase landed:
+the stock `/etc/logrotate.d/rsyslog` ships with `weekly` rotation and
+no `maxsize`, so `/var/log/syslog` grows unbounded between weekly
+rotations. A bursty service (e.g. a tight crash loop) can fill a
+near-empty disk in hours.
+
+Recovery (run as root):
+
+```bash
+# 1. Stop rsyslog so the file isn't being written while you truncate.
+systemctl stop rsyslog
+
+# 2. Truncate in place. (Don't `rm` — it leaves the inode held by
+#    rsyslog's open fd until next restart, so disk space isn't freed.)
+truncate -s 0 /var/log/syslog
+
+# 3. Drop large rotated copies.
+rm -f /var/log/syslog.[1-9]*
+
+# 4. Bring rsyslog back.
+systemctl start rsyslog
+
+# 5. Install caps so this can't recur.
+cd /opt/Phantom-OS-KubernetesOptions
+sudo bash scripts/bootstrap-robot.sh --log-management -y
+
+# 6. Verify caps in place.
+cat /etc/logrotate.d/phantomos-syslog
+cat /etc/systemd/journald.conf.d/phantomos.conf
+```
+
+The `--log-management` phase is idempotent — re-running it on a
+configured host leaves the drop-ins unchanged and does not restart
+journald.
+
+To customise the caps per host, add a `logManagement:` block to
+`/etc/phantomos/host-config.yaml` and re-run the phase. See the
+template at `host-config-templates/_template/host-config.yaml` for
+the full schema and defaults.
 
 ---
 
