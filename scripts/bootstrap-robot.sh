@@ -1329,6 +1329,24 @@ EOF
     done
   fi
 
+  # Apply the fleet-wide robot label. Robot-specific DaemonSets
+  # (yovariable-server, future has-imu workloads, ...) select on
+  # foundation.bot/robot=true; without this label the DaemonSet's
+  # desired count is 0 and the workload silently never schedules.
+  # --overwrite so re-runs are idempotent.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  kubectl label node <hostname> foundation.bot/robot=true --overwrite"
+  else
+    local node_name
+    node_name=$("${KUBECTL[@]}" get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -n "$node_name" ] && "${KUBECTL[@]}" label node "$node_name" \
+         foundation.bot/robot=true --overwrite >/dev/null 2>&1; then
+      pass "node $node_name labeled foundation.bot/robot=true"
+    else
+      fail "could not label node foundation.bot/robot=true"
+    fi
+  fi
+
   # Write a kubeconfig for root so kubectl + terraform have one to read.
   # `k0s kubeconfig admin` regenerates from the cluster CA every time —
   # safe to run repeatedly. We pin the server URL to 127.0.0.1: the only
