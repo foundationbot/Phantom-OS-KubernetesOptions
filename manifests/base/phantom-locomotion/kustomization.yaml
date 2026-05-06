@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# phantom-locomotion DaemonSet — gated on foundation.bot/has-locomotion.
+# Mutually exclusive with positronic-control (host-config validator
+# enforces). See phantom-locomotion.yaml for the full design notes.
+resources:
+  - phantom-locomotion.yaml

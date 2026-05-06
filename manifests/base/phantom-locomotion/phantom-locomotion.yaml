@@ -1,0 +1,133 @@
+# phantom-locomotion — DaemonSet running the lower-body neural policy
+# from imu-policy/phantom-locomotion. Replaces
+# docker/dma_policy/docker-compose.yaml on robots that opt in via the
+# foundation.bot/has-locomotion node label.
+#
+# ── Image ────────────────────────────────────────────────────────────────
+# foundationbot/phantom-dma-inference. CI in the phantom-locomotion repo
+# publishes a -aarch64 variant for Jetson and a plain (amd64) variant.
+# Per-robot tag is rewritten by Kustomize from host-config.yaml's
+# images.phantom-dma-inference entry.
+#
+# ── Mutual exclusion with positronic-control ─────────────────────────────
+# foundation.bot/has-positronic defaults to "true" (set by the cluster
+# phase reconciler). Operators migrating a robot to locomotion MUST
+# explicitly set has-positronic: "false" in nodeLabels — the host-config
+# validator rejects "has-locomotion: true with default-on positronic".
+#
+# ── Policies ─────────────────────────────────────────────────────────────
+# Policy ONNX files live in the phantom-models busybox image under
+# /models/policies/. An initContainer copies that subtree into a shared
+# emptyDir; the main container mounts the emptyDir at /data/policies
+# (matches the docker-compose contract). Same lifecycle as
+# positronic-control's load-models initContainer.
+#
+# If the operator's phantom-models build manifest is missing a
+# /policies entry, the initContainer fails loud (init logs name the
+# missing path).
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: phantom-locomotion
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: phantom-locomotion
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: phantom-locomotion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: phantom-locomotion
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-locomotion: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      initContainers:
+        # Copy /models/policies from the phantom-models image into the
+        # shared emptyDir; main container mounts the emptyDir at
+        # /data/policies. Matches the docker-compose volume contract.
+        - name: load-policies
+          image: localhost:5443/phantom-models:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if [ -d /models/policies ]; then
+                echo "==> copying /models/policies -> /shared"
+                cp -a /models/policies/. /shared/
+              else
+                echo "==> /models/policies missing in phantom-models image"
+                echo "    expected: phantom-models build manifest with"
+                echo "    a 'policies' directory at /models/policies"
+                exit 1
+              fi
+              echo "==> done; /shared contents:"
+              ls -la /shared | head
+          volumeMounts:
+            - name: policies
+              mountPath: /shared
+          resources:
+            requests: { cpu: "500m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
+      containers:
+        - name: phantom-dma-inference
+          image: foundationbot/phantom-dma-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # Entrypoint matches docker-compose: /entrypoint.sh sources
+          # ROS humble + foundation_msgs, then exec's
+          # `bash /workspace/docker/dma_launch.sh`.
+          command: ["/entrypoint.sh", "bash", "/workspace/docker/dma_launch.sh"]
+          # The docker-compose runs with stdin_open + tty for joystick
+          # / keyboard control. Mirror here so an operator can
+          # `kubectl exec -it` into the live pod.
+          stdin: true
+          tty: true
+          env:
+            - { name: ROS_DOMAIN_ID,    value: "101" }
+            - { name: SDL_VIDEODRIVER,  value: "dummy" }
+          ports:
+            - name: ros-disc
+              containerPort: 7400
+              hostPort: 7400
+              protocol: UDP
+          volumeMounts:
+            - { name: shm,       mountPath: /dev/shm }
+            - { name: dev-input, mountPath: /dev/input }
+            - { name: policies,  mountPath: /data/policies }
+          resources:
+            # Conservative starting point — the policy is small, mostly
+            # CPU-bound. Real RT pinning is the cpu-isolation phase's job.
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "4", memory: "4Gi" }
+          securityContext:
+            # Mirrors positronic-control posture: GPU + /dev/input access
+            # without enumerating every device node.
+            privileged: true
+
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm,    type: Directory }
+        - name: dev-input
+          hostPath: { path: /dev/input,  type: Directory }
+        - name: policies
+          emptyDir: {}
