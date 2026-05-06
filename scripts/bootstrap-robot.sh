@@ -54,8 +54,10 @@
 #                        logManagement.enabled: false). See docs/operations.md.
 #   --gitops             terraform apply (argocd Helm) + render+apply
 #                        the per-host phantomos-<robot> Application
-#   --argocd-admin       install argocd CLI; prompt and set admin
-#                        password (default '1984' on empty input)
+#   --argocd-users       install argocd CLI; prompt and set passwords
+#                        for admin, operator, fleet-operator
+#                        (default '1984' on empty input)
+#                        --argocd-admin is a backwards-compat alias
 #   --image-overrides    inject host-config.yaml's images list into
 #                        the live Application
 #   --deployments        inject host-config.yaml's deployments: patches
@@ -128,10 +130,32 @@
 #                      inline `auths` (credsStore-only), phase 5 falls
 #                      back to copying an existing `dockerhub-creds`
 #                      Secret from the `phantom` namespace.
+#   --repo-credential-file <path>
+#                      path to a mode-0600 YAML file containing the ArgoCD
+#                      `repository`-typed Secret for the (private) git
+#                      source. Applied by the gitops phase before any
+#                      Application CR is reconciled so argocd-repo-server
+#                      can authenticate on first sync.
+#                      Default: /etc/phantomos/argocd-repo-credential.yaml
+#                      Must NOT reside inside a git work tree.
+#
+# Migration (partial-phase) flags — for already-deployed robots:
+#   --gitops-repo-credential-only
+#                      apply only the repo credential Secret (kubectl apply
+#                      -n argocd -f <credential-file>). Skips every other
+#                      phase. Requires --repo-credential-file. Used by the
+#                      migration playbook to re-credential an existing robot
+#                      without re-running deps/cluster/gitops.
+#   --gitops-rbac-only
+#                      apply only the RBAC overlays (argocd-secret-rbac,
+#                      argocd-rbac ConfigMap patches, fleet-operator-kubectl-
+#                      rbac). Skips every other phase. Used by the migration
+#                      playbook to install RBAC on an already-bootstrapped
+#                      robot without a full re-run.
 #
 # Examples:
 #   sudo bash scripts/bootstrap-robot.sh                       # full bootstrap
-#   sudo bash scripts/bootstrap-robot.sh --argocd-admin        # rotate password
+#   sudo bash scripts/bootstrap-robot.sh --argocd-users        # rotate passwords
 #   sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets   # re-seed creds
 #   sudo bash scripts/bootstrap-robot.sh --image-overrides     # push tag changes
 #   sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
@@ -276,6 +300,7 @@ SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
 SKIP_OPERATOR_UI_CONFIG=0
 SKIP_GITOPS=0
+SKIP_ARGOCD_USERS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
@@ -323,7 +348,8 @@ while [ $# -gt 0 ]; do
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
-    --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
+    --argocd-users|--argocd-admin)
+                         SELECTED_PHASES+=(argocd-users); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
     --deployments|--dev-mounts)
                          SELECTED_PHASES+=(dev-mounts); shift ;;
@@ -353,6 +379,12 @@ while [ $# -gt 0 ]; do
     --host-config)       HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
     --dockerhub-secret-file)
                          DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
+    --repo-credential-file)
+                         REPO_CREDENTIAL_FILE="${2:?value required}"; shift 2 ;;
+    --gitops-repo-credential-only)
+                         SELECTED_PHASES+=(gitops-repo-credential-only); shift ;;
+    --gitops-rbac-only)
+                         SELECTED_PHASES+=(gitops-rbac-only); shift ;;
     --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
     --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
 
@@ -466,6 +498,14 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/cpusets/lib/nic_setup.sh
 . "$SCRIPT_DIR/cpusets/lib/nic_setup.sh"
 
+# Load extracted user-mgmt helpers (RFC 0002).
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/argocd_users.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/repo_credential.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/etcd_encryption.sh"
+
 # host-config.yaml — single per-host source-of-truth. If --host-config
 # was passed, copy it to the canonical location so subsequent runs use
 # the same file. Then, if the file exists, harvest defaults for fields
@@ -530,6 +570,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
   SKIP_GITOPS=1
+  SKIP_ARGOCD_USERS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
@@ -546,7 +587,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
-      argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
+      argocd-users|argocd-admin) SKIP_ARGOCD_USERS=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
@@ -565,7 +606,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-users|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface|gitops-repo-credential-only|gitops-rbac-only) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -578,7 +619,7 @@ if [ "$RESET" = 0 ] && [ "$_needs_robot" = 1 ]; then
 fi
 unset _needs_robot
 
-if [ "$DRY_RUN" = 0 ] && [ "$(id -u)" -ne 0 ]; then
+if [ "${BOOTSTRAP_LIB_ONLY:-0}" != "1" ] && [ "$DRY_RUN" = 0 ] && [ "$(id -u)" -ne 0 ]; then
   die "must run as root (try: sudo bash $0 --robot ${ROBOT:-<name>} ...)"
 fi
 
@@ -1015,6 +1056,12 @@ deps() {
   if [ "$SKIP_DEPS" = 1 ]; then phase "phase 2: deps  (skipped)"; return; fi
   phase "phase 2: deps"
 
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  ensure k0s etcd encryption-at-rest config"
+  else
+    _ensure_etcd_encryption_config || guard
+  fi
+
   apt_pkgs=(docker.io skopeo python3 curl jq git pciutils unzip)
   to_install=()
   for pkg in "${apt_pkgs[@]}"; do
@@ -1297,6 +1344,11 @@ cluster() {
 # up at install time. Edit at your own risk; bootstrap respects an
 # operator-modified file (re-runs skip the install path entirely when
 # this file is present).
+#
+# spec.api.extraArgs.encryption-provider-config wires kube-apiserver to
+# read the EncryptionConfiguration generated by deps()'s
+# _ensure_etcd_encryption_config so all Secrets land encrypted on first
+# write (RFC 0002).
 apiVersion: k0s.k0sproject.io/v1beta1
 kind: ClusterConfig
 metadata:
@@ -1304,9 +1356,22 @@ metadata:
 spec:
   api:
     address: $api_ip
+    extraArgs:
+      encryption-provider-config: ${ETCD_ENCRYPTION_CONFIG_PATH:-/var/lib/k0s/pki/encryption-config.yaml}
 EOF
       if k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml; then
-        pass "k0s installed (api.address=$api_ip)"
+        pass "k0s installed (api.address=$api_ip, etcd encryption-at-rest enabled)"
+        # `k0s install` creates the kube-apiserver system user. Re-assert
+        # ownership of the EncryptionConfiguration now: deps()'s
+        # _ensure_etcd_encryption_config tries this too, but on a --reset
+        # re-bootstrap the user briefly does not exist when deps runs and
+        # the chown silently no-ops. Without this, kube-apiserver fails to
+        # read the config at startup with EACCES.
+        local _ec="${ETCD_ENCRYPTION_CONFIG_PATH:-/var/lib/k0s/pki/encryption-config.yaml}"
+        if [ -f "$_ec" ] && id kube-apiserver >/dev/null 2>&1; then
+          chown kube-apiserver:root "$_ec" 2>/dev/null || true
+          chmod 0640 "$_ec" 2>/dev/null || true
+        fi
       else
         fail "k0s install"; return
       fi
@@ -3026,6 +3091,7 @@ APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_templa
 RENDERED_APP_DIR="${RENDERED_APP_DIR:-/etc/phantomos}"
 DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
 DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
+REPO_CREDENTIAL_FILE="${REPO_CREDENTIAL_FILE:-/etc/phantomos/argocd-repo-credential.yaml}"
 
 _rendered_app_path() {
   local stack="${1:?stack required}"
@@ -3131,6 +3197,71 @@ _gitops_render_app() {
   info "$inject_out"
 }
 
+_gitops_apply_secret_rbac() {
+  if "${KUBECTL[@]}" apply -k "$REPO_ROOT/manifests/base/argocd-secret-rbac" >/dev/null; then
+    pass "applied argocd-secret-rbac overlay"
+    return 0
+  fi
+  fail "could not apply argocd-secret-rbac overlay"
+  return 1
+}
+
+# argocd-rbac patch files are applied directly as `kubectl patch --type merge`
+# per-ConfigMap (not `kubectl apply -k`) so they merge into the chart-installed
+# ConfigMaps without stomping their data: blocks. See
+# manifests/base/argocd-rbac/kustomization.yaml header for rationale.
+# The two patch files are strategic-merge patches (apiVersion: v1, kind:
+# ConfigMap, name: <cm>, data: ...) which kubectl patch --patch-file accepts
+# directly when --type=merge.  No kustomize build or awk needed.
+_gitops_apply_argocd_user_rbac() {
+  local cm_patch_dir="$REPO_ROOT/manifests/base/argocd-rbac"
+  local ok=1
+  local entry cm_name patch_file
+  for entry in "argocd-cm:argocd-cm-patch.yaml" "argocd-rbac-cm:argocd-rbac-cm-patch.yaml"; do
+    cm_name="${entry%%:*}"
+    patch_file="$cm_patch_dir/${entry##*:}"
+    if [ ! -r "$patch_file" ]; then
+      fail "argocd-rbac patch missing: $patch_file"; ok=0; continue
+    fi
+    if "${KUBECTL[@]}" -n argocd patch configmap "$cm_name" --type merge --patch-file "$patch_file" >/dev/null 2>&1; then
+      pass "patched ConfigMap $cm_name"
+    else
+      fail "could not patch ConfigMap $cm_name"; ok=0
+    fi
+  done
+
+  # fleet-operator kubectl RBAC is a normal kustomize apply.
+  if "${KUBECTL[@]}" apply -k "$REPO_ROOT/manifests/base/fleet-operator-kubectl-rbac" >/dev/null; then
+    pass "applied fleet-operator-kubectl-rbac"
+  else
+    fail "could not apply fleet-operator-kubectl-rbac"
+    ok=0
+  fi
+
+  [ "$ok" = 1 ] && return 0 || return 1
+}
+
+gitops_repo_credential_only() {
+  phase "phase: apply repo credential (only)"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  apply repo credential from $REPO_CREDENTIAL_FILE"
+    return
+  fi
+  _apply_repo_credential "$REPO_CREDENTIAL_FILE"
+}
+
+gitops_rbac_only() {
+  phase "phase: apply argocd RBAC overlays (only)"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  apply argocd-secret-rbac"
+    info "DRY-RUN  apply argocd-rbac"
+    info "DRY-RUN  apply fleet-operator-kubectl-rbac"
+    return
+  fi
+  _gitops_apply_secret_rbac
+  _gitops_apply_argocd_user_rbac
+}
+
 gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 10: gitops  (skipped)"; return; fi
   phase "phase 10: gitops (install argocd + apply per-host Application)"
@@ -3204,6 +3335,10 @@ PY
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  cd $REPO_ROOT/terraform && terraform init && terraform apply -auto-approve -var=kubeconfig=$kc"
+    info "DRY-RUN  apply argocd-secret-rbac overlay"
+    info "DRY-RUN  apply argocd-rbac (operator + fleet-operator accounts)"
+    info "DRY-RUN  apply fleet-operator-kubectl-rbac"
+    info "DRY-RUN  apply repo credential from $REPO_CREDENTIAL_FILE"
     info "DRY-RUN  enabled stacks: $(printf '%s' "$enabled_stacks" | tr '\n' ' ')"
     while IFS= read -r stack; do
       [ -z "$stack" ] && continue
@@ -3234,6 +3369,18 @@ PY
     terraform apply -input=false -auto-approve -var="kubeconfig=$kc"
   ) || { fail "terraform apply"; return; }
   pass "terraform apply (argocd Helm install)"
+
+  _gitops_apply_secret_rbac || guard
+  _gitops_apply_argocd_user_rbac || guard
+
+  # Apply repo credential so argocd-repo-server can clone the (private) repo
+  # before any Application CR is reconciled.
+  if [ -r "$REPO_CREDENTIAL_FILE" ]; then
+    _apply_repo_credential "$REPO_CREDENTIAL_FILE" || guard
+  else
+    fail "repo credential not found at $REPO_CREDENTIAL_FILE — pass --repo-credential-file or pre-stage the file"
+    return
+  fi
 
   # Migrate from any pre-existing root-app or umbrella Application.
   _gitops_migrate_legacy_apps
@@ -3301,8 +3448,11 @@ PY
 _IMAGE_STACK_MAP=""   # newline-separated: "<image>\t<stack>"
 
 _kustomize_cmd() {
+  # Standalone kustomize needs a `build` subcommand; `kubectl kustomize` and
+  # `k0s kubectl kustomize` take the path directly. Normalize all three so
+  # callers can do "$cmd <path>" without worrying which form they got.
   if command -v kustomize >/dev/null 2>&1; then
-    printf 'kustomize\n'
+    printf 'kustomize build\n'
   elif command -v kubectl >/dev/null 2>&1 && kubectl kustomize --help >/dev/null 2>&1; then
     printf 'kubectl kustomize\n'
   elif command -v k0s >/dev/null 2>&1; then
@@ -3650,12 +3800,13 @@ PY
   done <<< "$entries"
 }
 
-# ---- phase 11: argocd admin (install CLI + reset password) -------------
+# ---- phase 11: argocd users (install CLI + set account passwords) ------
 
-# Installs the argocd CLI binary (latest release from GitHub) and resets
-# the admin password by writing a bcrypt hash into argocd-secret. Done
-# as a script step rather than via `argocd account update-password` so
-# we don't need a port-forward + login round-trip.
+# Installs the argocd CLI binary (latest release from GitHub) and sets
+# passwords for admin, operator, and fleet-operator accounts by writing
+# bcrypt hashes into argocd-secret. Done as a script step rather than via
+# `argocd account update-password` so we don't need a port-forward +
+# login round-trip.
 #
 # Password source:
 #   1. Interactive TTY → prompt twice (echo off), default to "1984" on
@@ -3663,139 +3814,121 @@ PY
 #   2. Non-interactive (no TTY, e.g. CI / piped) → use "1984".
 #
 # Deliberately no env-var override: typing a secret on the command line
-# leaks it to shell history and ps listings. `--argocd-admin`
-# inherits a TTY, so password rotation prompts as expected.
+# leaks it to shell history and ps listings.
 _argocd_default_password="1984"
 
-argocd_admin() {
-  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 11: argocd admin  (skipped)"; return; fi
-  phase "phase 11: argocd admin (install CLI + set admin password)"
-
-  # 1) install argocd CLI if missing
-  #
-  # Verifies the binary actually runs after install — partial downloads
-  # otherwise leave a broken /usr/local/bin/argocd that fails silently
-  # at first use. Up to two attempts before giving up.
+# _install_argocd_cli — download and verify the argocd CLI binary.
+# Verifies the binary actually runs after install — partial downloads
+# otherwise leave a broken /usr/local/bin/argocd that fails silently
+# at first use. Up to two attempts before returning non-zero.
+_install_argocd_cli() {
   local argocd_bin=/usr/local/bin/argocd
   local installed_ok=0
   if command -v argocd >/dev/null 2>&1 && argocd version --client >/dev/null 2>&1; then
     skip "argocd CLI already in PATH ($(argocd version --client --short 2>/dev/null || echo present))"
-    installed_ok=1
-  else
-    local argo_arch=""
-    case "$(uname -m)" in
-      x86_64)  argo_arch=amd64 ;;
-      aarch64) argo_arch=arm64 ;;
-      *)       fail "no argocd CLI binary for arch $(uname -m)" ;;
-    esac
-    if [ -n "$argo_arch" ]; then
-      local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
-      if [ "$DRY_RUN" = 1 ]; then
-        info "DRY-RUN  download $url -> $argocd_bin"
-        installed_ok=1
-      else
-        local attempt
-        for attempt in 1 2; do
-          rm -f /tmp/argocd
-          if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
-               "$url" -o /tmp/argocd \
-             && [ -s /tmp/argocd ] \
-             && install -m 0555 /tmp/argocd "$argocd_bin" \
-             && "$argocd_bin" version --client >/dev/null 2>&1; then
-            pass "argocd CLI installed ($("$argocd_bin" version --client --short 2>/dev/null || echo ok))"
-            rm -f /tmp/argocd
-            installed_ok=1
-            break
-          fi
-          if [ "$attempt" = 1 ]; then
-            info "argocd download/verify failed; retrying once..."
-            # If a broken binary was placed, get rid of it before retry.
-            [ -f "$argocd_bin" ] && ! "$argocd_bin" version --client >/dev/null 2>&1 \
-              && rm -f "$argocd_bin"
-            sleep 3
-          fi
-        done
-        rm -f /tmp/argocd
-        if [ "$installed_ok" = 0 ]; then
-          fail "argocd CLI install failed after 2 attempts ($url) — manual fix: sudo curl -fsSL -o $argocd_bin $url && sudo chmod +x $argocd_bin"
-        fi
-      fi
-    fi
+    return 0
   fi
-
-  # 2) acquire the password (prompt if interactive, default otherwise)
-  local pw=""
+  local argo_arch=""
+  case "$(uname -m)" in
+    x86_64)  argo_arch=amd64 ;;
+    aarch64) argo_arch=arm64 ;;
+    *)       fail "no argocd CLI binary for arch $(uname -m)"; return 1 ;;
+  esac
+  local url="https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${argo_arch}"
   if [ "$DRY_RUN" = 1 ]; then
-    pw="$_argocd_default_password"
-    info "DRY-RUN  prompt for admin password (would default to '$pw' on empty input)"
-    info "DRY-RUN  patch argocd-secret with bcrypt(\$pw)"
-    return
+    info "DRY-RUN  download $url -> $argocd_bin"
+    return 0
   fi
+  local attempt
+  for attempt in 1 2; do
+    rm -f /tmp/argocd
+    if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 \
+         "$url" -o /tmp/argocd \
+       && [ -s /tmp/argocd ] \
+       && install -m 0555 /tmp/argocd "$argocd_bin" \
+       && "$argocd_bin" version --client >/dev/null 2>&1; then
+      pass "argocd CLI installed ($("$argocd_bin" version --client --short 2>/dev/null || echo ok))"
+      rm -f /tmp/argocd
+      installed_ok=1
+      break
+    fi
+    if [ "$attempt" = 1 ]; then
+      info "argocd download/verify failed; retrying once..."
+      [ -f "$argocd_bin" ] && ! "$argocd_bin" version --client >/dev/null 2>&1 \
+        && rm -f "$argocd_bin"
+      sleep 3
+    fi
+  done
+  rm -f /tmp/argocd
+  if [ "$installed_ok" = 0 ]; then
+    fail "argocd CLI install failed after 2 attempts ($url) — manual fix: sudo curl -fsSL -o $argocd_bin $url && sudo chmod +x $argocd_bin"
+    return 1
+  fi
+  return 0
+}
 
+# Prompt twice for a password with echo off; default to "1984" on empty
+# input. Non-interactive shells get the default. Stubbed in tests.
+_read_argocd_password() {
+  local account="${1:-admin}" default_pw="${_argocd_default_password:-1984}"
+  local pw_a pw_b
   if [ -t 0 ] && [ -t 2 ]; then
-    local pw_a pw_b
     while :; do
-      printf '  argocd admin password [%s]: ' "$_argocd_default_password" >&2
+      printf '  argocd %s password [%s]: ' "$account" "$default_pw" >&2
       stty -echo 2>/dev/null || true
       IFS= read -r pw_a || pw_a=""
       stty echo 2>/dev/null || true
       printf '\n' >&2
-      pw_a="${pw_a:-$_argocd_default_password}"
-
+      pw_a="${pw_a:-$default_pw}"
       printf '  confirm: ' >&2
       stty -echo 2>/dev/null || true
       IFS= read -r pw_b || pw_b=""
       stty echo 2>/dev/null || true
       printf '\n' >&2
-      pw_b="${pw_b:-$_argocd_default_password}"
-
-      if [ "$pw_a" = "$pw_b" ]; then
-        pw="$pw_a"
-        break
-      fi
+      pw_b="${pw_b:-$default_pw}"
+      [ "$pw_a" = "$pw_b" ] && break
       printf '  passwords do not match — try again\n' >&2
     done
+    printf '%s' "$pw_a"
   else
-    pw="$_argocd_default_password"
-    info "non-interactive shell — using default admin password"
-  fi
-
-  # 3) reset admin password by patching argocd-secret
-  if [ ${#KUBECTL[@]} -eq 0 ]; then
-    fail "no kubectl/k0s available — cannot patch argocd-secret"
-    return
-  fi
-
-  if ! "${KUBECTL[@]}" -n argocd get secret argocd-secret >/dev/null 2>&1; then
-    fail "argocd-secret not found in argocd ns — gitops phase must run first"
-    return
-  fi
-
-  # bcrypt the password. Prefer htpasswd (apache2-utils); install on demand
-  # since phase 2 doesn't pull it in.
-  if ! command -v htpasswd >/dev/null 2>&1; then
-    info "installing apache2-utils (for htpasswd)"
-    apt-get install -y apache2-utils >/dev/null 2>&1 || true
-  fi
-  if ! command -v htpasswd >/dev/null 2>&1; then
-    fail "htpasswd unavailable — install apache2-utils manually and re-run --argocd-admin"
-    return
-  fi
-
-  local hash mtime
-  hash=$(htpasswd -nbBC 10 "" "$pw" | tr -d ':\n' | sed 's/^\$2y/\$2a/')
-  mtime=$(date +%FT%T%Z)
-
-  if "${KUBECTL[@]}" -n argocd patch secret argocd-secret --type merge \
-       -p "{\"stringData\":{\"admin.password\":\"$hash\",\"admin.passwordMtime\":\"$mtime\"}}" >/dev/null; then
-    pass "argocd admin password updated"
-    # initial-admin-secret is no longer authoritative once admin.password
-    # is rotated. Drop it so future operators don't try to use it.
-    "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret --ignore-not-found >/dev/null 2>&1 || true
-  else
-    fail "could not patch argocd-secret"
+    printf '%s' "$default_pw"
   fi
 }
+
+argocd_users() {
+  if [ "${SKIP_ARGOCD_USERS:-${SKIP_ARGOCD_ADMIN:-1}}" = 1 ]; then
+    phase "phase 11: argocd users  (skipped)"; return
+  fi
+  phase "phase 11: argocd users (install CLI + set admin/operator/fleet-operator passwords)"
+
+  # 1) install argocd CLI
+  _install_argocd_cli || return
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  prompt for admin/operator/fleet-operator passwords"
+    info "DRY-RUN  patch argocd-secret with bcrypt(\$pw) for each account"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot patch argocd-secret"; return
+  fi
+  if ! "${KUBECTL[@]}" -n argocd get secret argocd-secret >/dev/null 2>&1; then
+    fail "argocd-secret not found in argocd ns — gitops phase must run first"; return
+  fi
+
+  local account pw
+  for account in admin operator fleet-operator; do
+    pw="$(_read_argocd_password "$account")"
+    _argocd_set_account_password "$account" "$pw" || true
+  done
+
+  "${KUBECTL[@]}" -n argocd delete secret argocd-initial-admin-secret \
+      --ignore-not-found >/dev/null 2>&1 || true
+}
+
+# Backwards-compat alias so external runbooks pinned to argocd_admin still work.
+argocd_admin() { argocd_users "$@"; }
 
 # ---- phase 14: setup-positronic (optional) --------------------------------
 
@@ -3927,13 +4060,34 @@ print_plan() {
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--install-dma-ethercat not selected"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
-  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
+  _step $([ "${SKIP_ARGOCD_USERS:-${SKIP_ARGOCD_ADMIN:-1}}" = 0 ] && echo 1 || echo 0) "phase 11  argocd-users"                 "--argocd-users not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 12  image-overrides"              "--image-overrides not selected"
   _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 13  deployments"                  "--deployments not selected"
   _step "$SETUP_POSITRONIC"                                         "phase 14  setup-positronic"             "--setup-positronic not set"
   _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 15  validate"                     "--validate not selected"
   printf '\n'
 }
+
+# Allow sourcing for unit tests without running every phase.
+# When BOOTSTRAP_LIB_ONLY=1, just load function definitions and return.
+if [ "${BOOTSTRAP_LIB_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+# Narrow phase invocations short-circuit the full pipeline.
+# These must come AFTER the BOOTSTRAP_LIB_ONLY guard (so library-mode
+# tests that source the script don't trigger them) and BEFORE the normal
+# phase chain below.
+if [[ " ${SELECTED_PHASES[*]:-} " == *" gitops-repo-credential-only "* ]]; then
+  gitops_repo_credential_only
+  summary
+  exit "$FAIL"
+fi
+if [[ " ${SELECTED_PHASES[*]:-} " == *" gitops-rbac-only "* ]]; then
+  gitops_rbac_only
+  summary
+  exit "$FAIL"
+fi
 
 print_plan
 
@@ -3991,7 +4145,7 @@ cpu_isolation      ; guard
 log_management     ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
-argocd_admin       ; guard
+argocd_users      ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
 setup_positronic   ; guard

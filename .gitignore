@@ -9,3 +9,8 @@ __pycache__/
 docs/plans/
 docs/research/
 .claude/worktrees/
+
+# Never commit a filled repo credential — bootstrap also enforces this.
+argocd-repo-credential.yaml
+**/argocd-repo-credential.yaml
+!host-config-templates/_template/argocd-repo-credential.yaml.tpl

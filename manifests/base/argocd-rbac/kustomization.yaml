@@ -1,0 +1,20 @@
+# This overlay is intentionally kept under resources: form so that
+# `kustomize build manifests/base/argocd-rbac` emits both ConfigMap documents
+# (used by bats tests for structural verification).
+#
+# DO NOT apply this overlay with `kubectl apply -k`. The two ConfigMaps here
+# are PATCH documents — they declare only the keys this overlay owns. Applying
+# them as standalone manifests would stomp the data: blocks owned by the
+# argo-cd Helm chart.
+#
+# The bootstrap script (Task 9) MUST apply each file via:
+#   kubectl patch configmap <name> -n argocd --type merge --patch-file <file>
+#
+# This decouples `kustomize build` (used for bats testability and diff review)
+# from the actual apply path.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: argocd
+resources:
+  - argocd-cm-patch.yaml
+  - argocd-rbac-cm-patch.yaml

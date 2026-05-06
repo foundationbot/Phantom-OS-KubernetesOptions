@@ -50,18 +50,31 @@ machine already has personal git credentials.
    K8s API.** A user with a kubeconfig but without `cluster-admin` cannot
    `kubectl get secret -n argocd phantomos-kos-repo`.
 
+## v1 vs. v2 scope
+
+**v1 (this RFC, ships now):** file-based credential on disk, mode `0600`
+root-owned, applied by bootstrap. K8s RBAC + ArgoCD user RBAC + etcd
+encryption-at-rest all land in v1 because they're the defenses that actually
+gate threats #1, #3, #4 below — those don't get easier in v2.
+
+**v2 (deferred):** swap the file source for AWS Secrets Manager (or SSM
+`SecureString`) so the credential never touches the robot's disk. Sketched
+in [§ "v2 deferred: AWS-source"](#v2-deferred-aws-source) for context but not
+implemented in this RFC.
+
 ## Threat model
 
-Three surfaces leak the credential, and they need different defenses:
+Five surfaces leak the credential or grant unintended access. They need
+different defenses, and the v1/v2 split is about *which* surface gets closed
+when.
 
-| # | Surface | Defense |
-|---|---|---|
-| 1 | A non-root user with kubectl reads `secrets/phantomos-kos-repo`. | RBAC lockdown + restrict who has a kubeconfig. AWS Secrets Manager does **not** help — ArgoCD requires a K8s `Secret`, so once it's in the cluster it's readable to anyone with `get` on it. |
-| 2 | A non-root shell user on the robot reads `/etc/phantomos/argocd-repo-credential.yaml`. | Don't write the credential to disk — fetch from AWS at bringup and pipe straight into `kubectl apply -f -`. |
-| 3 | Someone dumps etcd off disk (stolen robot, image clone). | k0s `EncryptionConfiguration` with a local AES-GCM key (KMS is overkill on edge). |
-
-The ArgoCD UI is **not** a fourth surface: ArgoCD redacts `password` and
-`githubAppPrivateKey` in repo API responses for non-admin callers.
+| # | Surface | v1 defense | v2 defense |
+|---|---|---|---|
+| 1 | A non-root user with kubectl reads `secrets/phantomos-kos-repo`. | K8s `Role`/`RoleBinding` in `argocd` ns scopes `get/list/watch secrets` to ArgoCD ServiceAccounts only. `admin.conf` stays root-only. | (unchanged — same defense) |
+| 2 | A non-root shell user on the robot reads `/etc/phantomos/argocd-repo-credential.yaml`. | File mode `0600`, owner `root:root`. Bootstrap refuses to apply broader perms. Acceptable because root-only access is the same bar as `admin.conf`. | Closed: AWS-fetch pipes into `kubectl apply -f -`; nothing on disk. |
+| 3 | Someone dumps etcd off disk (stolen robot, image clone). | k0s `EncryptionConfiguration` with an AES-CBC local key at `/var/lib/k0s/pki/encryption-config.yaml`. | (unchanged) |
+| 4 | A logged-in ArgoCD UI/CLI user with `admin` rights makes destructive cluster changes (delete app, delete cluster, rotate creds). | Two non-admin ArgoCD accounts: `operator` (`role:readonly`) and `fleet-operator` (sync + runtime edits + scale, no creds read, no cluster delete). `admin` reserved for breakglass. | (unchanged) |
+| 5 | ArgoCD UI exposes credential value to non-admin user. | ArgoCD natively redacts `password` and `githubAppPrivateKey` for non-admin callers; verified by post-bringup test. | (unchanged) |
 
 ## Non-goals
 
@@ -94,52 +107,17 @@ with a fine-grained PAT scoped to `Contents: Read` on this one repo only, and
 swap to the App later — the ArgoCD `Secret` shape is the only thing that
 changes, and `bootstrap-robot.sh` already templates it.
 
-### Source of truth: AWS Secrets Manager
+### Source of truth (v1): credential file on disk
 
-The GitHub App private key + IDs live in **AWS Secrets Manager** as a single
-JSON blob:
-
-```json
-// AWS Secrets Manager: phantomos/kos-repo-credential
-{
-  "githubAppID": "<app-id>",
-  "githubAppInstallationID": "<install-id>",
-  "githubAppPrivateKey": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n"
-}
-```
-
-Why AWS:
-
-- One source-of-truth across the fleet. Rotation = update one AWS secret.
-- CloudTrail audit on every `GetSecretValue`.
-- The **operator** running `bootstrap-robot.sh` authenticates to AWS with
-  their own creds (SSO, role assumption, whatever the org uses). **Robots
-  themselves never get AWS credentials** — there's nothing on the robot for an
-  attacker to pivot from.
-- IAM scopes operator access to this one secret ARN with `secretsmanager:GetSecretValue`.
-
-SSM Parameter Store (`SecureString`) is an acceptable substitute if the org
-already uses it; the bootstrap fetch path is a one-line difference.
-
-### How the credential reaches the cluster
-
-Bootstrap fetches from AWS and **pipes straight into `kubectl apply -f -`**.
-The credential is never materialized as a file on the robot:
+The credential is a YAML file at a fixed path on the robot:
 
 ```
-aws secretsmanager get-secret-value \
-    --secret-id phantomos/kos-repo-credential \
-    --query SecretString --output text \
-  | render-argocd-secret-yaml \                   # tiny shell/jq filter
-  | kubectl apply -n argocd -f -
+/etc/phantomos/argocd-repo-credential.yaml      # mode 0600, root:root
 ```
 
-The intermediate `render-argocd-secret-yaml` step (a function inside
-`bootstrap-robot.sh`, not a separate binary) wraps the JSON into the ArgoCD
-`repository` Secret shape:
+Contents (GitHub App variant — preferred):
 
 ```yaml
-# What kubectl apply sees on stdin — never written to disk
 apiVersion: v1
 kind: Secret
 metadata:
@@ -153,33 +131,57 @@ stringData:
   githubAppID: "<app-id>"
   githubAppInstallationID: "<install-id>"
   githubAppPrivateKey: |
+    -----BEGIN RSA PRIVATE KEY-----
     ...
+    -----END RSA PRIVATE KEY-----
 ```
 
-After this, the credential exists in exactly two places on the robot:
+PAT fallback variant (used if a GitHub App isn't available yet):
 
-- **etcd** — encrypted at rest (see "etcd encryption" below).
-- **`argocd-repo-server` pod memory** — unavoidable; ArgoCD has to use the key.
-
-It does **not** exist on the robot's disk filesystem. A non-root shell user
-cannot `cat` it.
-
-### Fallback path: `--repo-credential-file`
-
-For robots being bootstrapped from an operator machine that can't reach AWS
-(air-gapped lab, contractor laptop without IAM), accept a flag:
-
-```
-sudo bash bootstrap-robot.sh --repo-credential-file ./creds.yaml
+```yaml
+stringData:
+  type: git
+  url: https://github.com/foundationbot/Phantom-OS-KubernetesOptions
+  username: x-access-token
+  password: <PAT>
 ```
 
-Bootstrap reads the file, applies it, **does not copy it onto the robot**.
-The file lives only on the operator's machine. Bootstrap refuses files with
-mode broader than `0600`. This path exists so we have an answer when AWS is
-unreachable; the AWS path is the default and what we document in the
-playbook.
+Provisioning paths, in order of preference:
 
-### RBAC lockdown (closes threat #1)
+1. **`--repo-credential-file <path>` flag.** Operator passes a path during
+   bootstrap; the file is read once and applied. Default behavior: bootstrap
+   copies the file to `/etc/phantomos/argocd-repo-credential.yaml` mode `0600`
+   so re-runs (rotation, repair) don't need the operator to re-supply it.
+   Pass `--repo-credential-file - --no-persist-credential` to apply from
+   stdin without writing to disk (rare; mostly for one-shot rotation).
+2. **File already at `/etc/phantomos/argocd-repo-credential.yaml`.** Bootstrap
+   detects, validates mode is `0600`, applies. This is the steady-state path
+   on subsequent re-runs and the migration path for already-deployed robots
+   (operator SCPs the file once).
+
+Bootstrap refuses to apply a credential file with mode broader than `0600` or
+ownership other than `root:root`, and refuses to start k0s before etcd
+encryption-at-rest is configured (see § "etcd encryption at rest" below).
+
+The file is **never** committed to git. Add a guard to bootstrap that fails
+if it detects the file inside a git work tree.
+
+### v2 deferred: AWS-source
+
+When we move to AWS Secrets Manager (sketch only — not implemented in v1):
+
+- A single AWS secret `phantomos/kos-repo-credential` holds the App ID +
+  install ID + PEM as a JSON blob.
+- The operator running `bootstrap-robot.sh` authenticates to AWS with their
+  own creds; robots themselves never get AWS credentials.
+- Bootstrap pipes `aws secretsmanager get-secret-value` → render-shim →
+  `kubectl apply -f -`. Nothing on disk.
+
+This closes threat #2 entirely. Until v2 ships, threat #2 is bounded by file
+permissions: a non-root shell user cannot read the file, and `admin.conf` is
+already root-only, so the bar is the same as for cluster admin.
+
+### Kubernetes RBAC lockdown (closes threat #1)
 
 Once the Secret is in the cluster, anyone with `get` on `secrets` in `argocd`
 can read it. Defenses:
@@ -194,70 +196,204 @@ can read it. Defenses:
 - **Audit policy** logs `get`/`list` on `secrets` in `argocd`. Even if RBAC
   fails open, we see it.
 
-These pieces ship as a small kustomize overlay applied during the same
-bootstrap phase. Spelled out in detail in the bootstrap section below.
+These pieces ship as a small kustomize overlay applied during the
+`gitops` bootstrap phase. Spelled out in detail in the bootstrap section
+below.
+
+### ArgoCD account RBAC (closes threat #4)
+
+Today the cluster has only one ArgoCD account: `admin`. Bootstrap sets the
+password via [argocd_admin()](../../scripts/bootstrap-robot.sh#L2057) and
+that's the only login. v1 introduces two additional accounts so day-to-day
+operators don't log in as `admin`:
+
+| Account | ArgoCD role | Intended user |
+|---|---|---|
+| `admin` | `role:admin` (built-in) | Breakglass only. Password lives in 1Password / sealed envelope. |
+| `operator` | `role:readonly` (built-in) | Anyone watching the fleet. UI / `argocd app get`, no mutating actions. |
+| `fleet-operator` | `role:fleet-operator` (custom — defined below) | On-call. Sync apps, restart workloads, scale up/down. Cannot delete the cluster, cannot read repo creds. |
+
+#### `role:fleet-operator` policy
+
+ArgoCD RBAC uses Casbin; explicit `deny` rules override `allow`. Order in
+`argocd-rbac-cm.policy.csv`:
+
+```
+# allows
+p, role:fleet-operator, applications, get, */*, allow
+p, role:fleet-operator, applications, sync, */*, allow
+p, role:fleet-operator, applications, action/*, */*, allow      # exec resource actions (restart, scale via Lua)
+p, role:fleet-operator, applications, override, */*, allow      # override sync to roll back
+p, role:fleet-operator, repositories, get, *, allow
+p, role:fleet-operator, projects, get, *, allow
+p, role:fleet-operator, logs, get, */*, allow
+p, role:fleet-operator, exec, create, */*, deny                 # no kubectl-exec into pods
+p, role:fleet-operator, applications, delete, */*, deny         # no app delete
+p, role:fleet-operator, clusters, *, *, deny                    # no cluster add/edit/delete
+p, role:fleet-operator, repositories, create, *, deny
+p, role:fleet-operator, repositories, update, *, deny
+p, role:fleet-operator, repositories, delete, *, deny
+p, role:fleet-operator, accounts, *, *, deny                    # no account/password mgmt
+p, role:fleet-operator, certificates, *, *, deny
+p, role:fleet-operator, gpgkeys, *, *, deny
+
+# bind users to roles
+g, operator,        role:readonly
+g, fleet-operator,  role:fleet-operator
+```
+
+Two callouts on what fleet-operator can/cannot do:
+
+- **"Read of creds not allowed"** has two layers. The ArgoCD layer (`repositories,
+  get`) returns the `Repository` object but ArgoCD redacts `password` /
+  `githubAppPrivateKey` fields for non-admin callers natively — we get this
+  for free. The K8s layer (`kubectl get secret`) is closed by the namespace
+  `Role` in the previous section: fleet-operator's kubeconfig (if any) does
+  not bind to that Role.
+- **"Scaling up/down allowed"** is split across two surfaces:
+  - **Via ArgoCD UI**: handled by `applications, action/*` if we install the
+    standard Argo `apps/Deployment` and `apps/StatefulSet` actions, which
+    include scale up/down as Lua-defined actions.
+  - **Via direct `kubectl scale`**: requires K8s RBAC. v1 issues a
+    `fleet-operator` ServiceAccount + kubeconfig with `view` ClusterRole
+    (read everything except secrets — `secrets` is excluded from the built-in
+    `view` role) **plus** a small Role granting `update`/`patch` on
+    `*/scale` subresources (`deployments/scale`, `statefulsets/statefulsets`,
+    `replicasets/scale`). Explicitly **no** `delete` on namespaces, nodes,
+    PVs, CRDs, ClusterRoleBindings.
+
+#### Account passwords
+
+ArgoCD per-account passwords live in `argocd-secret` under
+`accounts.<name>.password` and `accounts.<name>.passwordMtime`. The existing
+[`argocd_admin()`](../../scripts/bootstrap-robot.sh#L2057) bcrypt + patch
+logic is refactored into `_argocd_set_account_password <account>` and called
+three times: `admin`, `operator`, `fleet-operator`. Bootstrap prompts for
+each interactively (with the same default-`1984` first-bringup convenience),
+and the existing `--argocd-admin` flag becomes `--argocd-users` to cover
+rotation across all three.
+
+#### `argocd-cm` accounts wiring
+
+ArgoCD only lets you log in as a non-`admin` account if `argocd-cm` declares
+it:
+
+```yaml
+# argocd-cm patch (applied via bootstrap)
+data:
+  accounts.operator: login
+  accounts.operator.enabled: "true"
+  accounts.fleet-operator: login
+  accounts.fleet-operator.enabled: "true"
+```
+
+Both pieces (`argocd-cm` accounts list + `argocd-rbac-cm` policy) ship as a
+single kustomize overlay under `manifests/base/argocd-rbac/`, applied during
+the `gitops` phase before `_argocd_set_account_password` runs.
 
 ### etcd encryption at rest (closes threat #3)
 
-k0s supports [`EncryptionConfiguration`](https://docs.k0sproject.io/stable/configuration/#specapiserverextraargs)
-via `--encryption-provider-config`. Use AES-GCM with a 32-byte local key,
-generated per-robot at bringup and stored at
-`/var/lib/k0s/pki/encryption-config.yaml` mode `0600` root-owned. KMS-backed
-providers are overkill on edge — there's no AWS KMS available offline, and
-the threat being closed is "stolen robot disk" where a local key is fine
-because the disk-stealer doesn't have root.
+k0s supports [`EncryptionConfiguration`](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)
+via `--encryption-provider-config` on kube-apiserver. We use **AES-CBC** with
+a 32-byte random key generated locally at first bringup:
 
-This step happens **before** k0s starts in the bootstrap phase ordering, so
-the Secret is encrypted from the moment it's first written.
+```yaml
+# /var/lib/k0s/pki/encryption-config.yaml — mode 0600 root:root
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources: [secrets]
+    providers:
+      - aescbc:
+          keys:
+            - name: phantomos-v1
+              secret: <base64(head -c 32 /dev/urandom)>
+      - identity: {}
+```
+
+Why AES-CBC over the alternatives:
+
+- **`aesgcm`** requires per-~200k-write key rotation; too operationally heavy.
+- **`secretbox`** is fine but offers no advantage over AES-CBC for our threat
+  model.
+- **`kms`** envelope encryption is the cloud answer; on edge there's no KMS
+  to talk to offline. The local-key approach blocks "stolen disk" because the
+  attacker doesn't have root on a running k0s — they have the disk's bytes.
+
+The key is generated **per robot** (not per fleet) at first bringup. Lose the
+key → lose etcd readability, so bootstrap also writes a backup copy at
+`/etc/phantomos/etcd-encryption-key.bak` mode `0600` root-owned, and the
+operations runbook documents how to recover from a partial-disk loss.
+
+Order matters: this step happens **before** k0s starts in the bootstrap phase
+ordering, so every Secret (including the repo credential) is encrypted from
+the moment it's first written. Retrofit on already-deployed robots requires a
+k0s restart and a one-time read-and-rewrite of existing Secrets — covered in
+the migration playbook.
 
 ### `bootstrap-robot.sh` changes
 
-Two new steps in the `gitops` phase
-([../../scripts/bootstrap-robot.sh](../../scripts/bootstrap-robot.sh) — see
-`gitops()` near line 1077), running **before** `_gitops_render_app` and the
-`kubectl apply` of any Application CR:
-
-```
-gitops()
-  → terraform install of argocd Helm           (existing)
-  → _gitops_apply_repo_rbac                    (NEW)
-       - kubectl apply Role + RoleBinding scoping secret reads in argocd
-         to ArgoCD ServiceAccounts only
-  → _gitops_apply_repo_credential              (NEW)
-       - source = AWS Secrets Manager (default), or --repo-credential-file
-       - AWS path:
-            aws secretsmanager get-secret-value ...
-              | _render_argocd_repo_secret_yaml
-              | kubectl apply -n argocd -f -
-         credential never touches disk; intermediate buffers are pipe-only
-       - file path: read once, kubectl apply, never copy to robot
-       - poll until `argocd repo list` shows status=Successful, or fail loud
-  → _gitops_render_app                         (existing)
-  → kubectl apply Application CR               (existing)
-```
-
-A separate earlier phase enables k0s etcd encryption-at-rest:
+Phase ordering with new steps (NEW marked):
 
 ```
 deps()
   → ...existing host prep...
-  → _ensure_etcd_encryption_config             (NEW)
+  → _ensure_etcd_encryption_config             (NEW, BEFORE k0s start)
        - if /var/lib/k0s/pki/encryption-config.yaml missing,
-         generate AES-GCM key, write file mode 0600 root:root
+         generate AES-CBC key, write file mode 0600 root:root
+       - back up key to /etc/phantomos/etcd-encryption-key.bak (0600 root)
        - configure k0s to load it via --encryption-provider-config
        - this runs BEFORE k0s start, so all subsequent Secrets are
          encrypted from creation
+
+gitops()
+  → terraform install of argocd Helm           (existing)
+  → _gitops_apply_secret_rbac                  (NEW)
+       - kubectl apply Role + RoleBinding (manifests/base/argocd-secret-rbac/)
+         scoping secret reads in argocd to ArgoCD ServiceAccounts only
+  → _gitops_apply_argocd_user_rbac             (NEW)
+       - kubectl apply patches (manifests/base/argocd-rbac/) on
+         argocd-cm (accounts.operator/.fleet-operator) and
+         argocd-rbac-cm (policy.csv with role:fleet-operator)
+  → _gitops_apply_repo_credential              (NEW)
+       - source = --repo-credential-file <path>, else
+                  /etc/phantomos/argocd-repo-credential.yaml
+       - validate: mode 0600, owner root:root; reject otherwise
+       - validate: file is not inside a git work tree
+       - kubectl apply -n argocd -f <path>
+       - if --repo-credential-file given and file is not already at the
+         canonical path, copy to /etc/phantomos/... 0600 root unless
+         --no-persist-credential
+       - poll until `argocd repo list` shows status=Successful, or fail loud
+  → _gitops_render_app                         (existing)
+  → kubectl apply Application CR               (existing)
+
+argocd_users() (renamed from argocd_admin())
+  → install argocd CLI (existing)
+  → _argocd_set_account_password admin
+  → _argocd_set_account_password operator
+  → _argocd_set_account_password fleet-operator
+       - bcrypt via htpasswd, patch argocd-secret stringData
+         accounts.<name>.password / .passwordMtime
+       - default "1984" only on first bringup; rotation requires explicit input
+       - --argocd-users flag replaces --argocd-admin (with backwards-compat alias)
 ```
 
-Idempotency: `kubectl apply` of the Secret is naturally idempotent; the key
-file is written once and reused on subsequent runs. Rotation flow:
+Idempotency: `kubectl apply` of the Secret and the RBAC overlays is naturally
+idempotent. The encryption key file is written once and reused on subsequent
+runs. Password updates are explicit per-account.
 
-- **Routine**: update the AWS secret value, run `bootstrap-robot.sh --gitops
-  --rotate-repo-credential` against each robot. Same code path, just skips
-  re-applying terraform / Application CRs.
+Rotation flow:
+
+- **Routine repo credential rotation** (90d): mint a new GitHub App key,
+  update `/etc/phantomos/argocd-repo-credential.yaml` on each robot
+  (operator SCPs the new file), run
+  `bootstrap-robot.sh --gitops-repo-credential-only`. Same code path.
 - **Emergency**: revoke at GitHub first (fail-closed), then fan out the new
-  AWS value. ArgoCD sits at "auth failed" for the gap, which is acceptable —
+  file. ArgoCD sits at "auth failed" for the gap, which is acceptable —
   workloads on disk keep running, only new reconciles stall.
+- **Account password rotation**: `bootstrap-robot.sh --argocd-users` re-prompts
+  for the password of each account. No file involved.
 
 `DEFAULT_REPO_URL` stays HTTPS; `phantomos-app.yaml.tpl` stays unchanged. The
 match between the template's `repoURL` and the Secret's `url` field is what
@@ -266,75 +402,94 @@ binds them — ArgoCD picks the longest-prefix match.
 ### Migration for already-deployed robots
 
 A short playbook (lives in [`../operations.md`](../operations.md), not this
-RFC). Operator runs from a workstation with both AWS creds and a Tailscale
-kubeconfig per robot:
+RFC). Operator runs from a workstation with a Tailscale kubeconfig per robot
+plus the credential file generated once locally:
 
-1. Confirm AWS secret `phantomos/kos-repo-credential` exists and is current.
+1. Generate `argocd-repo-credential.yaml` once on the operator workstation
+   (chmod `0600`).
 2. For each robot:
    ```
-   bootstrap-robot.sh --gitops-repo-credential-only --context=<robot>
-   # or, manually:
-   aws secretsmanager get-secret-value --secret-id phantomos/kos-repo-credential \
-       --query SecretString --output text \
-     | _render_argocd_repo_secret_yaml \
-     | kubectl --context=<robot> apply -n argocd -f -
+   scp -p argocd-repo-credential.yaml \
+       root@<robot>:/etc/phantomos/argocd-repo-credential.yaml
+   ssh root@<robot> 'chmod 0600 /etc/phantomos/argocd-repo-credential.yaml \
+                  && chown root:root /etc/phantomos/argocd-repo-credential.yaml'
+   ssh root@<robot> 'bootstrap-robot.sh --gitops-repo-credential-only'
    kubectl --context=<robot> -n argocd \
        annotate application phantomos-<robot>-core \
        argocd.argoproj.io/refresh=hard --overwrite
    argocd app get phantomos-<robot>-core   # expect Synced/Healthy
    ```
-3. Apply the RBAC overlay (`_gitops_apply_repo_rbac`) the same way.
-4. Etcd encryption can't be retrofit without restarting k0s — schedule per
-   robot as a separate maintenance window. Until then, threat #3 is open
-   only for robots that haven't been re-bootstrapped.
-5. Only after **every** robot reports green on the credential step, flip the
-   repo to private.
+3. Apply the K8s RBAC overlay (`_gitops_apply_secret_rbac`) and ArgoCD
+   account RBAC overlay (`_gitops_apply_argocd_user_rbac`) the same way:
+   `bootstrap-robot.sh --gitops-rbac-only`.
+4. Provision the operator + fleet-operator passwords:
+   `bootstrap-robot.sh --argocd-users`.
+5. **Etcd encryption** can't be retrofit without a k0s restart and a one-time
+   read-and-rewrite of existing Secrets (`kubectl get secrets -A -o json |
+   kubectl replace -f -`). Schedule per robot as a separate maintenance
+   window. Until then, threat #3 stays open only for robots that haven't
+   been re-bootstrapped — track in the migration tracker.
+6. Only after **every** robot reports green on step 2, flip the repo to
+   private.
 
-The annotation forces a fresh repo connection so we don't trust a cached
-"public, no auth needed" state.
+The `refresh=hard` annotation forces a fresh repo connection so we don't
+trust a cached "public, no auth needed" state.
 
 ## Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
 | One robot misses the migration step → silent reconcile failure after flip. | Pre-flip verification step in [../making-repo-private.md](../making-repo-private.md): enumerate every robot's `argocd app list` output. No flip until all green. |
-| Non-root shell user reads the credential off disk. | Closed: AWS-fetch-at-bringup pipes straight to `kubectl apply -f -`; the credential never lives on the robot's filesystem. The fallback file path lives only on the operator's workstation. |
-| Non-root user with kubeconfig reads the K8s Secret. | RBAC `Role` + `RoleBinding` in `argocd` ns scopes `secrets` access to ArgoCD ServiceAccounts only. `admin.conf` stays root-only. Audit policy logs any `get/list secrets`. |
-| Stolen robot disk → etcd dump leaks the secret. | k0s `EncryptionConfiguration` (AES-GCM, local key at `/var/lib/k0s/pki/encryption-config.yaml` mode 0600 root). Configured before k0s start. |
-| Operator's AWS creds compromised. | IAM scopes the operator's role to `secretsmanager:GetSecretValue` on this one ARN. CloudTrail flags unusual fetches. Routine GitHub App key rotation limits the window. |
-| GitHub App private key gets baked into a robot disk image. | Closed: the key isn't on disk at all. Imaging never touches it. |
+| Non-root shell user reads the credential off disk. | v1: file mode `0600` `root:root`; bootstrap rejects broader perms. Same access bar as `admin.conf`. v2: closed by AWS-fetch (no file). |
+| Non-root user with kubeconfig reads the K8s Secret. | `Role` + `RoleBinding` in `argocd` ns scopes `secrets` access to ArgoCD ServiceAccounts only. `admin.conf` stays root-only. Audit policy logs any `get/list secrets`. |
+| Stolen robot disk → etcd dump leaks the secret. | k0s `EncryptionConfiguration` (AES-CBC, local 32-byte key at `/var/lib/k0s/pki/encryption-config.yaml` mode 0600 root). Configured before k0s start. |
+| `fleet-operator` ArgoCD user deletes apps or rotates creds. | Custom `role:fleet-operator` with explicit `deny` on `applications, delete`, `clusters, *`, `repositories, create/update/delete`, `accounts, *`, `certificates, *`, `gpgkeys, *`. Casbin `deny` overrides `allow`. |
+| `fleet-operator` `kubectl` user `kubectl delete ns argocd` or scales nodes. | K8s RBAC: fleet-operator kubeconfig binds `view` + a Role granting only `update/patch` on `*/scale` subresources. No `delete` on namespaces, nodes, PVs, CRDs, ClusterRoleBindings. |
+| Credential file gets accidentally committed to git. | Bootstrap refuses to apply a file inside a git work tree. `.gitignore` carries the canonical path. Periodic `gitleaks` scan in CI on this repo. |
+| GitHub App private key gets baked into a robot disk image. | Image pipeline forbidden from including `/etc/phantomos/argocd-repo-credential.yaml`. Bootstrap injects it at first boot, not at image build. |
 | Operator's `kubectl` context config gets stale → applies to wrong robot. | Migration playbook uses `--context=<robot>` explicitly + verifies `kubectl config current-context` before each apply. |
-| ArgoCD UI exposes the credential to a non-admin user. | ArgoCD redacts `password` and `githubAppPrivateKey` for non-admin callers. Verify with a non-admin login as part of post-flip verification. |
-| ArgoCD upgrade changes secret schema. | Pinned ArgoCD chart version in terraform; release notes review on bump. |
+| ArgoCD UI exposes the credential to a non-admin user. | ArgoCD redacts `password` and `githubAppPrivateKey` for non-admin callers. Verified by post-flip test logging in as `operator` and `fleet-operator`. |
+| Etcd encryption key file lost / corrupted. | Bootstrap also writes `/etc/phantomos/etcd-encryption-key.bak` mode 0600 root. Operations runbook documents recovery; without the key, etcd Secrets are unreadable and must be recreated. |
+| ArgoCD upgrade changes secret or RBAC schema. | Pinned ArgoCD chart version in terraform; release notes review on bump; verification includes login-as-`operator`/-`fleet-operator` regression test. |
 
 ## Verification
 
-- Unit-ish: a shellcheck-clean shim for `_gitops_apply_repo_credential` and
-  `_render_argocd_repo_secret_yaml` with a fake `kubectl` and a fake `aws`
-  CLI that records invocations. Assert: idempotency on re-run; failure when
-  AWS returns no secret; the rendered YAML is structurally valid; the
-  credential string never appears in any temp file or env-var dump from
-  bootstrap (`set -x` log review).
-- Disk-residue check on a test robot: after `bootstrap-robot.sh --gitops`,
-  run `grep -r "BEGIN RSA PRIVATE KEY" /etc /var /tmp /root 2>/dev/null` —
-  expect zero matches outside `/var/lib/k0s` (etcd, encrypted).
-- RBAC test: `kubectl --as=system:serviceaccount:default:default -n argocd
-  get secret phantomos-kos-repo` — expect `Forbidden`. Same with a
-  non-cluster-admin human kubeconfig.
-- Etcd encryption test: `etcdctl get /registry/secrets/argocd/phantomos-kos-repo`
-  on the robot — expect ciphertext bytes, not the PEM.
+- Unit-ish: shellcheck-clean shim for `_gitops_apply_repo_credential`,
+  `_argocd_set_account_password`, `_ensure_etcd_encryption_config` with a
+  fake `kubectl` that records invocations. Assert: idempotency on re-run;
+  failure on credential file with mode `0644`; failure when credential file
+  is inside a git work tree; YAML structurally valid.
+- File-perm check: `stat -c %a /etc/phantomos/argocd-repo-credential.yaml`
+  returns `600`; `stat -c %U` returns `root`.
+- K8s RBAC test:
+  - `kubectl --as=system:serviceaccount:default:default -n argocd get secret
+    phantomos-kos-repo` → `Forbidden`.
+  - Issue a fleet-operator kubeconfig; `kubectl --kubeconfig=fleet-operator.kubeconfig
+    -n argocd get secret phantomos-kos-repo` → `Forbidden`.
+  - With same kubeconfig: `kubectl scale deploy/foo --replicas=2` → `Allowed`;
+    `kubectl delete ns nimbus` → `Forbidden`.
+- ArgoCD RBAC test:
+  - `argocd login` as `operator` → `argocd app sync phantomos-<robot>-core`
+    fails with permission denied; `argocd app get` succeeds.
+  - `argocd login` as `fleet-operator` → `argocd app sync` succeeds;
+    `argocd app delete` fails; `argocd repo add` fails;
+    `argocd repo get <repo>` returns redacted password fields.
+- Etcd encryption test: on the robot, `k0s etcd member-list` then
+  `etcdctl get /registry/secrets/argocd/phantomos-kos-repo` → expect
+  `k8s:enc:aescbc:v1:phantomos-v1:` prefix + ciphertext, **not** the PEM
+  string.
 - End-to-end on a test robot:
   1. Make a fresh fork of this repo and set it private.
-  2. Provision a test GitHub App against the fork; store its key in a test
-     AWS secret `phantomos-test/kos-repo-credential`.
-  3. Run `bootstrap-robot.sh --gitops` with `AWS_PROFILE` pointed at a role
-     that can read that secret.
-  4. Confirm `argocd app list` shows `Synced/Healthy` for `phantomos-<robot>-core`.
-  5. Push a trivial manifest change to the fork; confirm reconcile picks it up
-     within the configured interval.
-  6. Update the AWS secret with a new App key; run
-     `bootstrap-robot.sh --gitops --rotate-repo-credential`; confirm
-     reconciles continue and old key revocation at GitHub doesn't break sync.
+  2. Provision a test GitHub App against the fork; render an
+     `argocd-repo-credential.yaml` for it.
+  3. Run `bootstrap-robot.sh --gitops --repo-credential-file ./creds.yaml`.
+  4. Confirm `argocd app list` shows `Synced/Healthy` for
+     `phantomos-<robot>-core`.
+  5. Push a trivial manifest change to the fork; confirm reconcile picks it
+     up within the configured interval.
+  6. Drop a new credential file at `/etc/phantomos/argocd-repo-credential.yaml`;
+     run `bootstrap-robot.sh --gitops-repo-credential-only`; confirm reconciles
+     continue and old key revocation at GitHub doesn't break sync.
   7. Revoke the App install; confirm `argocd-repo-server` logs surface 401 and
      `argocd app sync` fails clearly.
 - Pre-flip on the real fleet: every robot reports `Synced/Healthy` against the
@@ -343,35 +498,46 @@ The annotation forces a fresh repo connection so we don't trust a cached
 
 ## Open questions
 
-1. GitHub App vs. PAT for v1 — depends on org-admin availability this week.
-   Either way the AWS secret JSON shape and the bootstrap fetch path are the
-   same; only the rendered YAML keys differ.
-2. AWS Secrets Manager vs. SSM Parameter Store `SecureString` — pick whichever
-   the org already uses. Bootstrap difference is a one-liner.
-3. Etcd encryption key custody: per-robot local key (proposed) vs. a shared
-   key fetched from AWS at bringup. Local is simpler and the threat being
-   closed is "stolen disk" where a local-key blocks a non-root attacker
-   anyway. Revisit if disk theft becomes a realistic operator threat.
-4. Should the credential live in `argocd` namespace only, or also be replicated
-   to a future shared namespace if other workloads need to pull from this
-   repo? Defer until a second consumer appears.
-5. ApplicationSet generators (RFC 0001 territory) will need the same Secret —
-   confirm the label-based discovery is sufficient and we don't need an
-   `ApplicationSet`-specific credential template.
+1. **GitHub App vs. PAT for v1** — depends on org-admin availability this
+   week. Either way the credential file shape and the bootstrap apply path
+   are the same; only the YAML keys differ.
+2. **Etcd encryption key custody** — per-robot local key (proposed) vs. a
+   shared key. Local is simpler and the threat being closed is "stolen disk"
+   where a local-key blocks a non-root attacker anyway. Revisit if disk theft
+   becomes a realistic operator threat.
+3. **Should the repo credential live in `argocd` namespace only**, or also
+   be replicated to a future shared namespace if other workloads need to
+   pull from this repo? Defer until a second consumer appears.
+4. **ApplicationSet generators** (RFC 0001 territory) will need the same
+   Secret — confirm the label-based discovery is sufficient and we don't
+   need an `ApplicationSet`-specific credential template.
+5. **Where is `fleet-operator`'s K8s kubeconfig generated and distributed?**
+   v1 proposes generating it on the robot during `bootstrap-robot.sh
+   --argocd-users` and printing it for the operator to copy. Could also
+   live in a per-operator file on a shared workstation. Punt to ops runbook.
 
 ## Critical files
 
 - [../../scripts/bootstrap-robot.sh](../../scripts/bootstrap-robot.sh) — new
-  `_gitops_apply_repo_rbac`, `_gitops_apply_repo_credential`,
-  `_render_argocd_repo_secret_yaml`, and `_ensure_etcd_encryption_config`
-  functions.
+  `_ensure_etcd_encryption_config`, `_gitops_apply_secret_rbac`,
+  `_gitops_apply_argocd_user_rbac`, `_gitops_apply_repo_credential`,
+  `_argocd_set_account_password`. Rename phase 9 from `argocd_admin` to
+  `argocd_users`; keep `--argocd-admin` as a compat alias.
 - [../../host-config-templates/_template/phantomos-app.yaml.tpl](../../host-config-templates/_template/phantomos-app.yaml.tpl)
   — unchanged; documented here for reference.
-- New: `manifests/base/argocd-repo-rbac/` — kustomize overlay with the `Role`
-  + `RoleBinding` scoping `secrets` access in `argocd` ns.
-- New: AWS Secrets Manager entry `phantomos/kos-repo-credential` — JSON
-  containing App ID / install ID / PEM (or `username`/`password` for PAT
-  fallback).
-- [../operations.md](../operations.md) — fleet migration playbook entry.
-- [../making-repo-private.md](../making-repo-private.md) — sequencing doc that
-  consumes this RFC.
+- New: `manifests/base/argocd-secret-rbac/` — kustomize overlay with the
+  K8s `Role` + `RoleBinding` scoping `secrets` access in `argocd` ns.
+- New: `manifests/base/argocd-rbac/` — kustomize overlay with `argocd-cm`
+  accounts patch (`operator`, `fleet-operator`) and `argocd-rbac-cm`
+  `policy.csv` defining `role:fleet-operator`.
+- New: `manifests/base/fleet-operator-kubectl-rbac/` — kustomize overlay
+  defining the `fleet-operator` ServiceAccount, the `view` ClusterRoleBinding,
+  and the cluster-wide Role granting `update/patch` on `*/scale` only.
+- New: `host-config-templates/_template/argocd-repo-credential.yaml.tpl` —
+  template for operators to fill in (App ID / install ID / PEM, or PAT).
+  **Not** committed with values; the canonical filled file at
+  `/etc/phantomos/argocd-repo-credential.yaml` is never in git.
+- [../operations.md](../operations.md) — fleet migration playbook entry,
+  fleet-operator kubeconfig distribution, etcd-key recovery runbook.
+- [../making-repo-private.md](../making-repo-private.md) — sequencing doc
+  that consumes this RFC.

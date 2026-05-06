@@ -50,6 +50,25 @@ resource "helm_release" "argocd" {
         nodePortHttps = var.argocd_https_nodeport
       }
     }
+
+    # Disable Dex — login goes through ArgoCD's built-in user store
+    # (admin/operator/fleet-operator). Disabling drops the chart-installed
+    # argocd-dex-server SA + its Secret-reading Role.
+    # Key verified against chart 9.5.11 values.yaml.
+    dex = {
+      enabled = false
+    }
+
+    # redisSecretInit generates the argocd-redis secret used by the in-cluster
+    # Redis StatefulSet. The chart README states: "If disabled, secret must be
+    # provisioned by alternative methods." We have no alternative provisioner,
+    # so we leave this ENABLED to avoid breaking in-cluster Redis.
+    # Key redisSecretInit.enabled verified against chart 9.5.11 values.yaml.
+    # If a future operator adds secret management, set enabled = false and
+    # remove argocd-redis-secret-init from the RoleBinding subjects list.
+    redisSecretInit = {
+      enabled = true
+    }
   })]
 
   wait           = true

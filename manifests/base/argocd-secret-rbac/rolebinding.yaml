@@ -1,0 +1,66 @@
+# Subject names follow the argo-cd Helm chart fullname pattern <release>-<component>
+# (release name "argocd"). Verified against chart version 9.5.11 (pinned in
+# terraform/variables.tf as argocd_chart_version).
+#
+# Components included / excluded:
+#   INCLUDED: argocd-server, argocd-repo-server, argocd-application-controller,
+#             argocd-applicationset-controller, argocd-notifications-controller,
+#             argocd-redis-secret-init (redisSecretInit.enabled=true; keeps the
+#             in-cluster Redis secret-init Job functional),
+#             argocd-commit-server (present in 7.x; no-op when chart disables it).
+#   EXCLUDED: argocd-dex-server (dex.enabled=false in terraform/main.tf; SA is
+#             not created by the chart when Dex is disabled).
+#
+# Design rationale:
+#   The chart-installed argocd-application-controller ClusterRole grants
+#   cluster-wide `*` on Secrets. This is intrinsic to GitOps: the application-
+#   controller must be able to manage Secrets in target namespaces (e.g.
+#   dockerhub-creds in dma-video). That broader access is accepted and cannot
+#   be removed without breaking reconciliation on single-cluster setups.
+#
+#   The purpose of THIS overlay is different: it is an explicit, auditable,
+#   namespace-scoped grant for the non-controller ArgoCD SAs (server,
+#   repo-server, applicationset-controller, notifications-controller,
+#   redis-secret-init, commit-server) so they do not depend on any chart-
+#   rendered ClusterRoleBinding that we don't fully control. The application-
+#   controller SA is also listed here for completeness and auditability, even
+#   though its ClusterRole already covers the argocd namespace.
+#
+#   The threat-model defense against non-ArgoCD humans reading Secrets is K8s
+#   RBAC on human kubeconfigs (admin-only), not SA scoping.
+#
+# If a future chart version adds or removes a component SA, update this list
+# and the bats test in tests/bash/manifest_overlays.bats.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-secret-reader
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: argocd-server
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-repo-server
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-application-controller
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-applicationset-controller
+    namespace: argocd
+  - kind: ServiceAccount
+    name: argocd-notifications-controller
+    namespace: argocd
+  # redis-secret-init: runs when in-cluster Redis is used (redisSecretInit.enabled=true).
+  - kind: ServiceAccount
+    name: argocd-redis-secret-init
+    namespace: argocd
+  # commit-server: introduced in newer chart versions; no-op when disabled.
+  - kind: ServiceAccount
+    name: argocd-commit-server
+    namespace: argocd

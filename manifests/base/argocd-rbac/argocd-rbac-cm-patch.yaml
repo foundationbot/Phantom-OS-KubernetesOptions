@@ -1,0 +1,45 @@
+# Applied via `kubectl patch configmap argocd-rbac-cm -n argocd --type merge --patch-file <this-file>`
+# from the bootstrap script (Task 9). Field stomp risk is avoided because only
+# the keys declared here are written; all other keys in the chart-owned argocd-rbac-cm
+# are left untouched.
+#
+# Do NOT apply with `kubectl apply -k` — that would replace the entire ConfigMap
+# and destroy chart-managed keys.
+#
+# Defines role:fleet-operator and binds operator → role:readonly,
+# fleet-operator → role:fleet-operator.
+# Casbin: deny rules override allow rules, so the deny block is what makes
+# the negative permissions stick.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  policy.default: ""
+  policy.csv: |
+    # role:fleet-operator — sync apps, run resource actions (scale, restart),
+    # override sync, read repos/projects/logs. No delete, no creds-write,
+    # no cluster ops, no kubectl-exec.
+    p, role:fleet-operator, applications, get, */*, allow
+    p, role:fleet-operator, applications, sync, */*, allow
+    p, role:fleet-operator, applications, action/*, */*, allow
+    p, role:fleet-operator, applications, override, */*, allow
+    p, role:fleet-operator, repositories, get, *, allow
+    p, role:fleet-operator, projects, get, *, allow
+    p, role:fleet-operator, logs, get, */*, allow
+
+    # explicit denies (deny overrides allow in Casbin)
+    p, role:fleet-operator, exec, create, */*, deny
+    p, role:fleet-operator, applications, delete, */*, deny
+    p, role:fleet-operator, clusters, *, *, deny
+    p, role:fleet-operator, repositories, create, *, deny
+    p, role:fleet-operator, repositories, update, *, deny
+    p, role:fleet-operator, repositories, delete, *, deny
+    p, role:fleet-operator, accounts, *, *, deny
+    p, role:fleet-operator, certificates, *, *, deny
+    p, role:fleet-operator, gpgkeys, *, *, deny
+
+    # bindings
+    g, operator, role:readonly
+    g, fleet-operator, role:fleet-operator
