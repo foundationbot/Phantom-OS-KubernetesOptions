@@ -9,6 +9,12 @@ ETCD_ENCRYPTION_KEY_NAME="${ETCD_ENCRYPTION_KEY_NAME:-phantomos-v1}"
 _ensure_etcd_encryption_config() {
   if [ -f "$ETCD_ENCRYPTION_CONFIG_PATH" ]; then
     info "etcd encryption config already present at $ETCD_ENCRYPTION_CONFIG_PATH"
+    # Defensive: re-assert ownership/perms in case a prior run failed
+    # before the chown step.
+    if id kube-apiserver >/dev/null 2>&1; then
+      chown kube-apiserver:root "$ETCD_ENCRYPTION_CONFIG_PATH" 2>/dev/null || true
+      chmod 0640 "$ETCD_ENCRYPTION_CONFIG_PATH" 2>/dev/null || true
+    fi
     return 0
   fi
 

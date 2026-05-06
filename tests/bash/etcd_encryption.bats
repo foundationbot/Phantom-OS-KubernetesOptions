@@ -40,6 +40,20 @@ setup() {
   [ "$before" = "$after" ]
 }
 
+@test "_ensure_etcd_encryption_config re-asserts mode 0640 on idempotent re-run" {
+  _ensure_etcd_encryption_config
+  # Simulate a partial failure: drop the file's group readability.
+  chmod 0600 "$ETCD_ENCRYPTION_CONFIG_PATH"
+  # Re-run; mode should be restored if id kube-apiserver exists, else stay 0600.
+  _ensure_etcd_encryption_config
+  mode=$(stat -c '%a' "$ETCD_ENCRYPTION_CONFIG_PATH")
+  if id kube-apiserver >/dev/null 2>&1; then
+    [ "$mode" = "640" ]
+  else
+    [ "$mode" = "600" ]
+  fi
+}
+
 @test "deps() phase contains _ensure_etcd_encryption_config call" {
   grep -q '_ensure_etcd_encryption_config' "$REPO_ROOT/scripts/bootstrap-robot.sh"
   # Confirm it appears inside the deps() function body.
