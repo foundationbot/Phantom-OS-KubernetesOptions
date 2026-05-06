@@ -5,12 +5,16 @@ variable "kubeconfig" {
 }
 
 variable "argocd_chart_version" {
-  # Pinned to 7.6.12 (stable 7.x line, released 2024-10). SA names and key
-  # values (dex.enabled, redisSecretInit.enabled) were verified against this
-  # version's values.yaml. Bump within 7.x; verify SA names on major bumps.
-  description = "argo-cd Helm chart version (from https://github.com/argoproj/argo-helm). SA names and key values (dex.enabled, redisSecretInit.enabled) verified against 7.6.12."
+  # Pinned to 9.5.11 — ships ArgoCD server v3.3.9, which matches the argocd
+  # CLI version that bootstrap-robot.sh's _install_argocd_cli currently
+  # downloads (latest release). Earlier 7.x line shipped server v2.x and
+  # caused gRPC-version mismatches with v3 CLIs. SA names and key values
+  # (dex.enabled, redisSecretInit.enabled, server.service.nodePortHttp/s)
+  # verified against this chart version's values.yaml. Bump within 9.x;
+  # verify SA names + values keys on major bumps (9.x → 10.x).
+  description = "argo-cd Helm chart version. SA names + key values verified against 9.5.11."
   type        = string
-  default     = "7.6.12"
+  default     = "9.5.11"
 }
 
 variable "argocd_namespace" {

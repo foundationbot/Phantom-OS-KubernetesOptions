@@ -45,15 +45,19 @@ _apply_repo_credential() {
     | xargs -r -I{} "${KUBECTL[@]}" -n argocd annotate {} \
         argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
 
-  # Poll: argocd repo list reports Successful within 60s.
+  # Best-effort verification: argocd repo list requires CLI auth (which the
+  # phase 9 argocd_users hasn't run yet during a fresh bringup), so we don't
+  # fail the phase if it can't connect. Real validation happens when the
+  # first Application sync hits the credential. If argocd CLI happens to be
+  # already logged in (re-runs / rotations), we surface the connection state.
   local i
-  for i in $(seq 1 30); do
+  for i in $(seq 1 15); do
     if argocd repo list 2>/dev/null | grep -q 'Successful'; then
       pass "argocd repo list reports Successful"
       return 0
     fi
     sleep 2
   done
-  fail "argocd repo list did not reach Successful within 60s"
-  return 1
+  info "argocd repo list did not report Successful in 30s (likely CLI not yet logged in — run 'argocd app sync' after argocd_users phase to verify auth)"
+  return 0
 }
