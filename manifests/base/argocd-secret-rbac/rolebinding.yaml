@@ -1,5 +1,5 @@
 # Subject names follow the argo-cd Helm chart fullname pattern <release>-<component>
-# (release name "argocd"). Verified against chart version 7.6.12 (pinned in
+# (release name "argocd"). Verified against chart version 9.5.11 (pinned in
 # terraform/variables.tf as argocd_chart_version).
 #
 # Components included / excluded:
