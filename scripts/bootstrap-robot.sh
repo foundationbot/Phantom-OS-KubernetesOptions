@@ -3450,8 +3450,11 @@ PY
 _IMAGE_STACK_MAP=""   # newline-separated: "<image>\t<stack>"
 
 _kustomize_cmd() {
+  # Standalone kustomize needs a `build` subcommand; `kubectl kustomize` and
+  # `k0s kubectl kustomize` take the path directly. Normalize all three so
+  # callers can do "$cmd <path>" without worrying which form they got.
   if command -v kustomize >/dev/null 2>&1; then
-    printf 'kustomize\n'
+    printf 'kustomize build\n'
   elif command -v kubectl >/dev/null 2>&1 && kubectl kustomize --help >/dev/null 2>&1; then
     printf 'kubectl kustomize\n'
   elif command -v k0s >/dev/null 2>&1; then
