@@ -46,6 +46,12 @@
 #                        host-config.yaml's cpuIsolation: block; no-op when
 #                        cpuIsolation.enabled is unset/false.
 #                        See docs/cpu-isolation.md.
+#   --log-management     install journald + logrotate drop-ins from
+#                        host-config.yaml's logManagement: block. Caps
+#                        journald disk usage and forces rsyslog logrotate
+#                        to honour a maxsize. Sane defaults are applied
+#                        when the block is absent (opt-out via
+#                        logManagement.enabled: false). See docs/operations.md.
 #   --gitops             terraform apply (argocd Helm) + render+apply
 #                        the per-host phantomos-<robot> Application
 #   --argocd-admin       install argocd CLI; prompt and set admin
@@ -62,6 +68,7 @@
 #   --skip-nvidia        force-skip nvidia runtime config
 #   --skip-ecat-interface skip the phase 7 ecat-interface setup
 #   --skip-cpu-isolation skip the phase 8 cpu-isolation setup
+#   --skip-log-management skip the phase 8.5 log-management setup
 #   --skip-validate      skip the final validate-local-registry.sh run
 #
 # Other flags:
@@ -282,6 +289,7 @@ SKIP_STOP_SERVICES=0
 SKIP_ETHERCAT_UNINSTALL=0
 SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
+SKIP_LOG_MANAGEMENT=0
 SKIP_INSTALL_DMA_ETHERCAT=0
 SELECTED_PHASES=()
 
@@ -313,6 +321,7 @@ while [ $# -gt 0 ]; do
     --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
     --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
+    --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
@@ -333,6 +342,8 @@ while [ $# -gt 0 ]; do
                          SKIP_ECAT_INTERFACE=1; shift ;;
     --skip-cpu-isolation)
                          SKIP_CPU_ISOLATION=1; shift ;;
+    --skip-log-management)
+                         SKIP_LOG_MANAGEMENT=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
 
@@ -517,6 +528,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_OPERATOR_UI_CONFIG=1
   SKIP_ECAT_INTERFACE=1
   SKIP_CPU_ISOLATION=1
+  SKIP_LOG_MANAGEMENT=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
@@ -532,6 +544,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
       ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
+      log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
@@ -552,7 +565,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -2011,6 +2024,145 @@ _apply_kernel_cmdline() {
   fi
 
   return 0
+}
+
+# ---- phase 8.5: log management ----------------------------------------
+#
+# Caps journald + rsyslog disk usage via drop-in config files. Real
+# incident: a Thor robot filled its 937 GB root partition with a single
+# 793 GB /var/log/syslog because the stock /etc/logrotate.d/rsyslog
+# specifies `weekly` rotation with no `maxsize`. Bootstrap writes:
+#
+#   /etc/systemd/journald.conf.d/phantomos.conf  (SystemMaxUse, SystemMaxFileSize)
+#   /etc/logrotate.d/phantomos-syslog            (sorts after rsyslog → wins)
+#
+# The upstream files are left untouched so dpkg upgrades don't trigger
+# 'modified config' prompts. logManagement.enabled: false removes our
+# drop-ins and leaves the host on stock behavior.
+
+log_management() {
+  if [ "${SKIP_LOG_MANAGEMENT:-0}" = 1 ]; then
+    phase "phase 8.5: log management  (skipped — --skip-log-management)"
+    return
+  fi
+  phase "phase 8.5: log management"
+
+  local hc_path="/etc/phantomos/host-config.yaml"
+  if [ ! -f "$hc_path" ]; then
+    hc_path="$REPO_ROOT/host-config.yaml"
+  fi
+
+  local lm_json
+  if [ -f "$hc_path" ]; then
+    if ! lm_json=$(python3 "$HOST_CONFIG_HELPER" "$hc_path" get-log-management-json 2>/dev/null); then
+      fail "host-config get-log-management-json"
+      return
+    fi
+  else
+    info "no host-config.yaml at $hc_path — applying defaults"
+    lm_json='{"enabled":true,"journald":{"systemMaxUse":"2G","systemMaxFileSize":"100M"},"rsyslog":{"maxsize":"500M","rotate":7,"frequency":"daily","compress":true}}'
+  fi
+
+  if [ "$(printf '%s' "$lm_json" | jq -r '.enabled')" = "false" ]; then
+    info "logManagement.enabled=false — removing any prior phantomos drop-ins"
+    if [ "$DRY_RUN" = 0 ]; then
+      rm -f /etc/systemd/journald.conf.d/phantomos.conf
+      rm -f /etc/logrotate.d/phantomos-syslog
+      systemctl restart systemd-journald 2>/dev/null || true
+    fi
+    pass "log-management disabled"
+    return
+  fi
+
+  local jd_use jd_file rs_size rs_rot rs_freq rs_compress
+  jd_use=$(printf '%s' "$lm_json" | jq -r '.journald.systemMaxUse')
+  jd_file=$(printf '%s' "$lm_json" | jq -r '.journald.systemMaxFileSize')
+  rs_size=$(printf '%s' "$lm_json" | jq -r '.rsyslog.maxsize')
+  rs_rot=$(printf '%s' "$lm_json" | jq -r '.rsyslog.rotate')
+  rs_freq=$(printf '%s' "$lm_json" | jq -r '.rsyslog.frequency')
+  rs_compress=$(printf '%s' "$lm_json" | jq -r '.rsyslog.compress')
+
+  # --- journald drop-in ---
+  local jd_target="/etc/systemd/journald.conf.d/phantomos.conf"
+  local jd_tmp; jd_tmp=$(mktemp)
+  cat >"$jd_tmp" <<EOF
+# Managed by scripts/bootstrap-robot.sh phase log-management.
+# Caps journald disk usage. /etc/systemd/journald.conf is left
+# untouched; this drop-in overrides only the keys we care about.
+[Journal]
+SystemMaxUse=${jd_use}
+SystemMaxFileSize=${jd_file}
+EOF
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  would install $jd_target (SystemMaxUse=$jd_use, SystemMaxFileSize=$jd_file)"
+    rm -f "$jd_tmp"
+  elif [ -f "$jd_target" ] && cmp -s "$jd_tmp" "$jd_target"; then
+    info "journald drop-in unchanged"
+    rm -f "$jd_tmp"
+  else
+    install -D -m 0644 "$jd_tmp" "$jd_target"
+    rm -f "$jd_tmp"
+    if systemctl restart systemd-journald; then
+      info "journald restarted with SystemMaxUse=$jd_use SystemMaxFileSize=$jd_file"
+    else
+      fail "systemctl restart systemd-journald"
+      return
+    fi
+  fi
+
+  # --- logrotate drop-in ---
+  local lr_target="/etc/logrotate.d/phantomos-syslog"
+  local lr_tmp; lr_tmp=$(mktemp)
+  local compress_block
+  if [ "$rs_compress" = "true" ]; then
+    compress_block=$'    compress\n    delaycompress'
+  else
+    compress_block="    nocompress"
+  fi
+  cat >"$lr_tmp" <<EOF
+# Managed by scripts/bootstrap-robot.sh phase log-management.
+# Sorts after /etc/logrotate.d/rsyslog so this stanza wins.
+/var/log/syslog
+{
+    rotate ${rs_rot}
+    ${rs_freq}
+    maxsize ${rs_size}
+    missingok
+    notifempty
+${compress_block}
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}
+EOF
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  would install $lr_target (maxsize=$rs_size, rotate=$rs_rot, $rs_freq)"
+    rm -f "$lr_tmp"
+  elif [ -f "$lr_target" ] && cmp -s "$lr_tmp" "$lr_target"; then
+    info "logrotate drop-in unchanged"
+    rm -f "$lr_tmp"
+  else
+    install -D -m 0644 "$lr_tmp" "$lr_target"
+    rm -f "$lr_tmp"
+    info "logrotate drop-in installed (maxsize=$rs_size rotate=$rs_rot $rs_freq)"
+  fi
+
+  # --- validate ---
+  if [ "$DRY_RUN" = 0 ]; then
+    if ! journalctl --header --no-pager >/dev/null 2>&1; then
+      fail "journalctl --header failed after restart"
+      return
+    fi
+    if command -v logrotate >/dev/null 2>&1; then
+      if ! logrotate --debug "$lr_target" >/dev/null 2>&1; then
+        fail "logrotate --debug parse failed for $lr_target"
+        return
+      fi
+    fi
+  fi
+
+  pass "log-management configured (journald: ${jd_use}/${jd_file}, syslog: ${rs_size}/${rs_rot}x${rs_freq})"
 }
 
 # ---- phase 9: install dma-ethercat (gates phase 10) -------------------
@@ -3601,6 +3753,7 @@ print_plan() {
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  7  ecat-interface (gates 8)"     "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  8  cpu-isolation (gates 9)"      "--skip-cpu-isolation"
+  _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--install-dma-ethercat not selected"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
@@ -3664,6 +3817,7 @@ seed_pull_secrets  ; guard
 operator_ui_config ; guard
 ecat_interface     ; guard
 cpu_isolation      ; guard
+log_management     ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
 argocd_admin       ; guard
