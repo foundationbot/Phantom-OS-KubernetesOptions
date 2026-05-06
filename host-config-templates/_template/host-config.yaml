@@ -167,6 +167,36 @@ images:
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
 
+# Log retention caps. Bootstrap phase log-management writes drop-ins
+# under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
+# /var/log/journal and /var/log/syslog from filling the root partition.
+# Drop-in style: the upstream /etc/systemd/journald.conf and
+# /etc/logrotate.d/rsyslog are left untouched, so dpkg upgrades don't
+# trigger 'modified config' prompts.
+#
+# Defaults (applied when the block is absent or has empty children):
+#   journald.systemMaxUse:      2G       # cap on /var/log/journal/ total
+#   journald.systemMaxFileSize: 100M     # rotate per-file at this size
+#   rsyslog.maxsize:            500M     # logrotate maxsize directive
+#   rsyslog.rotate:             7        # how many rotated files to keep
+#   rsyslog.frequency:          daily    # daily | weekly
+#   rsyslog.compress:           true     # gzip rotated files
+#
+# Defaults are opt-out, not opt-in: a 793 GB /var/log/syslog has filled
+# robots in the field. Set logManagement.enabled: false to suppress
+# the phase and remove any prior phantomos-* drop-ins.
+#
+# logManagement:
+#   enabled: true
+#   journald:
+#     systemMaxUse: 2G
+#     systemMaxFileSize: 100M
+#   rsyslog:
+#     maxsize: 500M
+#     rotate: 7
+#     frequency: daily
+#     compress: true
+
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal
 # kernel/runtime mounts (/dev, /dev/shm, /tmp); EVERY OTHER host path
