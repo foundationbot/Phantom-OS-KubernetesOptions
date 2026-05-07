@@ -384,6 +384,12 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "operator",
         "manifest_image": "foundationbot/argus.operator-ui",
     },
+    "yovariable-server": {
+        # DaemonSet bridging DMA shm IPC to network-accessible variable
+        # endpoints. CI publishes foundationbot/yovariable-server:V-<x.y.z>-<ts>.
+        "stack": "core",
+        "manifest_image": "foundationbot/yovariable-server",
+    },
     "dma-ethercat": {
         # Not stack-routed. Phase 9 reads images.dma-ethercat.image
         # directly to render the bootstrap-managed installer Job.

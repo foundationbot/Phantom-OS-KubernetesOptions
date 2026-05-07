@@ -73,6 +73,8 @@ stacks:
 #                          --image phantom-policies --manifest <yaml>`.
 #   operator-ui          operator stack — manifest uses
 #                          foundationbot/argus.operator-ui
+#   yovariable-server    core stack — yovariable-server DaemonSet.
+#                          manifest uses foundationbot/yovariable-server.
 #   dma-ethercat         NOT stack-routed — bootstrap-managed installer
 #                          Job. Phase 9 reads images.dma-ethercat.image
 #                          directly. Tag convention:
