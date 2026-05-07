@@ -53,6 +53,10 @@ derive_version() {
 
   if sha=$(git rev-parse --short=7 HEAD 2>/dev/null); then
     date=$(date -u +%Y%m%d)
+    # `+` and `.` only — keeps the embedded Debian Version field a
+    # "native" version (no debian_revision split), which dpkg/apt
+    # version-compare correctly. The output filename is flattened to
+    # all hyphens separately below.
     base="${base}+${date}.g${sha}"
     if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
       base="${base}+dirty"
@@ -75,7 +79,14 @@ esac
 
 DIST_DIR="$REPO_ROOT/dist"
 STAGE_DIR="$DIST_DIR/build/${PKG_NAME}_${VERSION}_${ARCH}"
-DEB_PATH="$DIST_DIR/${PKG_NAME}_${VERSION}_${ARCH}.deb"
+# Filename-only version: flatten `.` and `+` to `-` for a visually
+# consistent output name (e.g. 0.0.1+20260507.g19f774a+dirty becomes
+# 0-0-1-20260507-g19f774a-dirty). The Debian Version field embedded
+# in the package keeps `.` and `+` so it remains a valid native
+# version that dpkg/apt can version-compare correctly.
+FILENAME_VERSION="${VERSION//./-}"
+FILENAME_VERSION="${FILENAME_VERSION//+/-}"
+DEB_PATH="$DIST_DIR/${PKG_NAME}-${FILENAME_VERSION}-${ARCH}.deb"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/DEBIAN"

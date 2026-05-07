@@ -1104,7 +1104,20 @@ deps() {
   if [ "$SKIP_DEPS" = 1 ]; then phase "phase 2: deps  (skipped)"; return; fi
   phase "phase 2: deps"
 
-  apt_pkgs=(docker.io skopeo python3 curl jq git pciutils unzip)
+  apt_pkgs=(skopeo python3 curl jq git pciutils unzip)
+
+  # docker.io vs docker-ce: Ubuntu's `docker.io` and Docker Inc.'s
+  # `docker-ce` (which pulls `containerd.io`) are mutually exclusive —
+  # apt refuses to coinstall them because their containerd packages
+  # conflict. The bootstrap only needs the `docker` binary (for
+  # prime-registry-cache.sh's pull/tag/push), and either provider
+  # gives us that. So: detect docker by binary, not package name.
+  if command -v docker >/dev/null 2>&1; then
+    skip "docker already installed ($(command -v docker)) — not adding docker.io"
+  else
+    apt_pkgs+=(docker.io)
+  fi
+
   to_install=()
   for pkg in "${apt_pkgs[@]}"; do
     if dpkg -l "$pkg" 2>/dev/null | awk 'BEGIN{ok=1} /^ii/ {ok=0} END {exit ok}'; then
@@ -1117,10 +1130,19 @@ deps() {
   if [ "${#to_install[@]}" -gt 0 ]; then
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  apt-get install -y ${to_install[*]}"
-    elif apt-get update -qq && apt-get install -y "${to_install[@]}" >/dev/null; then
-      for p in "${to_install[@]}"; do pass "$p installed"; done
     else
-      fail "apt install failed for: ${to_install[*]}"
+      apt_log=$(mktemp)
+      if apt-get update -qq && apt-get install -y "${to_install[@]}" >"$apt_log" 2>&1; then
+        for p in "${to_install[@]}"; do pass "$p installed"; done
+        rm -f "$apt_log"
+      else
+        fail "apt install failed for: ${to_install[*]}"
+        # Surface the resolver's reasoning instead of swallowing it —
+        # held packages and conflicts are otherwise invisible in the
+        # run log.
+        sed 's/^/    apt: /' "$apt_log" >&2
+        rm -f "$apt_log"
+      fi
     fi
   fi
 
