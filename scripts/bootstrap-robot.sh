@@ -150,7 +150,15 @@
 #     purge workload pods        (--skip-purge-pods)
 #     stop docker containers     (--skip-docker-stop)
 #     stop system services       (--skip-stop-services)
-#     uninstall dma-ethercat     (--skip-ethercat-uninstall)
+#   pre-phases (default OFF, opt in):
+#     uninstall dma-ethercat     (--uninstall-ethercat)
+#                                Wipes /etc/dma/ via the .deb's
+#                                dma-ethercat-uninstall script. Operator
+#                                files placed under /etc/dma/ (e.g. a
+#                                customized JSON config) are removed.
+#                                Use only when you intend a clean
+#                                reinstall. Routine re-bootstraps now
+#                                preserve /etc/dma/ contents.
 #
 #    1. preflight    OS / arch / kernel / disk / sudo / port collisions
 #    2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
@@ -257,7 +265,7 @@ DRY_RUN=0
 KEEP_GOING=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_UNINSTALL=1
 SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
@@ -292,7 +300,7 @@ SKIP_NVIDIA=0
 SKIP_PURGE_PODS=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_UNINSTALL=1
 SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
@@ -351,7 +359,14 @@ while [ $# -gt 0 ]; do
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
+                         # Back-compat: now a no-op; uninstall is opt-in.
                          SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+    --uninstall-ethercat)
+                         # Explicitly run the dma-ethercat uninstaller. Wipes
+                         # /etc/dma/ — operator-placed config files there
+                         # WILL be removed. Use only when you actually want
+                         # a clean reinstall.
+                         SKIP_ETHERCAT_UNINSTALL=0; shift ;;
     --skip-ecat-interface)
                          SKIP_ECAT_INTERFACE=1; shift ;;
     --skip-cpu-isolation)
@@ -772,7 +787,7 @@ stop_existing_services() {
   done <<< "$matches"
 }
 
-# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall) ----
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
 
 # Tear down the dma-ethercat realtime control service so phase 9's
 # install lands on a clean slate.
@@ -782,7 +797,7 @@ stop_existing_services() {
 # Each step is a no-op when already in the desired state.
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -933,14 +948,18 @@ EOF
   KUBECTL=()
 }
 
-# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall)
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
 
-# Tear down the dma-ethercat realtime control service. Runs by default;
-# --skip-ethercat-uninstall opts out (use it for routine re-bootstraps
-# where the realtime stack should stay in place). Designed to run AFTER
-# purge_docker and reset_cluster so the pods that talk to ethercat are
-# already gone — stopping the service while pods are still pinging its
-# socket can leave the kernel module in a wedged state.
+# Tear down the dma-ethercat realtime control service. DEFAULT OFF — the
+# .deb's dma-ethercat-uninstall script wipes /etc/dma/, removing operator-
+# placed config JSONs. Routine bootstrap re-runs leave the realtime stack
+# (and /etc/dma/ contents) untouched; phase 9 just refreshes the env file
+# to point DMA_CONFIG at whatever host-config dmaEthercat.configPath
+# specifies. Pass --uninstall-ethercat when you actually want a clean
+# reinstall. Designed to run AFTER purge_docker and reset_cluster so the
+# pods that talk to ethercat are already gone — stopping the service
+# while pods are still pinging its socket can leave the kernel module in
+# a wedged state.
 #
 # Sequence (each step independent + idempotent):
 #   1. if no unit file installed                  -> skip whole phase
@@ -954,7 +973,7 @@ EOF
 #   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -4146,7 +4165,7 @@ print_plan() {
   _step $([ "$SKIP_PURGE_PODS"           = 0 ] && echo 1 || echo 0) "purge workload pods"                    "--skip-purge-pods"
   _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
   _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
-  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--uninstall-ethercat not passed (default: skip)"
   _step 1                                                           "phase  1  preflight"                    ""
   _step 1                                                           "          configure-host (if missing)"  ""
   _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase  2  deps"                         "--deps not selected"
