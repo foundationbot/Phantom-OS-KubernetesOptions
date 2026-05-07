@@ -1,0 +1,117 @@
+# rerun-streamer — DaemonSet that serves a live Rerun web view of the robot's
+# DMA shm queues. Sibling to dma-recorder; same image, different binary.
+#
+# ── Disabled by default ──────────────────────────────────────────────────
+# Gated on TWO node labels:
+#   foundation.bot/robot:         "true"   — only schedule on robot nodes
+#   foundation.bot/has-streamer:  "true"   — opt-in per host
+#
+# Bootstrap manages foundation.bot/* labels as a closed set (see
+# host-config.yaml). foundation.bot/has-streamer is NOT applied by default,
+# so kubectl/ArgoCD will render this manifest but no node will match the
+# selector → zero pods scheduled.
+#
+# Activate per-host:
+#   1) add to /etc/phantomos/host-config.yaml:
+#        nodeLabels:
+#          foundation.bot/has-streamer: "true"
+#   2) re-run /opt/phantom/scripts/bootstrap-robot.sh, OR
+#      kubectl label node <robot> foundation.bot/has-streamer=true
+#
+# Deactivate by removing the label or flipping it to "false".
+#
+# ── Why a separate DaemonSet (not a sidecar of dma-recorder) ──────────────
+# Recorder writes to disk; streamer serves a websocket. Different lifetimes,
+# different failure modes, different resource profiles. Keeping them in
+# separate pods means a streamer crash never restarts the recorder (or
+# vice-versa), and either can be scheduled to a different CPU set without
+# affecting the other.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rerun-streamer
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: rerun-streamer
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rerun-streamer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rerun-streamer
+    spec:
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-streamer: "true"   # ← off-switch by default
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # The Rerun viewer is dialed directly via the robot's IP; sit in the
+      # host network namespace so the websocket port binds the host iface.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # Same shm queue requirements as dma-recorder: hostIPC for the
+      # POSIX IPC namespace, privileged below for cross-namespace mmap.
+      hostIPC: true
+
+      terminationGracePeriodSeconds: 10
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        - name: streamer
+          image: foundationbot/dma-streams:main-latest
+          imagePullPolicy: IfNotPresent
+          # The image's default ENTRYPOINT is dma_recorder — override here
+          # to launch the streamer binary instead.
+          command: ["rerun_streamer"]
+          args:
+            - --port=9788
+            # --urdf=/opt/configs/robot.urdf   # optional, mount it if used
+
+          ports:
+            - name: rerun
+              containerPort: 9788
+              hostPort: 9788
+
+          securityContext:
+            runAsUser: 0      # /dev/shm segments are root-owned on host
+            privileged: true  # see dma-recorder.yaml — required for shm IPC access
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+          # Liveness via TCP connect on the websocket port — the streamer
+          # has no separate /health endpoint.
+          livenessProbe:
+            tcpSocket:
+              port: 9788
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 9788
+            initialDelaySeconds: 2
+            periodSeconds: 10
+
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

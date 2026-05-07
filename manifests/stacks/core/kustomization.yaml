@@ -26,3 +26,4 @@ resources:
   - ../../base/positronic
   - ../../base/phantomos-api-server
   - ../../base/yovariable-server
+  - ../../base/dma-streams

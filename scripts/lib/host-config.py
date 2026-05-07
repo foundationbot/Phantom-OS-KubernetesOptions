@@ -16,6 +16,7 @@ Usage:
   host-config.py <path> get-cpu-isolation-json
   host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-log-management-json
+  host-config.py <path> get-node-labels-json
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -34,6 +35,7 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -73,6 +75,22 @@ LOG_MANAGEMENT_DEFAULTS: dict = {
     },
 }
 LOG_MANAGEMENT_VALID_FREQUENCIES: frozenset[str] = frozenset({"daily", "weekly"})
+
+
+# Kubernetes label syntax. Key = optional DNS-1123-subdomain prefix
+# + '/' + a name part; value = up to 63 chars of alnum + - _ .
+# starting and ending with alnum (or empty). Names start with a
+# letter to keep the prefix-vs-name distinction unambiguous.
+_K8S_LABEL_KEY_RE = re.compile(
+    r"^([A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]/)?"
+    r"[A-Za-z][-A-Za-z0-9_.]*[A-Za-z0-9]$"
+)
+_K8S_LABEL_VALUE_RE = re.compile(
+    r"^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+)
+# foundation.bot/robot is bootstrap-managed (always 'true' on every
+# robot). nodeLabels: in host-config.yaml cannot set or override it.
+RESERVED_NODE_LABEL_KEYS: frozenset[str] = frozenset({"foundation.bot/robot"})
 
 
 def _stack_spec(cfg: dict, name: str) -> dict:
@@ -224,6 +242,20 @@ def cmd_get_log_management_json(cfg: dict) -> int:
         },
     }
     print(json.dumps(merged))
+    return 0
+
+
+def cmd_get_node_labels_json(cfg: dict) -> int:
+    """Emit the nodeLabels: block as a flat JSON object, or {} if absent.
+    Bootstrap consumes this to drive the foundation.bot/* reconcile
+    loop in the cluster phase. The unconditional foundation.bot/robot
+    label is added by bootstrap itself (NOT here) so this output stays
+    a faithful representation of what the operator declared."""
+    block = cfg.get("nodeLabels") or {}
+    if not isinstance(block, dict):
+        print("error: 'nodeLabels' must be a mapping", file=sys.stderr)
+        return 2
+    print(json.dumps(block))
     return 0
 
 
@@ -455,6 +487,25 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "kind": "DaemonSet",
         "namespace": "phantom",
         "container": "api",
+    },
+    # DMA.streams recorder DaemonSet — patches go to the `recorder` container
+    # (not the `janitor` sidecar). Typical override: redirect /recordings to
+    # a dedicated data partition (e.g. /data2/recordings) on hosts where
+    # /root sits on the OS disk.
+    "dma-recorder": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "phantom",
+        "container": "recorder",
+    },
+    # DMA.streams live web visualization. Deployed but inert by default
+    # (foundation.bot/has-streamer label not set). Override channel here
+    # is mainly for adding a URDF mount or swapping image tags per host.
+    "rerun-streamer": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "phantom",
+        "container": "streamer",
     },
 }
 
@@ -1255,6 +1306,37 @@ def cmd_validate(cfg: dict) -> int:
                     else:
                         seen_names.add(vol_name)
 
+    # nodeLabels: optional flat mapping of k8s label key -> value.
+    # Bootstrap reconciles the foundation.bot/* prefix from this block;
+    # foundation.bot/robot is reserved (always 'true') and rejected here.
+    nl = cfg.get("nodeLabels")
+    if nl is not None:
+        if not isinstance(nl, dict):
+            errors.append("'nodeLabels' must be a mapping")
+        else:
+            for k, v in nl.items():
+                if not isinstance(k, str) or not _K8S_LABEL_KEY_RE.match(k):
+                    errors.append(
+                        f"nodeLabels: key {k!r} not a valid k8s label key "
+                        f"(prefix/name; alnum + - _ ., name max 63 chars)"
+                    )
+                if isinstance(k, str) and k in RESERVED_NODE_LABEL_KEYS:
+                    errors.append(
+                        f"nodeLabels.{k}: reserved — bootstrap always "
+                        f"applies foundation.bot/robot=true unconditionally; "
+                        f"remove this entry"
+                    )
+                if not isinstance(v, str):
+                    errors.append(
+                        f"nodeLabels.{k!r}: value must be a string (got "
+                        f"{v!r}; YAML booleans like 'true' need to be quoted)"
+                    )
+                elif not _K8S_LABEL_VALUE_RE.match(v):
+                    errors.append(
+                        f"nodeLabels.{k}: value {v!r} not a valid k8s label "
+                        f"value (alnum + - _ ., max 63 chars, can be empty)"
+                    )
+
     if errors:
         for e in errors:
             print(f"error: {e}", file=sys.stderr)
@@ -1276,6 +1358,8 @@ def main() -> int:
         return cmd_get(cfg, sys.argv[3])
     if cmd == "get-log-management-json":
         return cmd_get_log_management_json(cfg)
+    if cmd == "get-node-labels-json":
+        return cmd_get_node_labels_json(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":

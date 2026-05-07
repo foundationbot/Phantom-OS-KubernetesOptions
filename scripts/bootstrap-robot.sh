@@ -1316,6 +1316,64 @@ EOF
   return 1
 }
 
+# Reconcile foundation.bot/* labels on $1 (node name) against the
+# desired set: foundation.bot/robot=true plus host-config.yaml's
+# nodeLabels:. Adds/updates desired labels; removes any
+# foundation.bot/* label currently on the node that's no longer in
+# the desired set. Labels outside the foundation.bot/ prefix are
+# left untouched.
+_reconcile_node_labels() {
+  local node="$1"
+  local hc_path="/etc/phantomos/host-config.yaml"
+  [ -f "$hc_path" ] || hc_path="$REPO_ROOT/host-config.yaml"
+
+  # Desired = nodeLabels: from host-config + the unconditional
+  # foundation.bot/robot=true.
+  local desired_json='{}'
+  if [ -f "$hc_path" ]; then
+    if ! desired_json=$(python3 "$HOST_CONFIG_HELPER" "$hc_path" \
+           get-node-labels-json 2>/dev/null); then
+      desired_json='{}'
+    fi
+  fi
+  desired_json=$(printf '%s' "$desired_json" \
+    | jq '. + {"foundation.bot/robot": "true"}')
+
+  # Apply each desired label.
+  local key value
+  while IFS=$'\t' read -r key value; do
+    [ -n "$key" ] || continue
+    if "${KUBECTL[@]}" label node "$node" \
+         "$key=$value" --overwrite >/dev/null 2>&1; then
+      info "labeled $key=$value"
+    else
+      fail "could not label $key=$value"
+      return 1
+    fi
+  done < <(printf '%s' "$desired_json" \
+            | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
+
+  # Remove foundation.bot/* labels that aren't desired anymore.
+  local current
+  current=$("${KUBECTL[@]}" get node "$node" -o json 2>/dev/null \
+    | jq -r '(.metadata.labels // {}) | keys[] | select(startswith("foundation.bot/"))')
+  local stale_key
+  while IFS= read -r stale_key; do
+    [ -n "$stale_key" ] || continue
+    if printf '%s' "$desired_json" | jq -e --arg k "$stale_key" 'has($k)' \
+         >/dev/null; then
+      continue   # still in desired set
+    fi
+    if "${KUBECTL[@]}" label node "$node" "${stale_key}-" >/dev/null 2>&1; then
+      info "removed stale label $stale_key"
+    else
+      info "could not remove stale label $stale_key (continuing)"
+    fi
+  done <<<"$current"
+
+  return 0
+}
+
 cluster() {
   if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
   phase "phase 3: cluster"
@@ -1402,21 +1460,25 @@ EOF
     done
   fi
 
-  # Apply the fleet-wide robot label. Robot-specific DaemonSets
-  # (yovariable-server, future has-imu workloads, ...) select on
-  # foundation.bot/robot=true; without this label the DaemonSet's
-  # desired count is 0 and the workload silently never schedules.
-  # --overwrite so re-runs are idempotent.
+  # Reconcile the foundation.bot/* node-label namespace from
+  # host-config.yaml. Bootstrap manages this prefix as a closed set:
+  # foundation.bot/robot=true is unconditional; everything else comes
+  # from nodeLabels:. Labels under the prefix that are no longer in
+  # host-config get removed. Labels OUTSIDE the prefix are not touched.
+  # Robot-specific DaemonSets (yovariable-server, cpp-state-estimator,
+  # dma-recorder, future has-imu workloads, ...) gate on these labels
+  # via nodeSelector.
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  kubectl label node <hostname> foundation.bot/robot=true --overwrite"
+    info "DRY-RUN  reconcile foundation.bot/* node labels from host-config"
   else
     local node_name
     node_name=$("${KUBECTL[@]}" get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-    if [ -n "$node_name" ] && "${KUBECTL[@]}" label node "$node_name" \
-         foundation.bot/robot=true --overwrite >/dev/null 2>&1; then
-      pass "node $node_name labeled foundation.bot/robot=true"
+    if [ -z "$node_name" ]; then
+      fail "could not resolve node name for label reconciliation"
+    elif _reconcile_node_labels "$node_name"; then
+      pass "node labels reconciled on $node_name"
     else
-      fail "could not label node foundation.bot/robot=true"
+      fail "node label reconciliation failed"
     fi
   fi
 
