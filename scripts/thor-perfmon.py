@@ -58,6 +58,87 @@ _RE_VIN = re.compile(r"\bVIN (\d+)mW/(\d+)mW")
 _RE_VDD_GPU = re.compile(r"VDD_GPU (-?\d+)mW/(-?\d+)mW")
 
 
+class TegraStats:
+    """Optional sampler. On a Jetson with `tegrastats` installed, spawns
+    `tegrastats --interval <ms>`; otherwise stays inert and .latest()
+    returns {}. Mirrors PerfStat's pump/latest contract — main loop
+    paces itself, this class just hands off the freshest parse."""
+
+    def __init__(self, interval_ms: int):
+        self.proc: subprocess.Popen | None = None
+        self.ok = False
+        self._latest: dict = {}
+        if not shutil.which("tegrastats"):
+            return
+        try:
+            self.proc = subprocess.Popen(
+                ["tegrastats", "--interval", str(interval_ms)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            self.ok = True
+        except Exception:
+            self.proc = None
+            return
+        # Prime: tegrastats emits its first line ~1s after spawn (or
+        # one --interval). Block briefly so the first parsed row is
+        # available before the main loop writes the first CSV row;
+        # otherwise tegrastats columns get locked OUT of the header.
+        self._prime(timeout_s=max(2.0, interval_ms / 1000.0 + 0.5))
+
+    def _prime(self, timeout_s: float) -> None:
+        import select
+        if self.proc is None or self.proc.stdout is None:
+            return
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            r, _, _ = select.select([self.proc.stdout], [], [],
+                                     max(0.0, deadline - time.monotonic()))
+            if not r:
+                break
+            line = self.proc.stdout.readline()
+            if not line:
+                break
+            row = parse_tegrastats(line)
+            if row is not None:
+                self._latest = row
+                return  # got one; columns are now known
+        # Timed out without a parseable line — tegrastats is alive but
+        # producing nothing useful; downgrade so the rest of the run
+        # behaves as if tegrastats wasn't available.
+        if not self._latest:
+            self.ok = False
+            self.stop()
+
+    def pump(self) -> None:
+        if not self.ok or self.proc is None or self.proc.stdout is None:
+            return
+        import select
+        # Drain everything pending, keep the most recent parseable row.
+        while True:
+            r, _, _ = select.select([self.proc.stdout], [], [], 0)
+            if not r:
+                break
+            line = self.proc.stdout.readline()
+            if not line:
+                break
+            row = parse_tegrastats(line)
+            if row is not None:
+                self._latest = row
+
+    def latest(self) -> dict:
+        return dict(self._latest)
+
+    def stop(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=2)
+            except Exception:
+                try: self.proc.kill()
+                except Exception: pass
+
+
 def parse_tegrastats(line: str) -> dict | None:
     """Parse one tegrastats line into a flat dict."""
     if "RAM " not in line or "CPU [" not in line:
@@ -273,29 +354,70 @@ class PerfStat:
         self._latest: dict[str, float] = {}
         self.proc: subprocess.Popen | None = None
         self.ok = False
+        self.unavailable_reason: str = ""
         if not shutil.which("perf"):
+            self.unavailable_reason = "perf binary not in PATH"
+            return
+        # Pre-flight: try the events once with a no-op, capture stderr.
+        # Catches the common 'paranoid=2 blocks system-wide events' case
+        # before we commit to a long-running subprocess that would
+        # silently produce no data.
+        scope = ["-p", str(pid)] if pid is not None else ["-a"]
+        try:
+            probe = subprocess.run(
+                ["perf", "stat", "-x", ";", "-e", ",".join(events)] + scope
+                + ["--", "/bin/true"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception as exc:
+            self.unavailable_reason = f"perf probe failed to spawn: {exc}"
+            return
+        err = probe.stderr or ""
+        err_lower = err.lower()
+        access_blocked = (
+            "access to performance monitoring" in err_lower
+            or ("permission" in err_lower and "denied" in err_lower)
+            or "operation not permitted" in err_lower
+        )
+        if probe.returncode != 0 or access_blocked:
+            # Pick the first informative line — skip bare 'Error:' and
+            # the perf_event_paranoid help dump.
+            skip_prefixes = ("error:", "perf_event_paranoid", ">=",
+                             "  -1:", "  ", "to make ", "more information")
+            first_msg = next(
+                (l.strip() for l in err.splitlines()
+                 if l.strip() and not l.strip().lower().startswith(skip_prefixes)),
+                "perf stat refused to count events"
+            )
+            self.unavailable_reason = first_msg
             return
         cmd = ["perf", "stat", "-x", ";", "-I", str(interval_ms), "-e",
-               ",".join(events)]
-        if pid is not None:
-            cmd += ["-p", str(pid)]
-        else:
-            cmd += ["-a"]
+               ",".join(events)] + scope
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
             )
             self.ok = True
-        except Exception:
+        except Exception as exc:
+            self.unavailable_reason = f"perf failed to spawn: {exc}"
             self.proc = None
 
     def pump(self) -> None:
-        """Drain whatever new lines perf emitted since last call."""
+        """Drain whatever new lines perf emitted since last call.
+        On hybrid CPUs (Intel P+E cores) perf splits each event per
+        cluster (e.g. 'cpu_atom/cycles/' and 'cpu_core/cycles/'); we
+        normalize to the bare event name and sum across clusters per
+        sample window so the CSV column set stays stable."""
         if not self.ok or self.proc is None or self.proc.stderr is None:
             return
-        # Non-blocking read by checking if poll has data — use select.
         import select
+        # Group readings within the same interval window. Each line:
+        #   <ts>;<value>;<unit>;<event>;<runtime>;<pct>;<rate>;<unit2>
+        # Lines emitted in one interval share the same <ts>.
+        wanted = set(self.events)
+        new_window: dict[str, float] = {}
+        last_ts = None
         while True:
             r, _, _ = select.select([self.proc.stderr], [], [], 0)
             if not r:
@@ -303,23 +425,46 @@ class PerfStat:
             line = self.proc.stderr.readline()
             if not line:
                 break
-            # Format: <ts>;<value>;<unit>;<event>;<runtime>;<pct>...
             parts = line.split(";")
-            if len(parts) >= 4:
-                val_str = parts[1].strip()
-                ev = parts[3].strip()
-                if val_str in ("<not counted>", "<not supported>", ""):
-                    continue
-                try:
-                    self._latest[ev] = float(val_str.replace(",", ""))
-                except ValueError:
-                    continue
+            if len(parts) < 4:
+                continue
+            ts_field = parts[0].strip()
+            val_str = parts[1].strip()
+            ev_raw = parts[3].strip()
+            if val_str in ("<not counted>", "<not supported>", ""):
+                continue
+            # Normalize 'cpu_atom/cycles/' -> 'cycles', 'cycles' -> 'cycles'.
+            ev = ev_raw.split("/")[-2] if "/" in ev_raw else ev_raw
+            if ev not in wanted:
+                continue
+            try:
+                val = float(val_str.replace(",", ""))
+            except ValueError:
+                continue
+            # New interval — flush the previous one to _latest.
+            if last_ts is not None and ts_field != last_ts and new_window:
+                self._latest.update(new_window)
+                new_window = {}
+            last_ts = ts_field
+            # Sum across clusters within the window (atom + core).
+            new_window[ev] = new_window.get(ev, 0.0) + val
+        if new_window:
+            self._latest.update(new_window)
 
     def latest(self) -> dict:
         out = {}
         for ev, v in self._latest.items():
-            out[f"perf_{ev.replace('-', '_')}"] = int(v) if v.is_integer() else v
+            key = f"perf_{ev.replace('-', '_')}"
+            out[key] = int(v) if isinstance(v, float) and v.is_integer() else v
         return out
+
+    def expected_columns(self) -> list[str]:
+        """Return the column names we expect to populate. Used by the
+        CSV writer to lock the header before perf has emitted its first
+        interval (which doesn't land until ~t=1s after start)."""
+        if not self.ok:
+            return []
+        return [f"perf_{ev.replace('-', '_')}" for ev in self.events]
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -370,16 +515,21 @@ def diff_per_sec(prev: dict, cur: dict, keys: list[str], dt_s: float,
 # ---------------------------------------------------------------------
 
 class CsvWriter:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, extra_columns: list[str] | None = None):
         self.path = path
         self._fh = None
         self._writer: csv.DictWriter | None = None
         self._fieldnames: list[str] = []
+        # Columns the caller knows will appear later but won't be in
+        # the first row (e.g. perf-stat counters that lag by ~1s).
+        self._extra_columns = list(extra_columns or [])
 
     def write(self, row: dict) -> None:
         if self._writer is None:
-            self._fieldnames = ["ts"] + [k for k in row.keys()
-                                         if k != "ts" and not k.startswith("_")]
+            base = ["ts"] + [k for k in row.keys()
+                             if k != "ts" and not k.startswith("_")]
+            extras = [c for c in self._extra_columns if c not in base]
+            self._fieldnames = base + extras
             self._fh = self.path.open("w", newline="")
             self._writer = csv.DictWriter(self._fh, fieldnames=self._fieldnames)
             self._writer.writeheader()
@@ -599,34 +749,40 @@ def default_prefix() -> str:
 
 def main() -> int:
     args = parse_args()
-    if not shutil.which("tegrastats"):
-        sys.exit("tegrastats not in PATH (is this a Jetson?)")
 
     prefix = Path(args.out or default_prefix())
     prefix.parent.mkdir(parents=True, exist_ok=True)
     csv_path = prefix.with_suffix(".csv")
     png_path = prefix.with_suffix(".png")
 
-    print(f"[perfmon] writing {csv_path}")
-    print(f"[perfmon] interval={args.interval_ms}ms duration="
-          f"{'∞' if args.duration <= 0 else f'{args.duration:.0f}s'}"
-          f"  pid={args.pid or 'system-wide'}")
-
-    # Spawn tegrastats. Block on its stdout to drive sample cadence.
-    tg = subprocess.Popen(
-        ["tegrastats", "--interval", str(args.interval_ms)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-    )
-
-    # Spawn perf stat (optional).
+    # Optional samplers. Both stay inert when their backing tool is
+    # missing — main loop is sleep-paced, neither sampler gates capture.
+    tg = TegraStats(args.interval_ms)
+    if not tg.ok:
+        print("[perfmon] tegrastats unavailable — GPU/EMC/temp/power columns "
+              "will be absent (this is fine on non-Jetson hosts)",
+              file=sys.stderr)
     perf = None
     if not args.no_perf:
         perf = PerfStat(args.interval_ms, args.pid)
         if not perf.ok:
-            print("[perfmon] perf unavailable — cache/branch counters disabled",
-                  file=sys.stderr)
+            reason = perf.unavailable_reason or "unknown"
+            print(f"[perfmon] perf disabled — {reason}", file=sys.stderr)
+            if "paranoid" in reason.lower() or "permission" in reason.lower() \
+                    or "access to performance" in reason.lower():
+                print("[perfmon]   to enable system-wide events: "
+                      "sudo sysctl kernel.perf_event_paranoid=1 (or =-1)",
+                      file=sys.stderr)
 
-    writer = CsvWriter(csv_path)
+    print(f"[perfmon] writing {csv_path}")
+    print(f"[perfmon] interval={args.interval_ms}ms duration="
+          f"{'∞' if args.duration <= 0 else f'{args.duration:.0f}s'}"
+          f"  pid={args.pid or 'system-wide'}"
+          f"  tegrastats={'on' if tg.ok else 'off'}"
+          f"  perf={'on' if perf and perf.ok else 'off'}")
+
+    extra_cols = perf.expected_columns() if perf and perf.ok else []
+    writer = CsvWriter(csv_path, extra_columns=extra_cols)
 
     prev_stat = snap_proc_stat()
     prev_vm = snap_vmstat()
@@ -635,62 +791,59 @@ def main() -> int:
     prev_t = time.monotonic()
 
     stop_at = (time.monotonic() + args.duration) if args.duration > 0 else None
+    interval_s = args.interval_ms / 1000.0
     n = 0
     interrupted = False
 
     def stop(_sig, _frm):
         nonlocal interrupted
         interrupted = True
-        try: tg.terminate()
-        except Exception: pass
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
     try:
-        for line in tg.stdout:
-            tg_row = parse_tegrastats(line)
-            if tg_row is None:
-                continue
+        # Sleep-paced main loop. Each iteration: wait one interval, drain
+        # any tegrastats / perf output that arrived during the sleep,
+        # snapshot /proc, compute deltas, write a CSV row.
+        while not interrupted:
+            time.sleep(interval_s)
+            if interrupted:
+                break
+
             now = time.monotonic()
             dt_s = now - prev_t
             prev_t = now
             ts = dt.datetime.now().isoformat(timespec="milliseconds")
 
-            # Snapshot all proc sources.
+            tg.pump()
+            if perf:
+                perf.pump()
+
             cur_stat = snap_proc_stat()
             cur_mem = snap_meminfo()
             cur_vm = snap_vmstat()
             cur_disk = snap_diskstats()
             cur_load = snap_loadavg()
             cur_pid = snap_pid(args.pid) if args.pid else {}
-            if perf:
-                perf.pump()
 
             row: dict = {"ts": ts}
-            # CPU percentages from /proc/stat deltas
             row.update(cpu_pct_from_jif(prev_stat, cur_stat))
-            # Context switch / interrupt rates
             row.update(diff_per_sec(prev_stat, cur_stat,
                                     ["ctxt", "intr", "forks"], dt_s))
             row["procs_running"] = cur_stat.get("procs_running", 0)
             row.update(cur_load)
-            # Memory
             row.update(cur_mem)
             row["mem_used_kb"] = (cur_mem.get("mem_total_kb", 0)
                                   - cur_mem.get("mem_avail_kb", 0))
             row["swap_used_kb"] = (cur_mem.get("swap_total_kb", 0)
                                    - cur_mem.get("swap_free_kb", 0))
-            # Faults / VM rates
             row.update(diff_per_sec(prev_vm, cur_vm,
                                     ["pgfault", "pgmajfault", "pgpgin", "pgpgout",
                                      "pswpin", "pswpout"], dt_s))
-            # Disk
             row.update(diff_per_sec(prev_disk, cur_disk,
                                     ["disk_read_ios", "disk_write_ios",
                                      "disk_read_kb", "disk_write_kb"], dt_s))
-            # Tegrastats fields
-            row.update(tg_row)
-            # Per-pid current values + I/O rates
+            row.update(tg.latest())
             if args.pid:
                 row.update(cur_pid)
                 row.update(diff_per_sec(prev_pid, cur_pid,
@@ -698,7 +851,6 @@ def main() -> int:
                                          "pid_io_read_bytes", "pid_io_write_bytes",
                                          "pid_ctxsw_vol", "pid_ctxsw_invol"],
                                         dt_s))
-            # perf stat counters (latest values)
             if perf:
                 row.update(perf.latest())
 
@@ -706,18 +858,22 @@ def main() -> int:
             n += 1
             if not args.quiet:
                 cpu = row.get("cpu_busy_pct", 0)
-                gpu = row.get("gpu_pct", 0)
+                gpu = row.get("gpu_pct", "")
                 ram_pct = (100.0 * row.get("mem_used_kb", 0)
                            / max(row.get("mem_total_kb", 1), 1))
                 pgmaj = row.get("pgmajfault_per_s", 0)
                 rd = row.get("disk_read_kb_per_s", 0) / 1024.0
                 wr = row.get("disk_write_kb_per_s", 0) / 1024.0
                 ctxt = row.get("ctxt_per_s", 0)
-                tj = row.get("tj_c", 0)
-                vin = row.get("vin_mw", 0) / 1000.0
-                print(f"{ts}  cpu={cpu:5.1f}%  gpu={gpu:4.1f}%  ram={ram_pct:4.1f}%  "
+                tj = row.get("tj_c", "")
+                vin = row.get("vin_mw", 0)
+                # Format optional fields as "—" when absent.
+                gpu_s = f"{gpu:4.1f}%" if isinstance(gpu, (int, float)) else "  --"
+                tj_s = f"{tj:4.1f}C" if isinstance(tj, (int, float)) else " ---"
+                vin_s = f"{vin/1000.0:5.2f}W" if isinstance(vin, (int, float)) and vin else "  ---"
+                print(f"{ts}  cpu={cpu:5.1f}%  gpu={gpu_s}  ram={ram_pct:4.1f}%  "
                       f"pgmaj/s={pgmaj:5.1f}  rd={rd:5.1f}MB/s wr={wr:5.1f}MB/s  "
-                      f"ctxt/s={ctxt:6.0f}  tj={tj:4.1f}C  vin={vin:5.2f}W")
+                      f"ctxt/s={ctxt:6.0f}  tj={tj_s}  vin={vin_s}")
 
             prev_stat = cur_stat
             prev_vm = cur_vm
@@ -727,10 +883,7 @@ def main() -> int:
             if stop_at is not None and time.monotonic() >= stop_at:
                 break
     finally:
-        try: tg.terminate(); tg.wait(timeout=3)
-        except Exception:
-            try: tg.kill()
-            except Exception: pass
+        tg.stop()
         if perf: perf.stop()
         writer.close()
 
