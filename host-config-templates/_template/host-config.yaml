@@ -72,10 +72,12 @@ stacks:
 #                          directly. Tag convention:
 #                            *-latest-aarch64  Jetson / arm64 robots
 #                            *-latest-amd64    x86 robots
-#   phantom-dma-inference  core stack — phantom-locomotion DaemonSet.
-#                          Image foundationbot/phantom-dma-inference; CI
-#                          publishes -aarch64 for Jetson, plain (amd64)
-#                          otherwise.
+#   phantom-locomotion     core stack — phantom-locomotion DaemonSet.
+#                          Container key tracks the workload; the image
+#                          actually published is
+#                          foundationbot/phantom-dma-inference (CI
+#                          publishes -aarch64 for Jetson). Same key/image
+#                          indirection as operator-ui above.
 #   cpp-robot-state-estimator
 #                          core stack — IMU + kinematic state estimator
 #                          DaemonSet. Tag convention <branch>-latest-<arch>.

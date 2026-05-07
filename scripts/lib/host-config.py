@@ -360,9 +360,15 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": None,
         "manifest_image": "foundationbot/dma-ethercat",
     },
-    "phantom-dma-inference": {
+    "phantom-locomotion": {
         # phantom-locomotion DaemonSet (foundation.bot/has-locomotion gated).
-        # CI in imu-policy/phantom-locomotion publishes -aarch64 for Jetson.
+        # Container key tracks the workload name (matches DaemonSet name and
+        # has-locomotion label); the published image is actually
+        # foundationbot/phantom-dma-inference (built from
+        # imu-policy/phantom-locomotion's docker/dma_policy/Dockerfile).
+        # Same key/image indirection used by operator-ui (image
+        # foundationbot/argus.operator-ui under key 'operator-ui').
+        # CI publishes a -aarch64 variant for Jetson.
         "stack": "core",
         "manifest_image": "foundationbot/phantom-dma-inference",
     },

@@ -90,7 +90,10 @@ spec:
             limits:   { cpu: "500m", memory: "256Mi" }
 
       containers:
-        - name: phantom-dma-inference
+        - name: phantom-locomotion
+          # Image is foundationbot/phantom-dma-inference (built from
+          # imu-policy/phantom-locomotion); the container name tracks
+          # the workload, matching positronic-control's convention.
           image: foundationbot/phantom-dma-inference:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           # Entrypoint matches docker-compose: /entrypoint.sh sources
