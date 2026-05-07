@@ -6,8 +6,9 @@ shell. Outputs a CSV (one row per sample) plus a 6-panel matplotlib PNG
 (CPU breakdown, GPU+EMC+temp, memory components, faults/ctx-sw, disk I/O,
 cache misses + power).
 
-Stdlib + `tegrastats` + (optional) `perf` + (optional) `matplotlib`. No other
-deps. One file — `scp` it anywhere and run.
+Stdlib + `tegrastats` + (optional) `nvidia-smi` for GPU utilisation +
+(optional) `perf` + (optional) `matplotlib`. No other deps. One file —
+`scp` it anywhere and run.
 
 ## Where it lives
 
@@ -23,8 +24,10 @@ directly. `tegrastats` must be on `PATH`, otherwise it exits immediately.
 
 | Metric group                           | Source                                                       |
 |----------------------------------------|--------------------------------------------------------------|
-| GPU (GR3D), EMC, RAM, junction temp,   | `tegrastats` (drives sample cadence)                         |
-| VIN power, VDD\_GPU, per-core CPU MHz  |                                                              |
+| GR3D **clock** (MHz), EMC, RAM,        | `tegrastats` (drives sample cadence)                         |
+| junction temp, VIN power, VDD\_GPU,    |                                                              |
+| per-core CPU MHz                       |                                                              |
+| GPU **utilisation** (%)                | `nvidia-smi` streamed via `-lms` (one persistent process)    |
 | CPU breakdown, ctx-switches, intr      | `/proc/stat` (deltas → percentages and per-second rates)     |
 | Memory components                      | `/proc/meminfo`                                              |
 | Page faults, swap activity             | `/proc/vmstat` (deltas → per-second rates)                   |
@@ -127,10 +130,13 @@ Column reference (presence depends on flags / sysctl / availability):
 - **Disk** (from `/proc/diskstats` deltas, summed across whole devices —
   partitions, loop, ramdisk excluded): `disk_read_kb_per_s`,
   `disk_write_kb_per_s`, `disk_read_ios_per_s`, `disk_write_ios_per_s`
-- **Jetson** (from `tegrastats`): `gpu_pct` (mean across GPCs),
-  `gpu_max_pct` (max GPC), `emc_pct`, `emc_mhz`, `tj_c`, `vin_mw`,
-  `vdd_gpu_mw`, `tg_ram_used_mb`, `tg_ram_total_mb`, and per-core
-  `tg_cpu<N>_pct` / `tg_cpu<N>_mhz`
+- **Jetson** (from `tegrastats`): `gpu_mhz` (mean GR3D clock across
+  engines), `gpu_max_mhz` (max engine clock), `emc_pct`, `emc_mhz`,
+  `tj_c`, `vin_mw`, `vdd_gpu_mw`, `tg_ram_used_mb`, `tg_ram_total_mb`,
+  and per-core `tg_cpu<N>_pct` / `tg_cpu<N>_mhz`
+- **GPU utilisation** (from `nvidia-smi`, streamed): `gpu_pct`
+  (0..100). Absent if `nvidia-smi` isn't installed and no Tegra
+  devfreq `load` node is found
 - **perf** (when available): `perf_cycles`, `perf_instructions`,
   `perf_cache_references`, `perf_cache_misses`, `perf_branches`,
   `perf_branch_misses`, `perf_page_faults`, `perf_context_switches`
@@ -143,7 +149,9 @@ Column reference (presence depends on flags / sysctl / availability):
 
 1. **CPU breakdown + load**: `cpu_busy_pct` (black), `cpu_user_pct`,
    `cpu_system_pct`, `cpu_iowait_pct`. Right axis: `load_1m`.
-2. **GPU + EMC + temperature**: `gpu_pct`, `emc_pct`. Right axis: `tj_c`.
+2. **GPU + EMC + temperature**: `gpu_pct` (utilisation, from
+   `nvidia-smi`), `emc_pct`. Right axis: `tj_c` (or `gpu_mhz` clock if
+   Tj is unavailable).
 3. **Memory components (MB)**: anon, cached, buffers, slab, dirty.
    Dotted reference line at `mem_total_kb`.
 4. **Faults / context switches**: `pgfault_per_s`, `pgmajfault_per_s`.
@@ -158,8 +166,12 @@ Column reference (presence depends on flags / sysctl / availability):
 Unless `--quiet`, each sample prints a one-liner like:
 
 ```
-2026-05-05T14:02:11.483  cpu= 47.3%  gpu=22.0%  ram=31.4%  pgmaj/s=  0.0  rd=  0.0MB/s wr=  1.2MB/s  ctxt/s= 18432  tj=58.3C  vin= 28.41W
+2026-05-05T14:02:11.483  cpu= 47.3%  gpu= 22.0%@1574MHz  ram=31.4%  pgmaj/s=  0.0  rd=  0.0MB/s wr=  1.2MB/s  ctxt/s= 18432  tj=58.3C  vin= 28.41W
 ```
+
+The `gpu=` field shows utilisation% from `nvidia-smi` and the GR3D
+clock from `tegrastats`. If `nvidia-smi` isn't available, the percent
+prints as `--`.
 
 ## Stop conditions
 
@@ -183,7 +195,9 @@ usable PNG.
 - `perf_cache_misses / perf_cache_references` (panel 6) climbing while
   `cpu_busy_pct` and `gpu_pct` stay flat → memory-bandwidth-bound.
   Confirm with `emc_pct` near saturation.
-- `gpu_max_pct` ≫ `gpu_pct` → uneven GPC utilization in CUDA work.
-  One GPC pinned, others idle — likely a kernel launch / occupancy issue.
+- `gpu_pct` flat near 0 with `gpu_mhz` pegged high → driver holds the
+  GR3D clock up while the GPU is idle. Normal on Thor; not a sign of
+  compute load. Look at `gpu_pct` for actual utilisation.
 - `tj_c` near 90 °C → thermal throttle imminent (Thor TJ target ~90 °C).
-  Expect `tg_cpu*_mhz` and `gpu_pct` to clip.
+  Expect `tg_cpu*_mhz` and `gpu_mhz` to clip and `gpu_pct` to drop as
+  kernels stall.

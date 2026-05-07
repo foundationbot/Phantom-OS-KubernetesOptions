@@ -37,12 +37,14 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import glob
 import os
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -81,9 +83,13 @@ def parse_tegrastats(line: str) -> dict | None:
             out[f"tg_cpu{i}_pct"] = ld
             out[f"tg_cpu{i}_mhz"] = fr
     if (m := _RE_GR3D.search(line)):
-        gpcs = [int(x) for x in m.group(1).split(",") if x]
-        out["gpu_pct"] = round(sum(gpcs) / len(gpcs), 1) if gpcs else 0.0
-        out["gpu_max_pct"] = max(gpcs) if gpcs else 0
+        # Thor's tegrastats reports only GR3D clocks, not utilisation:
+        #   GR3D_FREQ @[1574,1574,1574]
+        # (Orin format `GR3D_FREQ <pct>%@[...]` is gone.) So this is MHz,
+        # not %. Real utilisation comes from sysfs — see read_gpu_load_pct.
+        freqs = [int(x) for x in m.group(1).split(",") if x]
+        out["gpu_mhz"] = round(sum(freqs) / len(freqs), 0) if freqs else 0
+        out["gpu_max_mhz"] = max(freqs) if freqs else 0
     if (m := _RE_EMC.search(line)):
         out["emc_pct"] = int(m.group(1))
         out["emc_mhz"] = int(m.group(2))
@@ -94,6 +100,128 @@ def parse_tegrastats(line: str) -> dict | None:
     if (m := _RE_VDD_GPU.search(line)):
         out["vdd_gpu_mw"] = int(m.group(1))
     return out
+
+
+# ---------------------------------------------------------------------
+# GPU utilisation source.
+#
+# Thor's GPU is a Blackwell-class device hung off PCIe, not the
+# integrated GR3D engine of older Jetsons. tegrastats reports only the
+# clock (`GR3D_FREQ @[<mhz>,...]`), and the legacy /sys devfreq `load`
+# nodes don't exist. nvidia-smi works on Thor and is our primary source.
+#
+# We spawn nvidia-smi *once* in streaming mode (`-lms`) and consume its
+# stdout in a background thread. Per-tick cost is a lock acquire — no
+# fork, no NVML re-init, no measurable impact on inference. We keep a
+# Tegra sysfs fallback for older Jetsons that might run this script.
+# ---------------------------------------------------------------------
+
+_GPU_LOAD_GLOBS = (
+    "/sys/class/devfreq/*/device/load",
+    "/sys/class/devfreq/*/load",
+    "/sys/devices/platform/*.gpu/load",
+    "/sys/devices/platform/gpu*/load",
+)
+
+
+def _detect_sysfs_load_path() -> str | None:
+    """First sysfs path that yields a parseable integer load."""
+    seen: list[str] = []
+    for pat in _GPU_LOAD_GLOBS:
+        for c in glob.glob(pat):
+            if c not in seen:
+                seen.append(c)
+    def readable(p: str) -> bool:
+        try:
+            with open(p) as f:
+                int(f.read().strip())
+            return True
+        except (OSError, ValueError):
+            return False
+    gpu_tokens = ("gpu", "gv11b", "ga10b", "gh100", "gb10b")
+    for c in seen:
+        if any(tok in c.lower() for tok in gpu_tokens) and readable(c):
+            return c
+    for c in seen:
+        if readable(c):
+            return c
+    return None
+
+
+def _spawn_nvidia_smi_stream(interval_ms: int):
+    """Spawn nvidia-smi -lms <interval> and return (proc, reader, label).
+    `reader()` returns the most recent utilisation %. Returns None if
+    nvidia-smi is missing or refuses to start."""
+    nv = shutil.which("nvidia-smi")
+    if nv is None:
+        return None
+    cmd = [nv, "--query-gpu=utilization.gpu",
+           "--format=csv,noheader,nounits",
+           "-lms", str(interval_ms)]
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+    except OSError:
+        return None
+
+    state = {"pct": None}
+    lock = threading.Lock()
+
+    def pump():
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    v = float(line)
+                except ValueError:
+                    continue
+                with lock:
+                    state["pct"] = v
+        except Exception:
+            pass
+
+    t = threading.Thread(target=pump, daemon=True)
+    t.start()
+
+    def reader() -> float | None:
+        with lock:
+            return state["pct"]
+
+    return (proc, reader, "nvidia-smi (streaming)")
+
+
+def detect_gpu_load_reader(interval_ms: int):
+    """Return (label, reader, cleanup) where reader() -> float|None
+    yielding GPU utilisation in percent, and cleanup() releases any
+    background process. Returns None if no source works."""
+    smi = _spawn_nvidia_smi_stream(interval_ms)
+    if smi is not None:
+        proc, reader, label = smi
+        def cleanup():
+            try: proc.terminate(); proc.wait(timeout=2)
+            except Exception:
+                try: proc.kill()
+                except Exception: pass
+        return (label, reader, cleanup)
+
+    sysfs = _detect_sysfs_load_path()
+    if sysfs is not None:
+        # Tegra reports load in per-mille (0..1000).
+        def read_sysfs() -> float | None:
+            try:
+                with open(sysfs) as f:
+                    v = int(f.read().strip())
+            except (OSError, ValueError):
+                return None
+            return min(100.0, max(0.0, v / 10.0))
+        return (sysfs, read_sysfs, lambda: None)
+
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -421,6 +549,16 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
                 for r in rows]
 
     has = lambda k: k in rows[0]
+
+    def safe_legend(ax_, **kw):
+        # Only render a legend if at least one artist on this axis has
+        # a non-underscore label — otherwise matplotlib emits "No
+        # artists with labels found to put in legend" noise.
+        labelled = [a for a in ax_.get_legend_handles_labels()[1]
+                    if a and not a.startswith("_")]
+        if labelled:
+            ax_.legend(**kw)
+
     fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex=True)
     fig.suptitle(f"thor-perfmon  {csv_path.name}  ({len(rows)} samples)",
                  fontsize=11)
@@ -437,32 +575,40 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
             ax.plot(xs, col(k), color=c, alpha=0.7, label=f)
     ax.set_ylabel("CPU %")
     ax.set_ylim(0, 100)
-    ax.legend(loc="upper right", fontsize=8)
+    safe_legend(ax, loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
     if has("load_1m"):
         ax2 = ax.twinx()
         ax2.plot(xs, col("load_1m"), color="tab:green", linestyle=":",
                  alpha=0.8, label="load 1m")
         ax2.set_ylabel("load 1m")
-        ax2.legend(loc="lower right", fontsize=7)
+        safe_legend(ax2, loc="lower right", fontsize=7)
 
     # 2. GPU + EMC + temperature
     ax = axes[0][1]
     if has("gpu_pct"):
-        ax.plot(xs, col("gpu_pct"), color="tab:green", label="GPU avg")
+        ax.plot(xs, col("gpu_pct"), color="tab:green", label="GPU %")
     if has("emc_pct"):
         ax.plot(xs, col("emc_pct"), color="tab:purple", linestyle="--",
                 alpha=0.7, label="EMC")
     ax.set_ylabel("%")
     ax.set_ylim(0, 100)
-    ax.legend(loc="upper right", fontsize=8)
+    safe_legend(ax, loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
+    # Tj on the right axis; if Tj is missing but gpu_mhz is present,
+    # fall back to plotting gpu clock there so the panel stays useful.
     if has("tj_c"):
         ax2 = ax.twinx()
         ax2.plot(xs, col("tj_c"), color="tab:orange", linestyle=":",
                  alpha=0.8, label="Tj (°C)")
         ax2.set_ylabel("Tj (°C)")
-        ax2.legend(loc="lower right", fontsize=7)
+        safe_legend(ax2, loc="lower right", fontsize=7)
+    elif has("gpu_mhz"):
+        ax2 = ax.twinx()
+        ax2.plot(xs, col("gpu_mhz"), color="tab:gray", linestyle=":",
+                 alpha=0.8, label="GPU clock (MHz)")
+        ax2.set_ylabel("GPU clock (MHz)")
+        safe_legend(ax2, loc="lower right", fontsize=7)
 
     # 3. Memory components (MB)
     ax = axes[1][0]
@@ -481,7 +627,7 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
         ax.axhline(total_mb, color="grey", linestyle=":", linewidth=0.6,
                    label=f"total {total_mb:.0f}MB")
     ax.set_ylabel("MB")
-    ax.legend(loc="upper right", fontsize=8)
+    safe_legend(ax, loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
 
     # 4. Faults / context switches per second
@@ -496,9 +642,9 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
         ax2.plot(xs, col("ctxt_per_s"), color="tab:green", linestyle="--",
                  alpha=0.6, label="ctxt sw/s")
         ax2.set_ylabel("ctxt/s")
-        ax2.legend(loc="lower right", fontsize=7)
+        safe_legend(ax2, loc="lower right", fontsize=7)
     ax.set_ylabel("faults/s")
-    ax.legend(loc="upper right", fontsize=8)
+    safe_legend(ax, loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
 
     # 5. Disk I/O
@@ -511,7 +657,7 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
                 color="tab:red", label="write MB/s")
     ax.set_ylabel("MB/s")
     ax.set_xlabel("seconds")
-    ax.legend(loc="upper right", fontsize=8)
+    safe_legend(ax, loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
     if has("disk_read_ios_per_s") or has("disk_write_ios_per_s"):
         ax2 = ax.twinx()
@@ -522,7 +668,7 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
             ax2.plot(xs, col("disk_write_ios_per_s"), color="tab:pink",
                      linestyle=":", alpha=0.6, label="write IOPS")
         ax2.set_ylabel("IOPS")
-        ax2.legend(loc="lower right", fontsize=7)
+        safe_legend(ax2, loc="lower right", fontsize=7)
 
     # 6. Cache misses + IPC + power
     ax = axes[2][1]
@@ -548,7 +694,7 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
         ax.plot(xs, bmiss, color="tab:purple", label="branch miss %")
     ax.set_ylabel("miss %")
     ax.set_xlabel("seconds")
-    ax.legend(loc="upper left", fontsize=8)
+    safe_legend(ax, loc="upper left", fontsize=8)
     ax.grid(alpha=0.3)
     if has("vin_mw"):
         ax2 = ax.twinx()
@@ -556,7 +702,7 @@ def render_plot(csv_path: Path, png_path: Path) -> None:
                  color="tab:orange", linestyle=":", alpha=0.7,
                  label="VIN (W)")
         ax2.set_ylabel("Power (W)")
-        ax2.legend(loc="upper right", fontsize=7)
+        safe_legend(ax2, loc="upper right", fontsize=7)
 
     fig.tight_layout()
     fig.savefig(png_path, dpi=120)
@@ -626,6 +772,14 @@ def main() -> int:
             print("[perfmon] perf unavailable — cache/branch counters disabled",
                   file=sys.stderr)
 
+    gpu_reader = detect_gpu_load_reader(args.interval_ms)
+    if gpu_reader is not None:
+        print(f"[perfmon] GPU load source: {gpu_reader[0]}")
+    else:
+        print("[perfmon] no GPU utilisation source found "
+              "(nvidia-smi missing and no Tegra devfreq load node) "
+              "— gpu_pct will be blank", file=sys.stderr)
+
     writer = CsvWriter(csv_path)
 
     prev_stat = snap_proc_stat()
@@ -688,8 +842,15 @@ def main() -> int:
             row.update(diff_per_sec(prev_disk, cur_disk,
                                     ["disk_read_ios", "disk_write_ios",
                                      "disk_read_kb", "disk_write_kb"], dt_s))
-            # Tegrastats fields
+            # Tegrastats fields (GPU is gpu_mhz, not %, on Thor)
             row.update(tg_row)
+            # Real GPU utilisation (nvidia-smi on Thor, sysfs on Orin).
+            if gpu_reader is not None:
+                pct = gpu_reader[1]()
+                if pct is not None:
+                    row["gpu_pct"] = round(pct, 1)
+            # else: gpu_pct stays absent until streaming reader has
+            # produced its first sample.
             # Per-pid current values + I/O rates
             if args.pid:
                 row.update(cur_pid)
@@ -706,7 +867,8 @@ def main() -> int:
             n += 1
             if not args.quiet:
                 cpu = row.get("cpu_busy_pct", 0)
-                gpu = row.get("gpu_pct", 0)
+                gpu_pct = row.get("gpu_pct")
+                gpu_mhz = row.get("gpu_mhz", 0)
                 ram_pct = (100.0 * row.get("mem_used_kb", 0)
                            / max(row.get("mem_total_kb", 1), 1))
                 pgmaj = row.get("pgmajfault_per_s", 0)
@@ -715,7 +877,10 @@ def main() -> int:
                 ctxt = row.get("ctxt_per_s", 0)
                 tj = row.get("tj_c", 0)
                 vin = row.get("vin_mw", 0) / 1000.0
-                print(f"{ts}  cpu={cpu:5.1f}%  gpu={gpu:4.1f}%  ram={ram_pct:4.1f}%  "
+                gpu_str = (f"gpu={gpu_pct:5.1f}%@{gpu_mhz:>4}MHz"
+                           if gpu_pct is not None
+                           else f"gpu=  -- @{gpu_mhz:>4}MHz")
+                print(f"{ts}  cpu={cpu:5.1f}%  {gpu_str}  ram={ram_pct:4.1f}%  "
                       f"pgmaj/s={pgmaj:5.1f}  rd={rd:5.1f}MB/s wr={wr:5.1f}MB/s  "
                       f"ctxt/s={ctxt:6.0f}  tj={tj:4.1f}C  vin={vin:5.2f}W")
 
@@ -732,6 +897,9 @@ def main() -> int:
             try: tg.kill()
             except Exception: pass
         if perf: perf.stop()
+        if gpu_reader is not None:
+            try: gpu_reader[2]()
+            except Exception: pass
         writer.close()
 
     print(f"[perfmon] {n} samples written to {csv_path}"
