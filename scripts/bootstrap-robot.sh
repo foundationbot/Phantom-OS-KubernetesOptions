@@ -144,6 +144,7 @@
 #
 # Phases (bootstrap runs all of them in order; --<phase> selects one):
 #   pre-phases (run before phase 1; default-on, opt out via --skip-*):
+#     purge workload pods        (--skip-purge-pods)
 #     stop docker containers     (--skip-docker-stop)
 #     stop system services       (--skip-stop-services)
 #     uninstall dma-ethercat     (--skip-ethercat-uninstall)
@@ -284,6 +285,7 @@ SKIP_NVIDIA=0
 
 # Pre-phase + dma-ethercat skip flags (default-on phases, hence the
 # inverted polarity from the per-phase opt-in flags above).
+SKIP_PURGE_PODS=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
 SKIP_ETHERCAT_UNINSTALL=0
@@ -292,6 +294,12 @@ SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
 SKIP_INSTALL_DMA_ETHERCAT=0
 SELECTED_PHASES=()
+
+# Namespaces whose pods are deleted by the purge-workload-pods pre-phase.
+# These are the namespaces the bootstrap script itself creates / seeds.
+# Kept in sync with PULL_SECRET_NAMESPACES + the argocd namespace owned
+# by the gitops phase's terraform/helm install.
+WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic)
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
@@ -334,6 +342,7 @@ while [ $# -gt 0 ]; do
     # Targeted overrides that compose with both modes.
     --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
     --skip-validate)     SKIP_VALIDATE=1; shift ;;
+    --skip-purge-pods)   SKIP_PURGE_PODS=1; shift ;;
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
@@ -590,6 +599,57 @@ elif command -v k0s >/dev/null 2>&1; then
 else
   KUBECTL=()
 fi
+
+# ---- pre-phase: purge workload pods (default; --skip-purge-pods) ------
+#
+# Delete every pod in the namespaces this script is responsible for
+# creating (WORKLOAD_NAMESPACES). Lets a re-bootstrap start from a
+# clean workload state without requiring the heavier --reset path.
+# Skips gracefully when:
+#   - kubectl is not yet on PATH (fresh machine, nothing to purge)
+#   - the API server is unreachable (cluster down or not installed)
+#   - a target namespace does not exist
+# Pods are deleted with --force --grace-period=0 --wait=false so the
+# pre-phase does not block on finalizers; the kubelet reaps the
+# containers once the API server records the deletion.
+purge_workload_pods() {
+  if [ "$SKIP_PURGE_PODS" = 1 ]; then
+    phase "pre-phase: purge workload pods  (skipped — --skip-purge-pods)"
+    return
+  fi
+  phase "pre-phase: purge workload pods"
+
+  if [ "${#KUBECTL[@]}" -eq 0 ]; then
+    skip "kubectl not installed yet — nothing to purge"
+    return
+  fi
+  if ! "${KUBECTL[@]}" --request-timeout=5s get ns >/dev/null 2>&1; then
+    skip "cluster API not reachable — nothing to purge"
+    return
+  fi
+
+  local ns count
+  for ns in "${WORKLOAD_NAMESPACES[@]}"; do
+    if ! "${KUBECTL[@]}" get ns "$ns" >/dev/null 2>&1; then
+      skip "ns/$ns absent"
+      continue
+    fi
+    count=$("${KUBECTL[@]}" -n "$ns" get pods --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" = "0" ]; then
+      skip "ns/$ns has no pods"
+      continue
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+      note "DRY-RUN: kubectl -n $ns delete pods --all --force --grace-period=0 --wait=false  ($count pod(s))"
+      continue
+    fi
+    if "${KUBECTL[@]}" -n "$ns" delete pods --all --force --grace-period=0 --wait=false >/dev/null 2>&1; then
+      pass "purged $count pod(s) in ns/$ns"
+    else
+      fail "delete pods in ns/$ns"
+    fi
+  done
+}
 
 # ---- pre-phase: stop docker containers (default; --skip-docker-stop) ----
 
@@ -3916,6 +3976,7 @@ print_plan() {
 
   printf '\n   \033[1mplanned phases (in execution order):\033[0m\n'
 
+  _step $([ "$SKIP_PURGE_PODS"           = 0 ] && echo 1 || echo 0) "purge workload pods"                    "--skip-purge-pods"
   _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
   _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
   _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall"
@@ -3949,6 +4010,7 @@ if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
   [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
 fi
 
+purge_workload_pods     ; guard
 purge_docker            ; guard
 stop_existing_services  ; guard
 reset_cluster           ; guard
