@@ -3302,7 +3302,7 @@ _IMAGE_STACK_MAP=""   # newline-separated: "<image>\t<stack>"
 
 _kustomize_cmd() {
   if command -v kustomize >/dev/null 2>&1; then
-    printf 'kustomize\n'
+    printf 'kustomize build\n'
   elif command -v kubectl >/dev/null 2>&1 && kubectl kustomize --help >/dev/null 2>&1; then
     printf 'kubectl kustomize\n'
   elif command -v k0s >/dev/null 2>&1; then
@@ -3331,11 +3331,15 @@ _build_image_stack_map() {
   local map=""
   while IFS= read -r stack; do
     [ -z "$stack" ] && continue
-    local rendered
-    if ! rendered="$($kk "$REPO_ROOT/manifests/stacks/$stack" 2>/dev/null)"; then
+    local rendered err
+    err="$(mktemp)"
+    if ! rendered="$($kk "$REPO_ROOT/manifests/stacks/$stack" 2>"$err")"; then
       fail "kustomize build failed for manifests/stacks/$stack"
+      sed 's/^/    /' "$err" >&2
+      rm -f "$err"
       return 1
     fi
+    rm -f "$err"
     local images
     images="$(printf '%s' "$rendered" | python3 -c '
 import sys, yaml
