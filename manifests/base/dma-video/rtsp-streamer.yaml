@@ -21,7 +21,7 @@ spec:
       containers:
         - name: rtsp-streamer
           image: foundationbot/dma-video:main
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["python3", "src/rtsp_streamer.py"]
           args: ["--camera-config", "/opt/configs/cameras.json"]
           volumeMounts:

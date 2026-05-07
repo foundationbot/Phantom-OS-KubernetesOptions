@@ -18,7 +18,7 @@ spec:
       containers:
         - name: argus-gateway
           image: foundationbot/argus.gateway:qa
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9100
           env:

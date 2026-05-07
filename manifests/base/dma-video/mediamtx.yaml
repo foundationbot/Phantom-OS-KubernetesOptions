@@ -20,6 +20,7 @@ spec:
       containers:
         - name: mediamtx
           image: bluenviron/mediamtx:latest
+          imagePullPolicy: IfNotPresent
           env:
             - name: MTX_API
               value: "yes"
