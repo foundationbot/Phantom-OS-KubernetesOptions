@@ -35,6 +35,17 @@ spec:
       labels:
         app: positronic-control
     spec:
+      # Mutually exclusive with phantom-locomotion. Default-on:
+      # the cluster phase reconciler injects
+      # foundation.bot/has-positronic=true on every robot unless
+      # host-config nodeLabels: explicitly sets it to "false". To
+      # migrate a robot to phantom-locomotion, set
+      #   foundation.bot/has-positronic: "false"
+      #   foundation.bot/has-locomotion: "true"
+      # in /etc/phantomos/host-config.yaml. The host-config validator
+      # rejects has-locomotion=true with default-on positronic.
+      nodeSelector:
+        foundation.bot/has-positronic: "true"
       hostNetwork: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
