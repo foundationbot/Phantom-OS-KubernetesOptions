@@ -347,8 +347,19 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "manifest_image": "localhost:5443/positronic-control",
     },
     "phantom-models": {
+        # Consumed by positronic-control's load-models initContainer.
+        # Larger bundle (model weights, configs).
         "stack": "core",
         "manifest_image": "localhost:5443/phantom-models",
+    },
+    "phantom-policies": {
+        # Consumed by phantom-locomotion's load-policies initContainer.
+        # Slim image (~MB) — only ONNX policies, mapped to /models/policies.
+        # Built from the same scripts/phantom-models/build.py with
+        # `--image phantom-policies` and a manifest pointing entries at
+        # dest: policies/<name>.
+        "stack": "core",
+        "manifest_image": "localhost:5443/phantom-policies",
     },
     "operator-ui": {
         "stack": "operator",

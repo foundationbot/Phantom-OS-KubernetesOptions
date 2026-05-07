@@ -16,15 +16,17 @@
 # validator rejects "has-locomotion: true with default-on positronic".
 #
 # ── Policies ─────────────────────────────────────────────────────────────
-# Policy ONNX files live in the phantom-models busybox image under
+# Policy ONNX files live in the phantom-policies busybox image under
 # /models/policies/. An initContainer copies that subtree into a shared
 # emptyDir; the main container mounts the emptyDir at /data/policies
 # (matches the docker-compose contract). Same lifecycle as
-# positronic-control's load-models initContainer.
+# positronic-control's load-models initContainer, but consumes a
+# DIFFERENT image (phantom-policies vs phantom-models) so locomotion
+# robots can ship a small policies-only image (~MB) instead of dragging
+# in positronic-control's full model bundle (~GB).
 #
-# If the operator's phantom-models build manifest is missing a
-# /policies entry, the initContainer fails loud (init logs name the
-# missing path).
+# If the operator's phantom-policies build doesn't ship /models/policies,
+# the initContainer fails loud (init logs name the missing path).
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -60,11 +62,11 @@ spec:
       terminationGracePeriodSeconds: 15
 
       initContainers:
-        # Copy /models/policies from the phantom-models image into the
-        # shared emptyDir; main container mounts the emptyDir at
+        # Copy /models/policies from the phantom-policies image into
+        # the shared emptyDir; main container mounts the emptyDir at
         # /data/policies. Matches the docker-compose volume contract.
         - name: load-policies
-          image: localhost:5443/phantom-models:PLACEHOLDER
+          image: localhost:5443/phantom-policies:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -75,9 +77,9 @@ spec:
                 echo "==> copying /models/policies -> /shared"
                 cp -a /models/policies/. /shared/
               else
-                echo "==> /models/policies missing in phantom-models image"
-                echo "    expected: phantom-models build manifest with"
-                echo "    a 'policies' directory at /models/policies"
+                echo "==> /models/policies missing in phantom-policies image"
+                echo "    expected: phantom-policies build manifest with"
+                echo "    .onnx entries mapped to dest: policies/<name>.onnx"
                 exit 1
               fi
               echo "==> done; /shared contents:"

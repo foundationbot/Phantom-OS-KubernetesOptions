@@ -63,8 +63,14 @@ stacks:
 # Known containers (others are rejected at validate-time):
 #   positronic-control   core stack — manifest uses
 #                          localhost:5443/positronic-control
-#   phantom-models       core stack — manifest uses
-#                          localhost:5443/phantom-models
+#   phantom-models       core stack — positronic-control's load-models init.
+#                          manifest uses localhost:5443/phantom-models.
+#                          Bundles model weights / configs (~GB).
+#   phantom-policies     core stack — phantom-locomotion's load-policies init.
+#                          manifest uses localhost:5443/phantom-policies.
+#                          Slim image with ONNX files at /models/policies/.
+#                          Build with `scripts/phantom-models/build.py
+#                          --image phantom-policies --manifest <yaml>`.
 #   operator-ui          operator stack — manifest uses
 #                          foundationbot/argus.operator-ui
 #   dma-ethercat         NOT stack-routed — bootstrap-managed installer
