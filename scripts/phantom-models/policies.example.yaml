@@ -3,36 +3,51 @@
 # The phantom-policies image bundles ONNX policy files at
 # /models/policies/. phantom-locomotion's load-policies initContainer
 # copies that subtree into a shared emptyDir mounted at /data/policies
-# in the main container.
+# in the main container, where dma_launch.sh consumes them.
 #
-# Each entry's `source` (file or directory on the host) is copied into
-# the build context at the path given by `dest` (relative to /models
-# in the resulting image). For policies, prefix every dest with
-# `policies/` so the locomotion init container finds them.
+# ── IMPORTANT: dest filenames must match the POLICY NAME ───────────
+# dma_launch.sh's "skip S3 if cached" path looks for the file at
+#   $CACHE_DIR/<POLICY_NAME>.onnx       ($CACHE_DIR=/data/policies)
+# i.e. the file must be named after the policy itself, NOT after the
+# raw ONNX filename produced by training. The policy → onnx mapping
+# lives in /workspace/policies.yaml inside the phantom-dma-inference
+# image. As of FIR-285:
 #
-# Usage:
+#   mk2-walking-lower-body       ← hot-jute.onnx
+#   mk2-walking-lower-body-1imu  ← aware-motorcar.onnx
+#
+# So the build manifest below renames each source ONNX to the policy
+# name. With those renames in place dma_launch.sh logs:
+#   [LAUNCH] Using existing policy: /data/policies/<policy>.onnx
+#            (manually placed, skipping manifest/S3)
+# and never touches S3.
+#
+# If you ship raw filenames instead (e.g. dest: policies/hot-jute.onnx),
+# dma_launch.sh won't find a cache hit for the policy name and will
+# fall through to the S3 download path — which fails on robots without
+# AWS credentials wired in.
+#
+# ── Usage ─────────────────────────────────────────────────────────
 #   sudo python3 scripts/phantom-models/build.py \
 #     --manifest scripts/phantom-models/policies.example.yaml \
 #     --image phantom-policies \
 #     --tag mk2-walking-v1
 #
 # After build/push, the resulting image's /models layout will be:
-#   /models/policies/aware-motorcar.onnx
-#   /models/policies/hot-jute.onnx
-#   /models/policies/walking-imu-standing-mix/   (whole subdir)
+#   /models/policies/mk2-walking-lower-body.onnx
+#   /models/policies/mk2-walking-lower-body-1imu.onnx
 #
-# For the simple case of "every top-level *.onnx under
-# /root/phantom-models-merged" use --policies instead — it auto-builds
-# this manifest from disk.
+# ── --policies vs --manifest ─────────────────────────────────────
+# `--policies` auto-discovers top-level *.onnx files under --root and
+# bundles them under policies/<original-filename>. Use it when your
+# files on disk are ALREADY named after the target policy (e.g. you
+# scp'd the file as `mk2-walking-lower-body-1imu.onnx`). When the
+# files keep their training names, use this manifest form to rename
+# at image-build time.
 
 models:
-  # Plain ONNX files. dest names them under /models/policies/.
-  - source: /root/phantom-models-merged/aware-motorcar.onnx
-    dest: policies/aware-motorcar.onnx
+  # Source ONNX → dest renamed to the dma_launch.sh policy name.
   - source: /root/phantom-models-merged/hot-jute.onnx
-    dest: policies/hot-jute.onnx
-
-  # Whole subdirectories. Useful when an ONNX file ships alongside its
-  # config/metadata and the launch script needs the full subtree.
-  - source: /root/phantom-models-merged/walking-imu-standing-mix
-    dest: policies/walking-imu-standing-mix
+    dest: policies/mk2-walking-lower-body.onnx
+  - source: /root/phantom-models-merged/aware-motorcar.onnx
+    dest: policies/mk2-walking-lower-body-1imu.onnx

@@ -43,6 +43,15 @@ Four modes
 
        sudo python3 scripts/phantom-models/build.py --policies
 
+   Naming caveat: dma_launch.sh's "skip S3 if cached" path keys on
+   the POLICY NAME (file at /data/policies/<POLICY_NAME>.onnx), not
+   the raw ONNX filename. --policies preserves filenames as-is, so
+   it only avoids S3 downloads when your files on disk are ALREADY
+   named after their target policy (e.g. you scp'd the file as
+   `mk2-walking-lower-body-1imu.onnx`). When the files keep their
+   training-time names, use --manifest with explicit dest renames
+   (see policies.example.yaml).
+
 Tag defaults to today's date (YYYY-MM-DD). Override with --tag.
 
 The image is pushed to localhost:5443 by default; override with
@@ -401,7 +410,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Auto-discover *.onnx files at top level of --root and bundle "
             "each as /models/policies/<filename>. Defaults --image to "
-            f"'{DEFAULT_POLICIES_IMAGE}' (override with --image)."
+            f"'{DEFAULT_POLICIES_IMAGE}' (override with --image). "
+            "NOTE: dma_launch.sh's S3-bypass path keys on policy name; "
+            "use --manifest if you need dest renames "
+            "(see policies.example.yaml)."
         ),
     )
     p.add_argument(
