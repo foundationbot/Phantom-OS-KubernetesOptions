@@ -18,7 +18,7 @@ spec:
       containers:
         - name: operator-ui
           image: foundationbot/argus.operator-ui:qa
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8004
           env:

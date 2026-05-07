@@ -20,7 +20,7 @@ spec:
       containers:
         - name: camera-params
           image: foundationbot/dma-video:main
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           # Compose: entrypoint → command, command → args
           command: ["python3", "src/camera_params_server.py"]
           args: ["--config", "/opt/configs/cameras.json", "--port", "8420"]
