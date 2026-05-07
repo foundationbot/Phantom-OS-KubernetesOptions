@@ -1042,9 +1042,12 @@ uninstall_ethercat() {
     skip "disable  $svc  (state=${enabled:-unknown})"
   fi
 
-  # 3. run the uninstaller
+  # 3. run the uninstaller (optional — older installs may not ship one)
+  # If it's missing, stop+disable above is enough to neutralize the
+  # service for the duration of this bootstrap; the unit file stays on
+  # disk but is inert until something re-enables it.
   if [ ! -e "$uninstaller" ]; then
-    fail "$uninstaller not found — cannot complete uninstall"
+    skip "$uninstaller not present — relying on stop+disable above"
     return
   fi
   if [ ! -x "$uninstaller" ]; then
