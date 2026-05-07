@@ -182,6 +182,25 @@ images:
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
 
+# Per-host phantom-locomotion policy. Bootstrap phase locomotion-config
+# renders /etc/phantomos/phantom-locomotion-config.yaml from this
+# block — a ConfigMap whose LOCOMOTION_POLICY key drives the
+# DaemonSet's `dma_launch.sh <policy>` invocation. Same lifecycle as
+# operator-ui-pairing: lives on the host (not in git), --reset
+# preserves it, ArgoCD doesn't reconcile it.
+#
+# Default (applied when phantomLocomotion is absent or .policy unset):
+#   policy: mk2-walking-lower-body-1imu
+#
+# Known policies (defined inside the phantom-dma-inference image's
+# built-in registry; bootstrap doesn't enumerate them, dma_launch.sh
+# fails loud on unknown values):
+#   mk2-walking-lower-body         hot-jute,        13 joints, 3 IMUs
+#   mk2-walking-lower-body-1imu    aware-motorcar,  13 joints, 1 IMU
+#
+# phantomLocomotion:
+#   policy: mk2-walking-lower-body-1imu
+
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
 # /var/log/journal and /var/log/syslog from filling the root partition.

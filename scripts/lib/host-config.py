@@ -17,6 +17,7 @@ Usage:
   host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-log-management-json
   host-config.py <path> get-node-labels-json
+  host-config.py <path> get-phantom-locomotion-policy
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -217,6 +218,24 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
     out.append(f"  configPath: {value}\n")
 
     p.write_text("".join(out))
+    return 0
+
+
+DEFAULT_LOCOMOTION_POLICY: str = "mk2-walking-lower-body-1imu"
+
+
+def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
+    """Print phantomLocomotion.policy or the documented default.
+    Bootstrap's locomotion-config phase consumes this to render the
+    LOCOMOTION_POLICY value into the phantom-locomotion-config CM."""
+    block = cfg.get("phantomLocomotion") or {}
+    if not isinstance(block, dict):
+        print("error: 'phantomLocomotion' must be a mapping", file=sys.stderr)
+        return 2
+    policy = block.get("policy")
+    if not policy:
+        policy = DEFAULT_LOCOMOTION_POLICY
+    print(policy)
     return 0
 
 
@@ -1390,6 +1409,22 @@ def cmd_validate(cfg: dict) -> int:
                         "exclusive — only one may be \"true\""
                     )
 
+    # phantomLocomotion is optional; .policy must be a non-empty string
+    # if present (a known policy name from the phantom-dma-inference
+    # image's built-in registry — bootstrap doesn't enumerate them, the
+    # in-pod dma_launch.sh fails loud if the value is unrecognized).
+    pl = cfg.get("phantomLocomotion")
+    if pl is not None:
+        if not isinstance(pl, dict):
+            errors.append("'phantomLocomotion' must be a mapping")
+        else:
+            policy = pl.get("policy")
+            if policy is not None and (not isinstance(policy, str) or not policy):
+                errors.append(
+                    f"phantomLocomotion.policy: must be a non-empty string "
+                    f"(got {policy!r})"
+                )
+
     if errors:
         for e in errors:
             print(f"error: {e}", file=sys.stderr)
@@ -1413,6 +1448,8 @@ def main() -> int:
         return cmd_get_log_management_json(cfg)
     if cmd == "get-node-labels-json":
         return cmd_get_node_labels_json(cfg)
+    if cmd == "get-phantom-locomotion-policy":
+        return cmd_get_phantom_locomotion_policy(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":

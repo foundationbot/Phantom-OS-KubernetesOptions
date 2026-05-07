@@ -98,15 +98,33 @@ spec:
           # the workload, matching positronic-control's convention.
           image: foundationbot/phantom-dma-inference:PLACEHOLDER
           imagePullPolicy: IfNotPresent
-          # Entrypoint matches docker-compose: /entrypoint.sh sources
-          # ROS humble + foundation_msgs, then exec's
-          # `bash /workspace/docker/dma_launch.sh`.
-          command: ["/entrypoint.sh", "bash", "/workspace/docker/dma_launch.sh"]
+          # /entrypoint.sh sources ROS humble + foundation_msgs, then
+          # exec's `dma_launch.sh <policy-name>`. The policy name comes
+          # from the LOCOMOTION_POLICY env var (sourced from the
+          # phantom-locomotion-config ConfigMap, rendered per-host by
+          # bootstrap's locomotion-config phase from
+          # /etc/phantomos/host-config.yaml's phantomLocomotion.policy
+          # field). Shell-default falls back to a known-good policy
+          # so the pod still starts if the CM isn't applied yet.
+          command:
+            - /entrypoint.sh
+            - bash
+            - -c
+            - 'exec /workspace/docker/dma_launch.sh "${LOCOMOTION_POLICY:-mk2-walking-lower-body-1imu}"'
           # The docker-compose runs with stdin_open + tty for joystick
           # / keyboard control. Mirror here so an operator can
           # `kubectl exec -it` into the live pod.
           stdin: true
           tty: true
+          envFrom:
+            # Per-host policy selection. Bootstrap's locomotion-config
+            # phase creates this ConfigMap (NOT in the GitOps tree, so
+            # ArgoCD doesn't reset per-host edits). optional: true means
+            # kubelet doesn't fail when the CM is missing — the command's
+            # shell-default kicks in instead.
+            - configMapRef:
+                name: phantom-locomotion-config
+                optional: true
           env:
             - { name: ROS_DOMAIN_ID,    value: "101" }
             - { name: SDL_VIDEODRIVER,  value: "dummy" }
