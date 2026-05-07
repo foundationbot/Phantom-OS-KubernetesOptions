@@ -14,6 +14,8 @@ set -u -o pipefail
 REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 REGISTRY_STORAGE="${REGISTRY_STORAGE:-/var/lib/registry}"
 REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-registry}"
+REGISTRY_DEPLOYMENT="${REGISTRY_DEPLOYMENT:-k0s-registry}"
+REGISTRY_WAIT_SECS="${REGISTRY_WAIT_SECS:-120}"
 CONTAINERD_HOSTS_DIR="${CONTAINERD_HOSTS_DIR:-/etc/k0s/containerd.d/hosts}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-/etc/k0s/containerd.toml}"
 SMOKE_TAG="${SMOKE_TAG:-${REGISTRY_HOST}/validate/hello-world:smoke}"
@@ -39,6 +41,42 @@ elif have k0s && k0s kubectl version --client >/dev/null 2>&1; then
   KUBECTL="k0s kubectl"
 fi
 kc() { eval "$KUBECTL" "\"\$@\""; }
+
+# Wait for the in-cluster registry Deployment to become Available before
+# we run the dependent tests (T03 HTTP reachability, T04 docker push,
+# T07 pod Running, T12 k0s ctr pull, T13 prime + pull). Useful right
+# after a fresh bootstrap where ArgoCD may still be syncing manifests
+# when validate runs — without this wait the operator gets a wall of
+# false negatives that just need a re-run a minute later.
+#
+# Soft: kubectl unavailable -> no-op (existing T05 skip will fire);
+# namespace missing -> note + continue (T06 will fail clearly);
+# Deployment missing -> note + continue (T07 will fail clearly);
+# Available timeout -> note + continue (T07 will fail and other tests
+# will surface the underlying problem). Never fails the validator on
+# its own; it just gives the cluster a deterministic head-start.
+wait_for_registry() {
+  [ -z "$KUBECTL" ] && return 0
+  if ! kc get ns "$REGISTRY_NAMESPACE" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! kc -n "$REGISTRY_NAMESPACE" get deploy "$REGISTRY_DEPLOYMENT" \
+       >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '\033[2m  · waiting up to %ss for deploy/%s in %s to become Available...\033[0m\n' \
+    "$REGISTRY_WAIT_SECS" "$REGISTRY_DEPLOYMENT" "$REGISTRY_NAMESPACE"
+  if kc -n "$REGISTRY_NAMESPACE" wait \
+       --for=condition=Available \
+       "deploy/$REGISTRY_DEPLOYMENT" \
+       "--timeout=${REGISTRY_WAIT_SECS}s" >/dev/null 2>&1; then
+    printf '\033[2m  · deploy/%s Available\033[0m\n' "$REGISTRY_DEPLOYMENT"
+  else
+    printf '\033[33m  · deploy/%s did not become Available within %ss — continuing; failing tests below will pinpoint why\033[0m\n' \
+      "$REGISTRY_DEPLOYMENT" "$REGISTRY_WAIT_SECS"
+  fi
+}
+wait_for_registry
 
 # --- Docker (host push path) -----------------------------------------------
 
