@@ -18,7 +18,7 @@ spec:
       containers:
         - name: argus-user
           image: foundationbot/argus.user:qa
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9001
           env:
