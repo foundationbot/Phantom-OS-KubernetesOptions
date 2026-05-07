@@ -38,6 +38,7 @@ spec:
       # the pod sits in the host's network namespace.
       hostNetwork: true
       hostPID: true
+      hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
 
       # Host-level singleton — no point starting a second copy.
