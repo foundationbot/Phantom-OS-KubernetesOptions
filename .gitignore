@@ -9,3 +9,6 @@ __pycache__/
 docs/plans/
 docs/research/
 .claude/worktrees/
+
+# Local deb-builder output (scripts/build-deb.sh)
+/dist/
