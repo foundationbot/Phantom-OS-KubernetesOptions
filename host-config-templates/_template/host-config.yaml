@@ -72,6 +72,13 @@ stacks:
 #                          directly. Tag convention:
 #                            *-latest-aarch64  Jetson / arm64 robots
 #                            *-latest-amd64    x86 robots
+#   phantom-dma-inference  core stack — phantom-locomotion DaemonSet.
+#                          Image foundationbot/phantom-dma-inference; CI
+#                          publishes -aarch64 for Jetson, plain (amd64)
+#                          otherwise.
+#   cpp-robot-state-estimator
+#                          core stack — IMU + kinematic state estimator
+#                          DaemonSet. Tag convention <branch>-latest-<arch>.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -212,14 +219,36 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
+# Default-on: foundation.bot/has-positronic is applied as 'true' on
+# every robot UNLESS explicitly set to 'false' here. Operators
+# migrating a robot to phantom-locomotion must set BOTH
+#   foundation.bot/has-positronic: "false"
+#   foundation.bot/has-locomotion: "true"
+# The validator rejects setting only has-locomotion=true (positronic
+# is on by default; both controllers would try to drive the robot).
+#
 # Values must be strings — quote 'true' / 'false' or the YAML parser
 # turns them into Python booleans, which the validator rejects with
 # a clear error.
 #
+# Known label conventions in this repo (gates DaemonSets that ship
+# disabled by default):
+#   foundation.bot/has-positronic        positronic-control Deployment   (default: true)
+#   foundation.bot/has-locomotion        phantom-locomotion DaemonSet    (mutually excl. with has-positronic)
+#   foundation.bot/has-state-estimator   cpp-robot-state-estimator DS    (independent)
+#   foundation.bot/has-recorder          dma-recorder DaemonSet
+#   foundation.bot/has-streamer          rerun-streamer DaemonSet
+#
 # nodeLabels:
+#   # Default robot — positronic is implicit; just opt into extras.
 #   foundation.bot/has-state-estimator: "true"
-#   foundation.bot/has-recorder: "false"
-#   foundation.bot/has-imu: "true"
+#   foundation.bot/has-recorder:        "true"
+#
+# nodeLabels:
+#   # Locomotion-stack robot — explicitly disable positronic.
+#   foundation.bot/has-positronic:      "false"
+#   foundation.bot/has-locomotion:      "true"
+#   foundation.bot/has-state-estimator: "true"
 
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal

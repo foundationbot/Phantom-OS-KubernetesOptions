@@ -360,6 +360,18 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": None,
         "manifest_image": "foundationbot/dma-ethercat",
     },
+    "phantom-dma-inference": {
+        # phantom-locomotion DaemonSet (foundation.bot/has-locomotion gated).
+        # CI in imu-policy/phantom-locomotion publishes -aarch64 for Jetson.
+        "stack": "core",
+        "manifest_image": "foundationbot/phantom-dma-inference",
+    },
+    "cpp-robot-state-estimator": {
+        # State-estimator DaemonSet (foundation.bot/has-state-estimator).
+        # CI publishes <branch>-latest-<arch> tags.
+        "stack": "core",
+        "manifest_image": "foundationbot/cpp-robot-state-estimator",
+    },
 }
 
 
@@ -1335,6 +1347,30 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(
                         f"nodeLabels.{k}: value {v!r} not a valid k8s label "
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
+                    )
+
+            # Mutual exclusion: positronic-control and phantom-locomotion
+            # are competing options. Operator picks one. has-positronic
+            # defaults to "true" (the cluster phase reconciler injects
+            # it on every robot unless explicitly set false), so
+            # operators enabling locomotion MUST also explicitly disable
+            # positronic — otherwise both would render and try to drive
+            # the robot.
+            effective_pos = nl.get("foundation.bot/has-positronic", "true")
+            effective_loc = nl.get("foundation.bot/has-locomotion", "false")
+            if effective_pos == "true" and effective_loc == "true":
+                if "foundation.bot/has-positronic" not in nl:
+                    errors.append(
+                        "nodeLabels: enabling foundation.bot/has-locomotion "
+                        "requires explicitly setting "
+                        "foundation.bot/has-positronic: \"false\" "
+                        "(positronic defaults to on)"
+                    )
+                else:
+                    errors.append(
+                        "nodeLabels: foundation.bot/has-positronic and "
+                        "foundation.bot/has-locomotion are mutually "
+                        "exclusive — only one may be \"true\""
                     )
 
     if errors:

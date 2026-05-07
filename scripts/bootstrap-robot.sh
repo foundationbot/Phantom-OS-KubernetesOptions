@@ -1336,8 +1336,19 @@ _reconcile_node_labels() {
       desired_json='{}'
     fi
   fi
-  desired_json=$(printf '%s' "$desired_json" \
-    | jq '. + {"foundation.bot/robot": "true"}')
+  # Bootstrap-managed labels:
+  #   foundation.bot/robot: always 'true' — overrides anything in host-config.
+  #   foundation.bot/has-positronic: default 'true' but operator can
+  #     override (set to "false" in host-config.yaml's nodeLabels: to
+  #     migrate a robot to phantom-locomotion). Validator enforces
+  #     mutual exclusion with foundation.bot/has-locomotion.
+  desired_json=$(printf '%s' "$desired_json" | jq '
+    . + {"foundation.bot/robot": "true"}
+    | if has("foundation.bot/has-positronic")
+        then .
+        else . + {"foundation.bot/has-positronic": "true"}
+      end
+  ')
 
   # Apply each desired label.
   local key value
