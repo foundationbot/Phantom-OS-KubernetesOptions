@@ -27,6 +27,12 @@ the repo root:
 - plus `+<utcdate>.g<sha>` when built from a git checkout, for traceability
 - plus `+dirty` if the working tree has uncommitted changes
 
+The output filename flattens `.` and `+` to `-` for readability
+(e.g. `phantomos-k0s-0-0-1-20260507-g19f774a-dirty-all.deb`), but the
+Debian `Version:` field embedded in the package keeps the dots and
+pluses (e.g. `0.0.1+20260507.g19f774a+dirty`) so dpkg/apt version
+comparison still works correctly.
+
 For a clean tagged release, set `VERSION` explicitly (matches whatever
 you put in `version.txt`) so the package version has no suffix:
 
