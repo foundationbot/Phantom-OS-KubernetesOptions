@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Build and push the phantom-models container image.
+"""Build and push a phantom-models or phantom-policies container image.
 
-The phantom-models image bundles model weights + configs into a
-FROM-scratch OCI image. The positronic-control pod mounts it as a
-read-only volume via the Kubernetes `image:` volume source (KEP-4639),
-so the container never executes the image — it just reads files from
-/models.
+These images are busybox-based and bundle files at /models. Two
+consumers in this repo:
 
-Three modes
------------
+  - phantom-models (default name): positronic-control's load-models
+    initContainer. Larger bundle of model weights + configs.
+  - phantom-policies (--policies):  phantom-locomotion's load-policies
+    initContainer. Slim image of ONNX policies at /models/policies/.
+
+Four modes
+----------
 
 1. **Default — interactive selection.** Prompts for a root directory
    (default: /root/phantom-models-merged), lists its top-level entries
@@ -22,17 +24,26 @@ Three modes
 
        sudo python3 scripts/phantom-models/build.py --all
 
-3. **--manifest FILE — explicit per-model selection** via a YAML file.
-   Mutually exclusive with --all. Manifest format:
+3. **--manifest FILE — explicit per-entry selection** via a YAML file.
+   Mutually exclusive with --all and --policies. Manifest format:
 
        models:
          - source: /path/to/sam2_hiera_large.pt
            dest: sam2_hiera_large.pt
-         - source: /path/to/grounding-dino
-           dest: grounding-dino
+         - source: /path/to/policy.onnx
+           dest: policies/policy.onnx
 
-Tag defaults to today's date (YYYY-MM-DD) per the project's tag-scheme
-decision (D-table in the plan doc). Override with --tag.
+   See models.example.yaml and policies.example.yaml in this directory.
+
+4. **--policies — phantom-policies auto-discovery.** Walks --root for
+   top-level *.onnx files and bundles each as policies/<name>.onnx in
+   the image. Defaults --image to 'phantom-policies'. Subdirectory
+   .onnx files are NOT auto-discovered — use --manifest if you need
+   them with a specific dest path.
+
+       sudo python3 scripts/phantom-models/build.py --policies
+
+Tag defaults to today's date (YYYY-MM-DD). Override with --tag.
 
 The image is pushed to localhost:5443 by default; override with
 --registry. Use --no-push to build locally without pushing.
@@ -56,6 +67,7 @@ except ImportError:  # only required for --manifest
 
 DEFAULT_REGISTRY = "localhost:5443"
 DEFAULT_IMAGE = "phantom-models"
+DEFAULT_POLICIES_IMAGE = "phantom-policies"
 DEFAULT_ROOT = "/root/phantom-models-merged"
 
 # Dockerfile lives next to this script.
@@ -267,18 +279,25 @@ def build_from_entries(items: list[Path], image_ref: str, dry_run: bool) -> None
         )
 
 
-def build_from_manifest(manifest_path: Path, image_ref: str, dry_run: bool) -> None:
-    """Assemble a temp build context from explicit YAML entries."""
-    if _yaml is None:
-        sys.exit(
-            "PyYAML is required for --manifest.\n"
-            "Install: pip install pyyaml  (or: apt install python3-yaml)"
-        )
-    spec = _yaml.safe_load(manifest_path.read_text()) or {}
-    entries = spec.get("models") or []
-    if not entries:
-        sys.exit(f"manifest {manifest_path} has no 'models:' entries")
+def auto_discover_policy_entries(root: Path) -> list[dict]:
+    """Find *.onnx files at the top level of `root` and map each to
+    policies/<filename> in the image. Subdirectory .onnx files are
+    not auto-discovered — operators wanting non-flat layouts pass
+    --manifest with explicit dest paths."""
+    if not root.is_dir():
+        sys.exit(f"--root is not a directory: {root}")
+    entries = []
+    for p in sorted(root.iterdir()):
+        if p.is_file() and p.suffix == ".onnx":
+            entries.append({"source": str(p), "dest": f"policies/{p.name}"})
+    return entries
 
+
+def _build_image_from_entries(entries: list[dict], image_ref: str, dry_run: bool) -> None:
+    """Assemble a temp build context from {source, dest} entries and
+    invoke `docker build`. Shared between --manifest and --policies."""
+    if not entries:
+        sys.exit("no entries to build")
     with tempfile.TemporaryDirectory(prefix="phantom-models-build-") as ctx_str:
         ctx = Path(ctx_str)
         for entry in entries:
@@ -300,6 +319,39 @@ def build_from_manifest(manifest_path: Path, image_ref: str, dry_run: bool) -> N
             ["docker", "build", "-f", str(DOCKERFILE), "-t", image_ref, str(ctx)],
             dry_run=dry_run,
         )
+
+
+def build_from_manifest(manifest_path: Path, image_ref: str, dry_run: bool) -> None:
+    """Read a YAML manifest of {source, dest} entries and build the image."""
+    if _yaml is None:
+        sys.exit(
+            "PyYAML is required for --manifest.\n"
+            "Install: pip install pyyaml  (or: apt install python3-yaml)"
+        )
+    spec = _yaml.safe_load(manifest_path.read_text()) or {}
+    entries = spec.get("models") or []
+    if not entries:
+        sys.exit(f"manifest {manifest_path} has no 'models:' entries")
+    _build_image_from_entries(entries, image_ref, dry_run)
+
+
+def build_from_policies(root: Path, image_ref: str, dry_run: bool) -> None:
+    """Auto-discover top-level *.onnx files under root and bundle them
+    as /models/policies/<filename>."""
+    entries = auto_discover_policy_entries(root)
+    if not entries:
+        sys.exit(
+            f"no *.onnx files found at top level of {root}. "
+            f"Place your policy ONNX files there, or use --manifest "
+            f"for explicit source/dest mapping (e.g. for files in subdirs)."
+        )
+    print(f"Auto-discovered {len(entries)} policy file(s) under {root}:",
+          file=sys.stderr)
+    for e in entries:
+        size = Path(e["source"]).stat().st_size
+        print(f"  - {Path(e['source']).name}  ({size:,} bytes) -> "
+              f"/models/{e['dest']}", file=sys.stderr)
+    _build_image_from_entries(entries, image_ref, dry_run)
 
 
 def push(image_ref: str, dry_run: bool) -> None:
@@ -341,7 +393,16 @@ def parse_args() -> argparse.Namespace:
     )
     mode.add_argument(
         "--manifest",
-        help="YAML file with explicit source/dest entries (mutually exclusive with --all).",
+        help="YAML file with explicit source/dest entries.",
+    )
+    mode.add_argument(
+        "--policies",
+        action="store_true",
+        help=(
+            "Auto-discover *.onnx files at top level of --root and bundle "
+            "each as /models/policies/<filename>. Defaults --image to "
+            f"'{DEFAULT_POLICIES_IMAGE}' (override with --image)."
+        ),
     )
     p.add_argument(
         "--root",
@@ -364,10 +425,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+
+    # --policies defaults --image to phantom-policies (operator-friendly:
+    # the slim locomotion image gets a distinct registry path automatically).
+    # Operator can still override with --image explicitly.
+    if args.policies and args.image == DEFAULT_IMAGE:
+        args.image = DEFAULT_POLICIES_IMAGE
+
     image_ref = f"{args.registry}/{args.image}:{args.tag}"
 
     if args.manifest:
         build_from_manifest(Path(args.manifest), image_ref, args.dry_run)
+
+    elif args.policies:
+        root = Path(args.root or DEFAULT_ROOT)
+        print(f"Tag:   {args.tag}", file=sys.stderr)
+        print(f"Image: {image_ref}", file=sys.stderr)
+        build_from_policies(root, image_ref, args.dry_run)
 
     elif args.all:
         # Whole-tree bundle. Use --root if given, else default (no prompting

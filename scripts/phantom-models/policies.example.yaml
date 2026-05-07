@@ -1,0 +1,38 @@
+# Example manifest for `build.py --manifest --image phantom-policies`.
+#
+# The phantom-policies image bundles ONNX policy files at
+# /models/policies/. phantom-locomotion's load-policies initContainer
+# copies that subtree into a shared emptyDir mounted at /data/policies
+# in the main container.
+#
+# Each entry's `source` (file or directory on the host) is copied into
+# the build context at the path given by `dest` (relative to /models
+# in the resulting image). For policies, prefix every dest with
+# `policies/` so the locomotion init container finds them.
+#
+# Usage:
+#   sudo python3 scripts/phantom-models/build.py \
+#     --manifest scripts/phantom-models/policies.example.yaml \
+#     --image phantom-policies \
+#     --tag mk2-walking-v1
+#
+# After build/push, the resulting image's /models layout will be:
+#   /models/policies/aware-motorcar.onnx
+#   /models/policies/hot-jute.onnx
+#   /models/policies/walking-imu-standing-mix/   (whole subdir)
+#
+# For the simple case of "every top-level *.onnx under
+# /root/phantom-models-merged" use --policies instead — it auto-builds
+# this manifest from disk.
+
+models:
+  # Plain ONNX files. dest names them under /models/policies/.
+  - source: /root/phantom-models-merged/aware-motorcar.onnx
+    dest: policies/aware-motorcar.onnx
+  - source: /root/phantom-models-merged/hot-jute.onnx
+    dest: policies/hot-jute.onnx
+
+  # Whole subdirectories. Useful when an ONNX file ships alongside its
+  # config/metadata and the launch script needs the full subtree.
+  - source: /root/phantom-models-merged/walking-imu-standing-mix
+    dest: policies/walking-imu-standing-mix
