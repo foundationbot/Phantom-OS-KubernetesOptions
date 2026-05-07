@@ -1454,6 +1454,30 @@ cluster() {
   if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
   phase "phase 3: cluster"
 
+  # Image-source visibility: k0s imports anything in <data-dir>/images/
+  # into containerd at worker startup, before kubelet runs. List what's
+  # staged so the operator can confirm the phantomos-k0s-images .deb
+  # actually delivered files (and that pulls won't quietly fall through
+  # to DockerHub for refs we expected to be local).
+  local _img_dir=/var/lib/k0s/images
+  if [ -d "$_img_dir" ]; then
+    local _bundle_count _bundle_total _tar
+    _bundle_count=$(find "$_img_dir" -maxdepth 1 -name '*.tar' -type f 2>/dev/null | wc -l)
+    if [ "$_bundle_count" -gt 0 ]; then
+      _bundle_total=$(du -ch "$_img_dir"/*.tar 2>/dev/null | tail -1 | awk '{print $1}')
+      info "image bundles in $_img_dir/ (${_bundle_count} files, ${_bundle_total} total):"
+      for _tar in "$_img_dir"/*.tar; do
+        info "  $(basename "$_tar") ($(du -h "$_tar" | awk '{print $1}'))"
+      done
+      info "k0s will import these into containerd at worker startup; matching image: refs will be satisfied locally (no DockerHub pull)"
+    else
+      info "image bundles in $_img_dir/: none — pulls will go to upstream registries"
+      info "  install dist/phantomos-k0s-images-*.deb to pre-stage images"
+    fi
+  else
+    info "image bundles dir $_img_dir/ does not exist yet (k0s will create it)"
+  fi
+
   # Tailscale is a hard prerequisite — spec.api.address pins to it.
   if [ "$DRY_RUN" = 0 ]; then
     _require_tailscale || return
@@ -1534,6 +1558,23 @@ EOF
       fi
       sleep 5
     done
+  fi
+
+  # Verify the bundles we listed above actually got imported into k0s's
+  # containerd. Worker startup imports happen before kubelet, so by the
+  # time the node is Ready the import is either done or failed silently.
+  # Surfacing this prevents the failure mode where pods quietly pull
+  # from DockerHub even though we shipped a local image bundle.
+  if [ "$DRY_RUN" = 0 ] && [ -d "$_img_dir" ] \
+     && find "$_img_dir" -maxdepth 1 -name '*.tar' -type f 2>/dev/null | grep -q .; then
+    local _ctr_count
+    _ctr_count=$(k0s ctr -n k8s.io images list -q 2>/dev/null | wc -l)
+    if [ "$_ctr_count" -gt 0 ]; then
+      pass "containerd has $_ctr_count image(s) loaded from $_img_dir/ bundles"
+    else
+      info "containerd image namespace is empty — bundles may have failed to import"
+      info "  diagnose: journalctl -u k0scontroller | grep -iE 'image|bundle|import'"
+    fi
   fi
 
   # Reconcile the foundation.bot/* node-label namespace from
