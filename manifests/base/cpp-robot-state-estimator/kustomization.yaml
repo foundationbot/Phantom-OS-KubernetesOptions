@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# cpp-robot-state-estimator DaemonSet — gated on
+# foundation.bot/has-state-estimator. Independent of the
+# positronic/locomotion mutual-exclusion pair.
+resources:
+  - state-estimator.yaml

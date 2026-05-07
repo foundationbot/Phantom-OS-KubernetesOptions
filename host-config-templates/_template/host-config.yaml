@@ -63,15 +63,32 @@ stacks:
 # Known containers (others are rejected at validate-time):
 #   positronic-control   core stack — manifest uses
 #                          localhost:5443/positronic-control
-#   phantom-models       core stack — manifest uses
-#                          localhost:5443/phantom-models
+#   phantom-models       core stack — positronic-control's load-models init.
+#                          manifest uses localhost:5443/phantom-models.
+#                          Bundles model weights / configs (~GB).
+#   phantom-policies     core stack — phantom-locomotion's load-policies init.
+#                          manifest uses localhost:5443/phantom-policies.
+#                          Slim image with ONNX files at /models/policies/.
+#                          Build with `scripts/phantom-models/build.py
+#                          --image phantom-policies --manifest <yaml>`.
 #   operator-ui          operator stack — manifest uses
 #                          foundationbot/argus.operator-ui
+#   yovariable-server    core stack — yovariable-server DaemonSet.
+#                          manifest uses foundationbot/yovariable-server.
 #   dma-ethercat         NOT stack-routed — bootstrap-managed installer
 #                          Job. Phase 9 reads images.dma-ethercat.image
 #                          directly. Tag convention:
 #                            *-latest-aarch64  Jetson / arm64 robots
 #                            *-latest-amd64    x86 robots
+#   phantom-locomotion     core stack — phantom-locomotion DaemonSet.
+#                          Container key tracks the workload; the image
+#                          actually published is
+#                          foundationbot/phantom-dma-inference (CI
+#                          publishes -aarch64 for Jetson). Same key/image
+#                          indirection as operator-ui above.
+#   cpp-robot-state-estimator
+#                          core stack — IMU + kinematic state estimator
+#                          DaemonSet. Tag convention <branch>-latest-<arch>.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -167,6 +184,25 @@ images:
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
 
+# Per-host phantom-locomotion policy. Bootstrap phase locomotion-config
+# renders /etc/phantomos/phantom-locomotion-config.yaml from this
+# block — a ConfigMap whose LOCOMOTION_POLICY key drives the
+# DaemonSet's `dma_launch.sh <policy>` invocation. Same lifecycle as
+# operator-ui-pairing: lives on the host (not in git), --reset
+# preserves it, ArgoCD doesn't reconcile it.
+#
+# Default (applied when phantomLocomotion is absent or .policy unset):
+#   policy: mk2-walking-lower-body-1imu
+#
+# Known policies (defined inside the phantom-dma-inference image's
+# built-in registry; bootstrap doesn't enumerate them, dma_launch.sh
+# fails loud on unknown values):
+#   mk2-walking-lower-body         hot-jute,        13 joints, 3 IMUs
+#   mk2-walking-lower-body-1imu    aware-motorcar,  13 joints, 1 IMU
+#
+# phantomLocomotion:
+#   policy: mk2-walking-lower-body-1imu
+
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
 # /var/log/journal and /var/log/syslog from filling the root partition.
@@ -212,14 +248,36 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
+# Default-on: foundation.bot/has-positronic is applied as 'true' on
+# every robot UNLESS explicitly set to 'false' here. Operators
+# migrating a robot to phantom-locomotion must set BOTH
+#   foundation.bot/has-positronic: "false"
+#   foundation.bot/has-locomotion: "true"
+# The validator rejects setting only has-locomotion=true (positronic
+# is on by default; both controllers would try to drive the robot).
+#
 # Values must be strings — quote 'true' / 'false' or the YAML parser
 # turns them into Python booleans, which the validator rejects with
 # a clear error.
 #
+# Known label conventions in this repo (gates DaemonSets that ship
+# disabled by default):
+#   foundation.bot/has-positronic        positronic-control Deployment   (default: true)
+#   foundation.bot/has-locomotion        phantom-locomotion DaemonSet    (mutually excl. with has-positronic)
+#   foundation.bot/has-state-estimator   cpp-robot-state-estimator DS    (independent)
+#   foundation.bot/has-recorder          dma-recorder DaemonSet
+#   foundation.bot/has-streamer          rerun-streamer DaemonSet
+#
 # nodeLabels:
+#   # Default robot — positronic is implicit; just opt into extras.
 #   foundation.bot/has-state-estimator: "true"
-#   foundation.bot/has-recorder: "false"
-#   foundation.bot/has-imu: "true"
+#   foundation.bot/has-recorder:        "true"
+#
+# nodeLabels:
+#   # Locomotion-stack robot — explicitly disable positronic.
+#   foundation.bot/has-positronic:      "false"
+#   foundation.bot/has-locomotion:      "true"
+#   foundation.bot/has-state-estimator: "true"
 
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal

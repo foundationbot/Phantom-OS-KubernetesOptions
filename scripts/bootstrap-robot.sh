@@ -34,6 +34,9 @@
 #   --operator-ui-config render+apply the operator-ui-pairing ConfigMap
 #                        (currently holds AI_PC_URL; reserved for any
 #                        future per-host operator-ui env)
+#   --locomotion-config  render+apply the phantom-locomotion-config
+#                        ConfigMap (LOCOMOTION_POLICY, sourced from
+#                        host-config phantomLocomotion.policy field).
 #   --ecat-interface     resolve the EtherCAT NIC adapter and rename it
 #                        to cpuIsolation.nic.iface via persistent udev
 #                        rules. Driven by cpuIsolation.nic.selector
@@ -147,7 +150,15 @@
 #     purge workload pods        (--skip-purge-pods)
 #     stop docker containers     (--skip-docker-stop)
 #     stop system services       (--skip-stop-services)
-#     uninstall dma-ethercat     (--skip-ethercat-uninstall)
+#   pre-phases (default OFF, opt in):
+#     uninstall dma-ethercat     (--uninstall-ethercat)
+#                                Wipes /etc/dma/ via the .deb's
+#                                dma-ethercat-uninstall script. Operator
+#                                files placed under /etc/dma/ (e.g. a
+#                                customized JSON config) are removed.
+#                                Use only when you intend a clean
+#                                reinstall. Routine re-bootstraps now
+#                                preserve /etc/dma/ contents.
 #
 #    1. preflight    OS / arch / kernel / disk / sudo / port collisions
 #    2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
@@ -254,7 +265,7 @@ DRY_RUN=0
 KEEP_GOING=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_UNINSTALL=1
 SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
@@ -276,6 +287,7 @@ SKIP_HOST=0
 SKIP_CLUSTER=0
 SKIP_SEED_PULL_SECRETS=0
 SKIP_OPERATOR_UI_CONFIG=0
+SKIP_LOCOMOTION_CONFIG=0
 SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
@@ -288,7 +300,7 @@ SKIP_NVIDIA=0
 SKIP_PURGE_PODS=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=0
+SKIP_ETHERCAT_UNINSTALL=1
 SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
@@ -327,6 +339,7 @@ while [ $# -gt 0 ]; do
     --host)              SELECTED_PHASES+=(host); shift ;;
     --seed-pull-secrets) SELECTED_PHASES+=(seed-pull-secrets); shift ;;
     --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
+    --locomotion-config) SELECTED_PHASES+=(locomotion-config); shift ;;
     --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
@@ -346,7 +359,14 @@ while [ $# -gt 0 ]; do
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
+                         # Back-compat: now a no-op; uninstall is opt-in.
                          SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+    --uninstall-ethercat)
+                         # Explicitly run the dma-ethercat uninstaller. Wipes
+                         # /etc/dma/ — operator-placed config files there
+                         # WILL be removed. Use only when you actually want
+                         # a clean reinstall.
+                         SKIP_ETHERCAT_UNINSTALL=0; shift ;;
     --skip-ecat-interface)
                          SKIP_ECAT_INTERFACE=1; shift ;;
     --skip-cpu-isolation)
@@ -535,6 +555,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_HOST=1
   SKIP_SEED_PULL_SECRETS=1
   SKIP_OPERATOR_UI_CONFIG=1
+  SKIP_LOCOMOTION_CONFIG=1
   SKIP_ECAT_INTERFACE=1
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
@@ -551,6 +572,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       host)              SKIP_HOST=0 ;;
       seed-pull-secrets) SKIP_SEED_PULL_SECRETS=0 ;;
       operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
+      locomotion-config) SKIP_LOCOMOTION_CONFIG=0 ;;
       ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
@@ -765,7 +787,7 @@ stop_existing_services() {
   done <<< "$matches"
 }
 
-# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall) ----
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
 
 # Tear down the dma-ethercat realtime control service so phase 9's
 # install lands on a clean slate.
@@ -775,7 +797,7 @@ stop_existing_services() {
 # Each step is a no-op when already in the desired state.
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -926,14 +948,18 @@ EOF
   KUBECTL=()
 }
 
-# ---- pre-phase: uninstall dma-ethercat (default; --skip-ethercat-uninstall)
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
 
-# Tear down the dma-ethercat realtime control service. Runs by default;
-# --skip-ethercat-uninstall opts out (use it for routine re-bootstraps
-# where the realtime stack should stay in place). Designed to run AFTER
-# purge_docker and reset_cluster so the pods that talk to ethercat are
-# already gone — stopping the service while pods are still pinging its
-# socket can leave the kernel module in a wedged state.
+# Tear down the dma-ethercat realtime control service. DEFAULT OFF — the
+# .deb's dma-ethercat-uninstall script wipes /etc/dma/, removing operator-
+# placed config JSONs. Routine bootstrap re-runs leave the realtime stack
+# (and /etc/dma/ contents) untouched; phase 9 just refreshes the env file
+# to point DMA_CONFIG at whatever host-config dmaEthercat.configPath
+# specifies. Pass --uninstall-ethercat when you actually want a clean
+# reinstall. Designed to run AFTER purge_docker and reset_cluster so the
+# pods that talk to ethercat are already gone — stopping the service
+# while pods are still pinging its socket can leave the kernel module in
+# a wedged state.
 #
 # Sequence (each step independent + idempotent):
 #   1. if no unit file installed                  -> skip whole phase
@@ -947,7 +973,7 @@ EOF
 #   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -1336,8 +1362,19 @@ _reconcile_node_labels() {
       desired_json='{}'
     fi
   fi
-  desired_json=$(printf '%s' "$desired_json" \
-    | jq '. + {"foundation.bot/robot": "true"}')
+  # Bootstrap-managed labels:
+  #   foundation.bot/robot: always 'true' — overrides anything in host-config.
+  #   foundation.bot/has-positronic: default 'true' but operator can
+  #     override (set to "false" in host-config.yaml's nodeLabels: to
+  #     migrate a robot to phantom-locomotion). Validator enforces
+  #     mutual exclusion with foundation.bot/has-locomotion.
+  desired_json=$(printf '%s' "$desired_json" | jq '
+    . + {"foundation.bot/robot": "true"}
+    | if has("foundation.bot/has-positronic")
+        then .
+        else . + {"foundation.bot/has-positronic": "true"}
+      end
+  ')
 
   # Apply each desired label.
   local key value
@@ -1724,6 +1761,93 @@ operator_ui_config() {
     fi
   else
     info "deploy/operator-ui not present yet — gitops phase will create it with the new CM in scope"
+  fi
+}
+
+# ---- phase 6.5: locomotion-config (LOCOMOTION_POLICY ConfigMap) -----
+
+# Per-host locomotion policy file. Holds a ConfigMap manifest the
+# phantom-locomotion DaemonSet's main container reads via envFrom.
+# Same pattern as operator-ui-pairing: lives on the host (not in
+# git), --reset preserves it, ArgoCD doesn't reconcile it.
+LOCOMOTION_FILE="${LOCOMOTION_FILE:-/etc/phantomos/phantom-locomotion-config.yaml}"
+LOCOMOTION_NS="positronic"
+LOCOMOTION_CM_NAME="phantom-locomotion-config"
+
+_write_locomotion_file() {
+  local policy="${1:?_write_locomotion_file: policy required}"
+  mkdir -p "$(dirname "$LOCOMOTION_FILE")"
+  cat > "$LOCOMOTION_FILE" <<EOF
+# Generated by scripts/bootstrap-robot.sh — do not hand-edit.
+# Re-run bootstrap with --locomotion-config to change the value.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $LOCOMOTION_CM_NAME
+  namespace: $LOCOMOTION_NS
+data:
+  LOCOMOTION_POLICY: $policy
+EOF
+  chmod 0644 "$LOCOMOTION_FILE"
+}
+
+locomotion_config() {
+  if [ "${SKIP_LOCOMOTION_CONFIG:-0}" = 1 ]; then
+    phase "phase 6.5: locomotion-config  (skipped)"
+    return
+  fi
+  phase "phase 6.5: locomotion-config (LOCOMOTION_POLICY ConfigMap)"
+
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+
+  local policy=""
+  if [ -r "$hc" ]; then
+    policy=$(python3 "$HOST_CONFIG_HELPER" "$hc" get-phantom-locomotion-policy 2>/dev/null || true)
+  fi
+  # Fallback: known-good default if host-config is missing or unreadable.
+  : "${policy:=mk2-walking-lower-body-1imu}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  write $LOCOMOTION_FILE  LOCOMOTION_POLICY=$policy"
+    info "DRY-RUN  kubectl apply -f $LOCOMOTION_FILE"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot apply locomotion ConfigMap"
+    return
+  fi
+
+  if ! "${KUBECTL[@]}" get ns "$LOCOMOTION_NS" >/dev/null 2>&1; then
+    if ! "${KUBECTL[@]}" create ns "$LOCOMOTION_NS" >/dev/null; then
+      fail "could not create ns/$LOCOMOTION_NS"
+      return
+    fi
+    info "created ns/$LOCOMOTION_NS"
+  fi
+
+  _write_locomotion_file "$policy"
+  pass "wrote $LOCOMOTION_FILE  LOCOMOTION_POLICY=$policy"
+
+  if ! "${KUBECTL[@]}" apply -f "$LOCOMOTION_FILE" >/dev/null; then
+    fail "kubectl apply -f $LOCOMOTION_FILE"
+    return
+  fi
+  pass "$LOCOMOTION_CM_NAME applied to $LOCOMOTION_NS"
+
+  # If the DaemonSet is already running, restart it so the new policy
+  # takes effect. envFrom does NOT auto-roll on CM updates.
+  if "${KUBECTL[@]}" -n "$LOCOMOTION_NS" get ds phantom-locomotion >/dev/null 2>&1; then
+    if "${KUBECTL[@]}" -n "$LOCOMOTION_NS" rollout restart ds/phantom-locomotion >/dev/null; then
+      pass "rolled out phantom-locomotion DaemonSet to pick up new policy"
+    else
+      fail "rollout restart ds/phantom-locomotion"
+    fi
+  else
+    info "ds/phantom-locomotion not present yet — gitops phase will create it with the new CM in scope"
   fi
 }
 
@@ -4041,7 +4165,7 @@ print_plan() {
   _step $([ "$SKIP_PURGE_PODS"           = 0 ] && echo 1 || echo 0) "purge workload pods"                    "--skip-purge-pods"
   _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
   _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
-  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--uninstall-ethercat not passed (default: skip)"
   _step 1                                                           "phase  1  preflight"                    ""
   _step 1                                                           "          configure-host (if missing)"  ""
   _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase  2  deps"                         "--deps not selected"
@@ -4049,6 +4173,7 @@ print_plan() {
   _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase  4  host config"                  "--host not selected"
   _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase  5  seed pull secrets"            "--seed-pull-secrets not selected"
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
+  _step $([ "$SKIP_LOCOMOTION_CONFIG"    = 0 ] && echo 1 || echo 0) "phase  6.5 locomotion-config"           "--locomotion-config not selected"
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  7  ecat-interface (gates 8)"     "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  8  cpu-isolation (gates 9)"      "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
@@ -4114,6 +4239,7 @@ cluster            ; guard
 host_config        ; guard
 seed_pull_secrets  ; guard
 operator_ui_config ; guard
+locomotion_config  ; guard
 ecat_interface     ; guard
 cpu_isolation      ; guard
 log_management     ; guard

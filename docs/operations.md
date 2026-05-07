@@ -415,13 +415,30 @@ rotation runbook. Short version: re-`docker login`, then re-run
 
 ### 3.10 Toggle an optional workload on a robot
 
-Optional DaemonSets (yovariable-server, cpp-state-estimator,
-dma-recorder, future has-imu workloads, ...) gate on
-`foundation.bot/has-X=true` node labels. Bootstrap reconciles the
-`foundation.bot/` label namespace from `host-config.yaml`'s
-`nodeLabels:` block on every cluster-phase run.
+Optional DaemonSets gate on `foundation.bot/has-X=true` node labels.
+Bootstrap reconciles the `foundation.bot/` label namespace from
+`host-config.yaml`'s `nodeLabels:` block on every cluster-phase run.
 
-Enable a workload on `<robot>`:
+Known labels and the workloads they gate:
+
+| Label | Workload | Default |
+|---|---|---|
+| `foundation.bot/has-positronic` | `positronic-control` Deployment | **on** |
+| `foundation.bot/has-locomotion` | `phantom-locomotion` DaemonSet | off |
+| `foundation.bot/has-state-estimator` | `cpp-robot-state-estimator` DaemonSet | off |
+| `foundation.bot/has-recorder` | `dma-recorder` DaemonSet | off |
+| `foundation.bot/has-streamer` | `rerun-streamer` DaemonSet | off |
+
+`has-positronic` is **default-on** — the cluster phase reconciler
+injects it on every robot unless host-config explicitly sets it
+`"false"`. Migrating a robot from positronic to locomotion is a
+two-label change.
+
+**Locomotion vs positronic** are mutually exclusive — the validator
+rejects setting only `has-locomotion: "true"` (positronic would still
+be on by default and both controllers would try to drive the robot).
+
+Enable a default-off workload on `<robot>`:
 
 1. Edit `/etc/phantomos/host-config.yaml`, add to `nodeLabels:`:
    ```yaml
@@ -437,8 +454,22 @@ Enable a workload on `<robot>`:
 3. The DaemonSet's controller picks up the new label within seconds
    and schedules a pod.
 
-To disable: remove the entry from `nodeLabels:` and re-run the cluster
-phase. The label is dropped, the DaemonSet evicts the pod.
+Migrate `<robot>` from positronic to locomotion:
+
+```yaml
+nodeLabels:
+  foundation.bot/has-positronic: "false"
+  foundation.bot/has-locomotion: "true"
+```
+
+```bash
+sudo bash scripts/bootstrap-robot.sh --cluster -y
+```
+
+To disable a default-off workload: remove the entry and re-run the
+cluster phase. To disable positronic without enabling locomotion: set
+`foundation.bot/has-positronic: "false"` (no robot will be running a
+controller until you also enable locomotion).
 
 Bootstrap only manages the `foundation.bot/` prefix. Labels outside
 that prefix (`kubernetes.io/*`, k0s built-ins, ad-hoc operator labels)

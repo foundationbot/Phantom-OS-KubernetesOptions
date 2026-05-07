@@ -17,6 +17,7 @@ Usage:
   host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-log-management-json
   host-config.py <path> get-node-labels-json
+  host-config.py <path> get-phantom-locomotion-policy
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -220,6 +221,24 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
     return 0
 
 
+DEFAULT_LOCOMOTION_POLICY: str = "mk2-walking-lower-body-1imu"
+
+
+def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
+    """Print phantomLocomotion.policy or the documented default.
+    Bootstrap's locomotion-config phase consumes this to render the
+    LOCOMOTION_POLICY value into the phantom-locomotion-config CM."""
+    block = cfg.get("phantomLocomotion") or {}
+    if not isinstance(block, dict):
+        print("error: 'phantomLocomotion' must be a mapping", file=sys.stderr)
+        return 2
+    policy = block.get("policy")
+    if not policy:
+        policy = DEFAULT_LOCOMOTION_POLICY
+    print(policy)
+    return 0
+
+
 def cmd_get_log_management_json(cfg: dict) -> int:
     """Emit the merged logManagement settings as JSON. Operator overrides
     are layered on top of LOG_MANAGEMENT_DEFAULTS so bootstrap can
@@ -347,18 +366,53 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "manifest_image": "localhost:5443/positronic-control",
     },
     "phantom-models": {
+        # Consumed by positronic-control's load-models initContainer.
+        # Larger bundle (model weights, configs).
         "stack": "core",
         "manifest_image": "localhost:5443/phantom-models",
+    },
+    "phantom-policies": {
+        # Consumed by phantom-locomotion's load-policies initContainer.
+        # Slim image (~MB) — only ONNX policies, mapped to /models/policies.
+        # Built from the same scripts/phantom-models/build.py with
+        # `--image phantom-policies` and a manifest pointing entries at
+        # dest: policies/<name>.
+        "stack": "core",
+        "manifest_image": "localhost:5443/phantom-policies",
     },
     "operator-ui": {
         "stack": "operator",
         "manifest_image": "foundationbot/argus.operator-ui",
+    },
+    "yovariable-server": {
+        # DaemonSet bridging DMA shm IPC to network-accessible variable
+        # endpoints. CI publishes foundationbot/yovariable-server:V-<x.y.z>-<ts>.
+        "stack": "core",
+        "manifest_image": "foundationbot/yovariable-server",
     },
     "dma-ethercat": {
         # Not stack-routed. Phase 9 reads images.dma-ethercat.image
         # directly to render the bootstrap-managed installer Job.
         "stack": None,
         "manifest_image": "foundationbot/dma-ethercat",
+    },
+    "phantom-locomotion": {
+        # phantom-locomotion DaemonSet (foundation.bot/has-locomotion gated).
+        # Container key tracks the workload name (matches DaemonSet name and
+        # has-locomotion label); the published image is actually
+        # foundationbot/phantom-dma-inference (built from
+        # imu-policy/phantom-locomotion's docker/dma_policy/Dockerfile).
+        # Same key/image indirection used by operator-ui (image
+        # foundationbot/argus.operator-ui under key 'operator-ui').
+        # CI publishes a -aarch64 variant for Jetson.
+        "stack": "core",
+        "manifest_image": "foundationbot/phantom-dma-inference",
+    },
+    "cpp-robot-state-estimator": {
+        # State-estimator DaemonSet (foundation.bot/has-state-estimator).
+        # CI publishes <branch>-latest-<arch> tags.
+        "stack": "core",
+        "manifest_image": "foundationbot/cpp-robot-state-estimator",
     },
 }
 
@@ -1337,6 +1391,46 @@ def cmd_validate(cfg: dict) -> int:
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
                     )
 
+            # Mutual exclusion: positronic-control and phantom-locomotion
+            # are competing options. Operator picks one. has-positronic
+            # defaults to "true" (the cluster phase reconciler injects
+            # it on every robot unless explicitly set false), so
+            # operators enabling locomotion MUST also explicitly disable
+            # positronic — otherwise both would render and try to drive
+            # the robot.
+            effective_pos = nl.get("foundation.bot/has-positronic", "true")
+            effective_loc = nl.get("foundation.bot/has-locomotion", "false")
+            if effective_pos == "true" and effective_loc == "true":
+                if "foundation.bot/has-positronic" not in nl:
+                    errors.append(
+                        "nodeLabels: enabling foundation.bot/has-locomotion "
+                        "requires explicitly setting "
+                        "foundation.bot/has-positronic: \"false\" "
+                        "(positronic defaults to on)"
+                    )
+                else:
+                    errors.append(
+                        "nodeLabels: foundation.bot/has-positronic and "
+                        "foundation.bot/has-locomotion are mutually "
+                        "exclusive — only one may be \"true\""
+                    )
+
+    # phantomLocomotion is optional; .policy must be a non-empty string
+    # if present (a known policy name from the phantom-dma-inference
+    # image's built-in registry — bootstrap doesn't enumerate them, the
+    # in-pod dma_launch.sh fails loud if the value is unrecognized).
+    pl = cfg.get("phantomLocomotion")
+    if pl is not None:
+        if not isinstance(pl, dict):
+            errors.append("'phantomLocomotion' must be a mapping")
+        else:
+            policy = pl.get("policy")
+            if policy is not None and (not isinstance(policy, str) or not policy):
+                errors.append(
+                    f"phantomLocomotion.policy: must be a non-empty string "
+                    f"(got {policy!r})"
+                )
+
     if errors:
         for e in errors:
             print(f"error: {e}", file=sys.stderr)
@@ -1360,6 +1454,8 @@ def main() -> int:
         return cmd_get_log_management_json(cfg)
     if cmd == "get-node-labels-json":
         return cmd_get_node_labels_json(cfg)
+    if cmd == "get-phantom-locomotion-policy":
+        return cmd_get_phantom_locomotion_policy(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":

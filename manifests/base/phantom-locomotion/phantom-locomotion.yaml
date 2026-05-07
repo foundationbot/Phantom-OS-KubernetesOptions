@@ -1,0 +1,156 @@
+# phantom-locomotion — DaemonSet running the lower-body neural policy
+# from imu-policy/phantom-locomotion. Replaces
+# docker/dma_policy/docker-compose.yaml on robots that opt in via the
+# foundation.bot/has-locomotion node label.
+#
+# ── Image ────────────────────────────────────────────────────────────────
+# foundationbot/phantom-dma-inference. CI in the phantom-locomotion repo
+# publishes a -aarch64 variant for Jetson and a plain (amd64) variant.
+# Per-robot tag is rewritten by Kustomize from host-config.yaml's
+# images.phantom-dma-inference entry.
+#
+# ── Mutual exclusion with positronic-control ─────────────────────────────
+# foundation.bot/has-positronic defaults to "true" (set by the cluster
+# phase reconciler). Operators migrating a robot to locomotion MUST
+# explicitly set has-positronic: "false" in nodeLabels — the host-config
+# validator rejects "has-locomotion: true with default-on positronic".
+#
+# ── Policies ─────────────────────────────────────────────────────────────
+# Policy ONNX files live in the phantom-policies busybox image under
+# /models/policies/. An initContainer copies that subtree into a shared
+# emptyDir; the main container mounts the emptyDir at /data/policies
+# (matches the docker-compose contract). Same lifecycle as
+# positronic-control's load-models initContainer, but consumes a
+# DIFFERENT image (phantom-policies vs phantom-models) so locomotion
+# robots can ship a small policies-only image (~MB) instead of dragging
+# in positronic-control's full model bundle (~GB).
+#
+# If the operator's phantom-policies build doesn't ship /models/policies,
+# the initContainer fails loud (init logs name the missing path).
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: phantom-locomotion
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: phantom-locomotion
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: phantom-locomotion
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: phantom-locomotion
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-locomotion: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      initContainers:
+        # Copy /models/policies from the phantom-policies image into
+        # the shared emptyDir; main container mounts the emptyDir at
+        # /data/policies. Matches the docker-compose volume contract.
+        - name: load-policies
+          image: localhost:5443/phantom-policies:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if [ -d /models/policies ]; then
+                echo "==> copying /models/policies -> /shared"
+                cp -a /models/policies/. /shared/
+              else
+                echo "==> /models/policies missing in phantom-policies image"
+                echo "    expected: phantom-policies build manifest with"
+                echo "    .onnx entries mapped to dest: policies/<name>.onnx"
+                exit 1
+              fi
+              echo "==> done; /shared contents:"
+              ls -la /shared | head
+          volumeMounts:
+            - name: policies
+              mountPath: /shared
+          resources:
+            requests: { cpu: "500m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
+      containers:
+        - name: phantom-locomotion
+          # Image is foundationbot/phantom-dma-inference (built from
+          # imu-policy/phantom-locomotion); the container name tracks
+          # the workload, matching positronic-control's convention.
+          image: foundationbot/phantom-dma-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # /entrypoint.sh sources ROS humble + foundation_msgs, then
+          # exec's `dma_launch.sh <policy-name>`. The policy name comes
+          # from the LOCOMOTION_POLICY env var (sourced from the
+          # phantom-locomotion-config ConfigMap, rendered per-host by
+          # bootstrap's locomotion-config phase from
+          # /etc/phantomos/host-config.yaml's phantomLocomotion.policy
+          # field). Shell-default falls back to a known-good policy
+          # so the pod still starts if the CM isn't applied yet.
+          command:
+            - /entrypoint.sh
+            - bash
+            - -c
+            - 'exec /workspace/docker/dma_launch.sh "${LOCOMOTION_POLICY:-mk2-walking-lower-body-1imu}"'
+          # The docker-compose runs with stdin_open + tty for joystick
+          # / keyboard control. Mirror here so an operator can
+          # `kubectl exec -it` into the live pod.
+          stdin: true
+          tty: true
+          envFrom:
+            # Per-host policy selection. Bootstrap's locomotion-config
+            # phase creates this ConfigMap (NOT in the GitOps tree, so
+            # ArgoCD doesn't reset per-host edits). optional: true means
+            # kubelet doesn't fail when the CM is missing — the command's
+            # shell-default kicks in instead.
+            - configMapRef:
+                name: phantom-locomotion-config
+                optional: true
+          env:
+            - { name: ROS_DOMAIN_ID,    value: "101" }
+            - { name: SDL_VIDEODRIVER,  value: "dummy" }
+          ports:
+            - name: ros-disc
+              containerPort: 7400
+              hostPort: 7400
+              protocol: UDP
+          volumeMounts:
+            - { name: shm,       mountPath: /dev/shm }
+            - { name: dev-input, mountPath: /dev/input }
+            - { name: policies,  mountPath: /data/policies }
+          resources:
+            # Conservative starting point — the policy is small, mostly
+            # CPU-bound. Real RT pinning is the cpu-isolation phase's job.
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "4", memory: "4Gi" }
+          securityContext:
+            # Mirrors positronic-control posture: GPU + /dev/input access
+            # without enumerating every device node.
+            privileged: true
+
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm,    type: Directory }
+        - name: dev-input
+          hostPath: { path: /dev/input,  type: Directory }
+        - name: policies
+          emptyDir: {}
