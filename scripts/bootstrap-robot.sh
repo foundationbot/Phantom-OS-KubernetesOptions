@@ -565,6 +565,13 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_DEV_MOUNTS=1
   SKIP_VALIDATE=1
   SKIP_INSTALL_DMA_ETHERCAT=1
+  # Pre-phases are off by default in selected-phases mode: the
+  # operator asked for ONE thing and shouldn't get a fleet-wide pod
+  # purge / docker stop / service halt as a side effect. Full
+  # bootstrap (no --<phase> flags) still runs them by default.
+  SKIP_PURGE_PODS=1
+  SKIP_DOCKER_STOP=1
+  SKIP_STOP_SERVICES=1
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
       deps)              SKIP_DEPS=0 ;;
@@ -1368,11 +1375,18 @@ _reconcile_node_labels() {
   #     override (set to "false" in host-config.yaml's nodeLabels: to
   #     migrate a robot to phantom-locomotion). Validator enforces
   #     mutual exclusion with foundation.bot/has-locomotion.
+  #   foundation.bot/has-yovariable: default 'true' — gates the
+  #     yovariable-server DaemonSet. Set to "false" in nodeLabels: to
+  #     take it off a host without touching the manifest.
   desired_json=$(printf '%s' "$desired_json" | jq '
     . + {"foundation.bot/robot": "true"}
     | if has("foundation.bot/has-positronic")
         then .
         else . + {"foundation.bot/has-positronic": "true"}
+      end
+    | if has("foundation.bot/has-yovariable")
+        then .
+        else . + {"foundation.bot/has-yovariable": "true"}
       end
   ')
 

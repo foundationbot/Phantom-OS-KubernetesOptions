@@ -254,9 +254,10 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
-# Default-on: foundation.bot/has-positronic is applied as 'true' on
-# every robot UNLESS explicitly set to 'false' here. Operators
-# migrating a robot to phantom-locomotion must set BOTH
+# Default-on: foundation.bot/has-positronic and
+# foundation.bot/has-yovariable are applied as 'true' on every robot
+# UNLESS explicitly set to 'false' here. Operators migrating a robot
+# to phantom-locomotion must set BOTH
 #   foundation.bot/has-positronic: "false"
 #   foundation.bot/has-locomotion: "true"
 # The validator rejects setting only has-locomotion=true (positronic
@@ -266,13 +267,13 @@ images:
 # turns them into Python booleans, which the validator rejects with
 # a clear error.
 #
-# Known label conventions in this repo (gates DaemonSets that ship
-# disabled by default):
+# Known label conventions in this repo:
 #   foundation.bot/has-positronic        positronic-control Deployment   (default: true)
+#   foundation.bot/has-yovariable        yovariable-server DaemonSet     (default: true)
 #   foundation.bot/has-locomotion        phantom-locomotion DaemonSet    (mutually excl. with has-positronic)
-#   foundation.bot/has-state-estimator   cpp-robot-state-estimator DS    (independent)
-#   foundation.bot/has-recorder          dma-recorder DaemonSet
-#   foundation.bot/has-streamer          rerun-streamer DaemonSet
+#   foundation.bot/has-state-estimator   cpp-robot-state-estimator DS    (default: false; opt-in)
+#   foundation.bot/has-recorder          dma-recorder DaemonSet          (default: false; opt-in)
+#   foundation.bot/has-streamer          rerun-streamer DaemonSet        (default: false; opt-in)
 #
 # nodeLabels:
 #   # Default robot — positronic is implicit; just opt into extras.
