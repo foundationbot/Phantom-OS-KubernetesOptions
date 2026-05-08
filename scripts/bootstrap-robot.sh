@@ -1277,38 +1277,78 @@ host_config() {
 
 # ---- phase 3: cluster ---------------------------------------------------
 
-# Tailscale is a hard requirement for the cluster phase: spec.api.address
-# is pinned to the Tailscale IP, and operator tooling reaches the AI PC
-# over the Tailscale mesh. Returns 0 if a Tailscale IPv4 address is
-# resolvable RIGHT NOW; emits a fail() and returns 1 otherwise.
+# Tailscale used to be a hard requirement for the cluster phase. It now
+# softly informs whether Tailscale is present + ready; resolution and
+# fallback are handled by _resolve_api_address. Always returns 0 so the
+# caller can proceed regardless. The info messages still surface the
+# tailscale state so an operator who EXPECTED Tailscale to be up sees
+# the diagnostic.
 _require_tailscale() {
   if ! command -v tailscale >/dev/null 2>&1; then
-    fail "tailscale CLI not installed. Install with: curl -fsSL https://tailscale.com/install.sh | sh"
-    return 1
+    info "tailscale not installed; cluster API will bind to default-gateway IP"
+    return 0
   fi
   local state
   state=$(tailscale status --json 2>/dev/null | python3 -c \
     'import json,sys; print(json.load(sys.stdin).get("BackendState","Unknown"))' 2>/dev/null || echo Unknown)
   if [ "$state" != "Running" ]; then
-    fail "tailscale not running (BackendState=$state). Run: tailscale up"
-    return 1
+    info "tailscale present but not running (BackendState=$state); will fall back to default-gateway IP"
+    return 0
   fi
   local ip
   ip=$(tailscale ip -4 2>/dev/null | head -1)
   if [ -z "$ip" ]; then
-    fail "tailscale running but no IPv4 address advertised. Re-auth: tailscale up"
-    return 1
+    info "tailscale running but no IPv4 yet; will poll briefly then fall back to default-gateway IP"
+    return 0
   fi
+  info "tailscale up (IPv4=$ip); cluster API will bind to it"
   return 0
 }
 
-# Resolve the Tailscale IPv4 address for spec.api.address. Polls for up
-# to API_ADDRESS_WAIT_SECS so the cluster phase can run during a cold
-# boot before tailscaled has finished associating. Echoes the IP, or
-# returns 1 if Tailscale never produces one.
+# LAN fallback when Tailscale isn't available. Picks the IPv4 address
+# of the interface that owns the default route — same logic the
+# configure-host wizard uses for the AI PC URL. Echoes the IP, or
+# returns 1 if no default route / no IPv4 (which would also break
+# everything else, so the caller can fail loudly there).
+_resolve_default_gateway_ip() {
+  command -v ip >/dev/null 2>&1 || return 1
+  local iface ip4
+  iface=$(ip -4 route show default 2>/dev/null \
+            | awk '/^default/ {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+  [ -n "$iface" ] || return 1
+  ip4=$(ip -4 -o addr show dev "$iface" 2>/dev/null \
+          | awk '{print $4}' | cut -d/ -f1 | head -1)
+  [ -n "$ip4" ] || return 1
+  printf '%s\n' "$ip4"
+}
+
+# Resolve a stable IPv4 for spec.api.address. Tailscale-first (so the
+# Tailscale mesh stays the canonical address when it's available),
+# default-gateway IP as fallback (so robots on plain LAN/static-IP
+# setups bootstrap fine without Tailscale). Polls for up to
+# API_ADDRESS_WAIT_SECS so the cluster phase can run during a cold
+# boot before tailscaled has finished associating; falls back if the
+# wait expires.
 _resolve_api_address() {
   local wait_secs=${API_ADDRESS_WAIT_SECS:-60}
   local elapsed=0
+
+  # No tailscale CLI at all — go straight to LAN fallback.
+  if ! command -v tailscale >/dev/null 2>&1; then
+    _resolve_default_gateway_ip || return 1
+    return 0
+  fi
+
+  # Tailscale installed but not Running — don't waste 60s polling.
+  local state
+  state=$(tailscale status --json 2>/dev/null | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("BackendState","Unknown"))' 2>/dev/null || echo Unknown)
+  if [ "$state" != "Running" ]; then
+    _resolve_default_gateway_ip || return 1
+    return 0
+  fi
+
+  # Tailscale Running; poll for an IPv4 to surface.
   while [ "$elapsed" -lt "$wait_secs" ]; do
     local ts_ip
     ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
@@ -1319,7 +1359,11 @@ _resolve_api_address() {
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  return 1
+
+  # Backend was Running but no IP ever came up. Fall back rather than
+  # block the bootstrap on a partly-broken Tailscale install.
+  _resolve_default_gateway_ip || return 1
+  return 0
 }
 
 # Detect the install-time race: kube-apiserver running with the '1.1.1.1'
@@ -1336,7 +1380,7 @@ _apiserver_advertises_sentinel() {
 _repair_advertise_address() {
   local api_ip
   if ! api_ip=$(_resolve_api_address); then
-    fail "could not resolve a Tailscale IP after ${API_ADDRESS_WAIT_SECS:-60}s — repair aborted"
+    fail "could not resolve any IPv4 (Tailscale or default-gateway) — repair aborted"
     return 1
   fi
   note "repairing advertise-address: 1.1.1.1 -> $api_ip"
@@ -1516,10 +1560,10 @@ cluster() {
     if [ ! -e /etc/k0s/k0s.yaml ]; then
       local api_ip
       if ! api_ip=$(_resolve_api_address); then
-        fail "could not resolve a Tailscale IP after ${API_ADDRESS_WAIT_SECS:-60}s. Bring tailscale up and re-run."
+        fail "could not resolve any IPv4 for cluster API. Either bring tailscale up, or ensure the host has a default IPv4 route (e.g. 'ip route show default')."
         return
       fi
-      info "API server address: $api_ip"
+      info "cluster API server will bind to: $api_ip"
       mkdir -p /etc/k0s
       cat >/etc/k0s/k0s.yaml <<EOF
 # Managed by scripts/bootstrap-robot.sh phase cluster.
