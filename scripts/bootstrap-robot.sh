@@ -150,15 +150,14 @@
 #     purge workload pods        (--skip-purge-pods)
 #     stop docker containers     (--skip-docker-stop)
 #     stop system services       (--skip-stop-services)
-#   pre-phases (default OFF, opt in):
-#     uninstall dma-ethercat     (--uninstall-ethercat)
-#                                Wipes /etc/dma/ via the .deb's
-#                                dma-ethercat-uninstall script. Operator
+#     uninstall dma-ethercat     (--skip-ethercat-uninstall)
+#                                Tears down dma-ethercat.service and
+#                                runs the .deb's dma-ethercat-uninstall
+#                                script, which WIPES /etc/dma/ — operator
 #                                files placed under /etc/dma/ (e.g. a
 #                                customized JSON config) are removed.
-#                                Use only when you intend a clean
-#                                reinstall. Routine re-bootstraps now
-#                                preserve /etc/dma/ contents.
+#                                Pass --skip-ethercat-uninstall to keep
+#                                the existing /etc/dma/ tree.
 #
 #    1. preflight    OS / arch / kernel / disk / sudo / port collisions
 #    2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
@@ -211,14 +210,15 @@
 #                    a TTY and persists answers. enabled: false skips.
 #                    See docs/cpu-isolation.md.
 #    9. install dma-ethercat (gates phase 10)
-#                    render the bootstrap-managed installer Job from the
-#                    foundationbot/dma-ethercat tag in host-config images:,
-#                    apply, dpkg-i the .deb extracted to the host, then
-#                    write DMA_CONFIG / INTERFACE / DMA_CPU_AFFINITY /
-#                    DMA_RT_CPU into /etc/dma/dma-ethercat.env (preserving
-#                    operator edits) and `systemctl enable --now
-#                    dma-ethercat.service`. ANY failure halts bootstrap;
-#                    --skip-ethercat-install bypasses.
+#                    Default-on. Pass --skip-ethercat-install to bypass.
+#                    Renders the bootstrap-managed installer Job from
+#                    the foundationbot/dma-ethercat tag in host-config
+#                    images:, applies, dpkg-i the .deb extracted to the
+#                    host, then writes DMA_CONFIG / INTERFACE /
+#                    DMA_CPU_AFFINITY / DMA_RT_CPU into
+#                    /etc/dma/dma-ethercat.env (preserving operator
+#                    edits) and `systemctl enable --now
+#                    dma-ethercat.service`. ANY failure halts bootstrap.
 #   10. gitops       cd terraform && terraform init && terraform apply
 #                    (installs ArgoCD via the official Helm chart). Then
 #                    render per-host Application CRs (one per enabled
@@ -265,7 +265,7 @@ DRY_RUN=0
 KEEP_GOING=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=1
+SKIP_ETHERCAT_UNINSTALL=0
 SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
@@ -300,10 +300,15 @@ SKIP_NVIDIA=0
 SKIP_PURGE_PODS=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=1
+SKIP_ETHERCAT_UNINSTALL=0
 SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
+# dma-ethercat install runs by default. Combined with the default-on
+# uninstall pre-phase, a routine bootstrap re-run gives you a clean
+# reinstall of the realtime stack. Pass --skip-ethercat-install to
+# bypass (e.g. when iterating on a non-ethercat phase and you want to
+# preserve the running realtime stack).
 SKIP_INSTALL_DMA_ETHERCAT=0
 SELECTED_PHASES=()
 
@@ -360,7 +365,7 @@ while [ $# -gt 0 ]; do
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
                          # Back-compat: now a no-op; uninstall is opt-in.
-                         SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+                         SKIP_ETHERCAT_UNINSTALL=0; shift ;;
     --uninstall-ethercat)
                          # Explicitly run the dma-ethercat uninstaller. Wipes
                          # /etc/dma/ — operator-placed config files there
@@ -375,6 +380,12 @@ while [ $# -gt 0 ]; do
                          SKIP_LOG_MANAGEMENT=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
+    --with-ethercat-install|--enable-ethercat-install)
+                         # Opt into ethercat install in a full bootstrap
+                         # without entering selected-phases mode (which
+                         # --install-dma-ethercat does). Companion to the
+                         # default-off SKIP_INSTALL_DMA_ETHERCAT.
+                         SKIP_INSTALL_DMA_ETHERCAT=0; shift ;;
 
     # Inputs.
     --robot)             ROBOT="${2:-}"; shift 2 ;;
@@ -787,7 +798,7 @@ stop_existing_services() {
   done <<< "$matches"
 }
 
-# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT ON; --skip-ethercat-uninstall) -
 
 # Tear down the dma-ethercat realtime control service so phase 9's
 # install lands on a clean slate.
@@ -797,7 +808,7 @@ stop_existing_services() {
 # Each step is a no-op when already in the desired state.
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -948,18 +959,20 @@ EOF
   KUBECTL=()
 }
 
-# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT ON; --skip-ethercat-uninstall) -
 
-# Tear down the dma-ethercat realtime control service. DEFAULT OFF — the
-# .deb's dma-ethercat-uninstall script wipes /etc/dma/, removing operator-
-# placed config JSONs. Routine bootstrap re-runs leave the realtime stack
-# (and /etc/dma/ contents) untouched; phase 9 just refreshes the env file
-# to point DMA_CONFIG at whatever host-config dmaEthercat.configPath
-# specifies. Pass --uninstall-ethercat when you actually want a clean
-# reinstall. Designed to run AFTER purge_docker and reset_cluster so the
-# pods that talk to ethercat are already gone — stopping the service
-# while pods are still pinging its socket can leave the kernel module in
-# a wedged state.
+# Tear down the dma-ethercat realtime control service. DEFAULT ON —
+# routine bootstrap re-runs tear down the realtime stack so a fresh
+# phase 9 install (when --with-ethercat-install is passed) lands on a
+# clean slate. WARNING: the .deb's dma-ethercat-uninstall script wipes
+# /etc/dma/, removing operator-placed config JSONs. If your robot has
+# hand-edited config you don't want to lose, pass --skip-ethercat-uninstall
+# to keep the existing /etc/dma/ tree untouched (phase 9 still refreshes
+# the env file to point DMA_CONFIG at whatever host-config
+# dmaEthercat.configPath specifies). Designed to run AFTER purge_docker
+# and reset_cluster so the pods that talk to ethercat are already gone
+# — stopping the service while pods are still pinging its socket can
+# leave the kernel module in a wedged state.
 #
 # Sequence (each step independent + idempotent):
 #   1. if no unit file installed                  -> skip whole phase
@@ -973,7 +986,7 @@ EOF
 #   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -1704,7 +1717,19 @@ seed_pull_secrets() {
       skip "$PULL_SECRET_NAME already present in: ${PULL_SECRET_NAMESPACES[*]}"
       return
     fi
-    fail "$PULL_SECRET_NAME missing in: ${missing[*]}; provide --dockerhub-secret-file <path>, run \`docker login\` so ~/.docker/config.json is populated, or pre-create the Secret in the phantom namespace"
+    # Soft-skip rather than hard-fail: a robot whose images are fully
+    # pre-staged via the phantomos-k0s-images .deb doesn't need
+    # DockerHub credentials at all (pods with imagePullPolicy:
+    # IfNotPresent reuse what k0s imported into containerd at worker
+    # startup). Halting bootstrap here would also halt phase 10 (gitops)
+    # and leave the cluster with no Applications. If any pod actually
+    # needs a DockerHub pull, it'll surface as ImagePullBackOff later —
+    # the right place for that signal, not the bootstrap.
+    skip "$PULL_SECRET_NAME unavailable in: ${missing[*]}"
+    info "  pods needing DockerHub pulls will ImagePullBackOff. OK if all"
+    info "  images are pre-staged via phantomos-k0s-images-*.deb."
+    info "  Otherwise re-run with --dockerhub-secret-file <path> or"
+    info "  'sudo docker login' to populate /root/.docker/config.json."
     return
   fi
 
@@ -4231,7 +4256,7 @@ print_plan() {
   _step $([ "$SKIP_PURGE_PODS"           = 0 ] && echo 1 || echo 0) "purge workload pods"                    "--skip-purge-pods"
   _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
   _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
-  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--uninstall-ethercat not passed (default: skip)"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall passed"
   _step 1                                                           "phase  1  preflight"                    ""
   _step 1                                                           "          configure-host (if missing)"  ""
   _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase  2  deps"                         "--deps not selected"
@@ -4243,7 +4268,7 @@ print_plan() {
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  7  ecat-interface (gates 8)"     "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  8  cpu-isolation (gates 9)"      "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
-  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--install-dma-ethercat not selected"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 12  image-overrides"              "--image-overrides not selected"
