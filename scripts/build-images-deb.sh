@@ -12,8 +12,8 @@
 # can't be pulled from upstream (localhost:5443/* and *:PLACEHOLDER).
 # Override with --from-file <path> (one image per line, # comments OK).
 #
-# Multi-arch: pass --arch amd64,arm64 (or ARCHES=amd64,arm64) to build
-# one .deb per architecture in a single run. Defaults to the host arch.
+# Multi-arch: defaults to building one .deb per architecture for both
+# amd64 and arm64. Pass --arch <list> (or ARCHES=<list>) to narrow.
 # Cross-arch pulls require docker on the build host to support the
 # requested platform manifests (any modern docker does — no qemu/binfmt
 # needed since we only `pull` and `save`, never run).
@@ -29,10 +29,10 @@
 # arch cache dir).
 #
 # Usage:
-#   scripts/build-images-deb.sh                            # host arch only
-#   scripts/build-images-deb.sh --arch amd64,arm64         # both arches
-#   scripts/build-images-deb.sh --from-file list.txt       # explicit list
-#   ARCHES=amd64,arm64 scripts/build-images-deb.sh         # env-var form
+#   scripts/build-images-deb.sh                            # default: amd64+arm64
+#   scripts/build-images-deb.sh --arch amd64               # narrow to one arch
+#   scripts/build-images-deb.sh --from-file list.txt       # explicit image list
+#   ARCHES=amd64 scripts/build-images-deb.sh               # env-var form
 #
 # Prerequisites:
 #   - docker (running, logged in to DockerHub for foundationbot/* images)
@@ -76,7 +76,10 @@ elif [ -n "${ARCHES:-}" ]; then
 elif [ -n "${ARCH:-}" ]; then
   ARCHES_RAW="$ARCH"
 else
-  ARCHES_RAW="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
+  # Robots ship as a mix of amd64 (x86 dev hosts) and arm64 (Jetson),
+  # so the default produces one .deb per architecture. Pass --arch to
+  # narrow if you only need one.
+  ARCHES_RAW="amd64,arm64"
 fi
 
 IFS=',' read -r -a ARCHES_LIST <<<"$ARCHES_RAW"
