@@ -611,10 +611,45 @@ img_containers=()
 img_refs=()
 
 if [ "$inject_images" = 1 ]; then
+  # dma-ethercat is the one container whose default tag depends on
+  # the host CPU architecture (CI publishes -aarch64 for arm64/Jetson
+  # robots, -amd64 for x86 robots). Detect the running arch once and
+  # use it for both:
+  #   1. seed sanity-check below (rewrite an obviously-wrong-arch
+  #      seeded tag so the operator doesn't have to remember the
+  #      convention when migrating a config across machines);
+  #   2. canonical_default_tags below (right default on a fresh wizard
+  #      run with no seed).
+  local host_kernel_arch dma_ethercat_default_tag dma_ethercat_wrong_suffix
+  host_kernel_arch="$(uname -m)"
+  case "$host_kernel_arch" in
+    aarch64|arm64)
+      dma_ethercat_default_tag="main-latest-aarch64"
+      dma_ethercat_wrong_suffix="-amd64" ;;
+    x86_64|amd64)
+      dma_ethercat_default_tag="main-latest-amd64"
+      dma_ethercat_wrong_suffix="-aarch64" ;;
+    *)
+      dma_ethercat_default_tag="main-latest-${host_kernel_arch}"
+      dma_ethercat_wrong_suffix="" ;;
+  esac
+
   # Parse seed entries (one TSV line per container) into arrays.
   if [ -n "$seed_images_yaml" ]; then
     while IFS=$'\t' read -r cname img; do
       [ -z "$cname" ] && continue
+      # Auto-correct a seeded dma-ethercat tag that targets a different
+      # arch than this host (typical when an existing host-config is
+      # copied across architectures). Operator can still override at
+      # the prompt; we just stop offering them the wrong default.
+      if [ "$cname" = "dma-ethercat" ] && [ -n "$dma_ethercat_wrong_suffix" ] \
+         && [ "${img%$dma_ethercat_wrong_suffix}" != "$img" ]; then
+        local fixed="${img%$dma_ethercat_wrong_suffix}-${dma_ethercat_default_tag##*-}"
+        printf '%s  warning%s seeded dma-ethercat ref %s\n' "$C_DIM" "$C_RESET" "$img" >&2
+        printf '%s           targets a different arch than this host (%s)\n' "$C_DIM" "$host_kernel_arch" >&2
+        printf '%s           rewriting to %s%s\n' "$C_DIM" "$fixed" "$C_RESET" >&2
+        img="$fixed"
+      fi
       img_containers+=("$cname")
       img_refs+=("$img")
     done <<< "$seed_images_yaml"
@@ -641,7 +676,7 @@ if [ "$inject_images" = 1 ]; then
     "REPLACE-WITH-LOCAL-BUILD-TAG"
     "REPLACE-WITH-MODEL-BUILD-DATE"
     "REPLACE-WITH-OPERATOR-UI-COMMIT-SHA"
-    "main-latest-aarch64"
+    "$dma_ethercat_default_tag"
   )
 
   # Append any canonical container missing from the seed. Existing
