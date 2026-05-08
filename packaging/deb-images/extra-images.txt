@@ -1,0 +1,15 @@
+# Extra image refs to bundle into phantomos-k0s-images*.deb beyond what
+# build-images-deb.sh's manifests/ scan picks up. One ref per line;
+# blank lines and # comments OK. Per-line {ARCH} (debian arch: amd64,
+# arm64) and {KERNEL_ARCH} (uname -m convention: amd64, aarch64) get
+# substituted per per-arch build, so a single template line bundles
+# both tags into their respective .debs.
+
+# dma-ethercat installer image. The installer Job manifest at
+# manifests/installers/dma-ethercat/base/job.yaml carries
+# `foundationbot/dma-ethercat:PLACEHOLDER`; the real tag is operator-
+# supplied via host-config.yaml's `images.dma-ethercat.image`. Bundling
+# it here means phase 9 of bootstrap-robot.sh's installer Job pulls
+# from local containerd (already imported by k0s) instead of DockerHub
+# — works on robots without dockerhub-creds.
+foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH}
