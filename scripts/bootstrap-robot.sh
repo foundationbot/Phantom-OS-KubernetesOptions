@@ -3606,17 +3606,49 @@ PY
     return
   fi
 
-  # If ArgoCD is already installed (not via this terraform state), warn
-  # but proceed — terraform will adopt the existing namespace.
-  if "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1 && \
-     ! [ -f "$REPO_ROOT/terraform/terraform.tfstate" ]; then
-    info "argocd ns exists but no terraform state file — terraform will adopt it"
+  # If ArgoCD is already installed (not via this terraform state), import
+  # the existing resources so `terraform apply` doesn't try to create
+  # them and trip on AlreadyExists / "name still in use". Common after a
+  # partial earlier bootstrap whose state file was lost / never
+  # persisted. Detect both the namespace and the Helm release; the
+  # release is detected via its helm-managed Secret (set by the helm
+  # provider when the chart is installed).
+  local argocd_ns_exists=0 argocd_release_exists=0
+  if "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1; then
+    argocd_ns_exists=1
+    if "${KUBECTL[@]}" -n argocd get secret \
+         -l owner=helm,name=argocd \
+         -o name 2>/dev/null | grep -q 'sh.helm.release'; then
+      argocd_release_exists=1
+    fi
   fi
 
   (
     cd "$REPO_ROOT/terraform" || exit 2
     terraform init -input=false -upgrade=false
   ) || { fail "terraform init"; return; }
+
+  # Imports are idempotent: if a resource is already in state,
+  # `terraform import` exits non-zero with "Resource already managed in
+  # state". We treat both that and "Import successful" as success.
+  _tf_import() {
+    local addr="$1" id="$2" label="$3"
+    if (
+      cd "$REPO_ROOT/terraform" || exit 2
+      terraform import -input=false -var="kubeconfig=$kc" \
+        "$addr" "$id" 2>&1 \
+        | grep -qE 'already managed|Import successful'
+    ); then
+      info "$label adopted into terraform state"
+    fi
+  }
+  if [ "$argocd_ns_exists" = 1 ]; then
+    _tf_import kubernetes_namespace.argocd argocd "argocd namespace"
+  fi
+  if [ "$argocd_release_exists" = 1 ]; then
+    _tf_import helm_release.argocd argocd/argocd "argocd helm release"
+  fi
+  unset -f _tf_import
   pass "terraform init"
 
   (
