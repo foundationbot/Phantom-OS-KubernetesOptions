@@ -2716,15 +2716,35 @@ EOF
   fi
 
   # --- logrotate drop-in ---
+  # Conditional: only meaningful on hosts where rsyslog is actually
+  # writing /var/log/syslog. Ubuntu 24.04 minimal is often journald-
+  # only — no rsyslog package, no /var/log/syslog, no rsyslog-rotate
+  # script. Writing a logrotate stanza referencing those would just
+  # noise up `logrotate --debug`. Detect and skip cleanly.
   local lr_target="/etc/logrotate.d/phantomos-syslog"
-  local lr_tmp; lr_tmp=$(mktemp)
-  local compress_block
-  if [ "$rs_compress" = "true" ]; then
-    compress_block=$'    compress\n    delaycompress'
-  else
-    compress_block="    nocompress"
+  local rsyslog_present=0
+  if [ -f /usr/lib/rsyslog/rsyslog-rotate ] || command -v rsyslogd >/dev/null 2>&1; then
+    rsyslog_present=1
   fi
-  cat >"$lr_tmp" <<EOF
+
+  if [ "$rsyslog_present" = 0 ]; then
+    # Clean up any prior phantomos-syslog drop-in that no longer has a
+    # backing rsyslog install (e.g. operator removed the package).
+    if [ "$DRY_RUN" = 0 ] && [ -f "$lr_target" ]; then
+      rm -f "$lr_target"
+      info "removed stale $lr_target (rsyslog no longer installed)"
+    else
+      info "rsyslog not installed; skipping logrotate drop-in (journald handles all logs here)"
+    fi
+  else
+    local lr_tmp; lr_tmp=$(mktemp)
+    local compress_block
+    if [ "$rs_compress" = "true" ]; then
+      compress_block=$'    compress\n    delaycompress'
+    else
+      compress_block="    nocompress"
+    fi
+    cat >"$lr_tmp" <<EOF
 # Managed by scripts/bootstrap-robot.sh phase log-management.
 # Sorts after /etc/logrotate.d/rsyslog so this stanza wins.
 /var/log/syslog
@@ -2741,16 +2761,17 @@ ${compress_block}
     endscript
 }
 EOF
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  would install $lr_target (maxsize=$rs_size, rotate=$rs_rot, $rs_freq)"
-    rm -f "$lr_tmp"
-  elif [ -f "$lr_target" ] && cmp -s "$lr_tmp" "$lr_target"; then
-    info "logrotate drop-in unchanged"
-    rm -f "$lr_tmp"
-  else
-    install -D -m 0644 "$lr_tmp" "$lr_target"
-    rm -f "$lr_tmp"
-    info "logrotate drop-in installed (maxsize=$rs_size rotate=$rs_rot $rs_freq)"
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  would install $lr_target (maxsize=$rs_size, rotate=$rs_rot, $rs_freq)"
+      rm -f "$lr_tmp"
+    elif [ -f "$lr_target" ] && cmp -s "$lr_tmp" "$lr_target"; then
+      info "logrotate drop-in unchanged"
+      rm -f "$lr_tmp"
+    else
+      install -D -m 0644 "$lr_tmp" "$lr_target"
+      rm -f "$lr_tmp"
+      info "logrotate drop-in installed (maxsize=$rs_size rotate=$rs_rot $rs_freq)"
+    fi
   fi
 
   # --- validate ---
@@ -2759,15 +2780,24 @@ EOF
       fail "journalctl --header failed after restart"
       return
     fi
-    if command -v logrotate >/dev/null 2>&1; then
-      if ! logrotate --debug "$lr_target" >/dev/null 2>&1; then
+    # Validate logrotate only when we actually installed a drop-in.
+    # Capture stderr so the operator sees the real parse error instead
+    # of a generic "parse failed" message.
+    if [ "$rsyslog_present" = 1 ] && command -v logrotate >/dev/null 2>&1 && [ -f "$lr_target" ]; then
+      local lr_err
+      if ! lr_err=$(logrotate --debug "$lr_target" 2>&1 >/dev/null); then
         fail "logrotate --debug parse failed for $lr_target"
+        printf '%s\n' "$lr_err" | sed 's/^/    logrotate: /' >&2
         return
       fi
     fi
   fi
 
-  pass "log-management configured (journald: ${jd_use}/${jd_file}, syslog: ${rs_size}/${rs_rot}x${rs_freq})"
+  if [ "$rsyslog_present" = 1 ]; then
+    pass "log-management configured (journald: ${jd_use}/${jd_file}, syslog: ${rs_size}/${rs_rot}x${rs_freq})"
+  else
+    pass "log-management configured (journald: ${jd_use}/${jd_file}; rsyslog absent — logrotate skipped)"
+  fi
 }
 
 # ---- phase 9: install dma-ethercat (gates phase 10) -------------------
