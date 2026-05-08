@@ -99,6 +99,23 @@ err()     { printf '%s  ✗ %s%s\n' "$C_RED" "$1" "$C_RESET" >&2; }
 
 die() { err "$1"; exit "${2:-1}"; }
 
+# Detect the network interface used to reach the default IPv4 gateway,
+# and its primary IPv4 address. Prints "<iface>\t<ip>" on success;
+# returns non-zero with no output on failure (no default route, no
+# IPv4 on the interface, missing `ip` tool, etc.). Used by the AI PC
+# pairing wizard step's "auto-detect" option.
+detect_gateway_iface_ip() {
+  command -v ip >/dev/null 2>&1 || return 1
+  local iface ip4
+  iface=$(ip -4 route show default 2>/dev/null \
+            | awk '/^default/ {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+  [ -n "$iface" ] || return 1
+  ip4=$(ip -4 -o addr show dev "$iface" 2>/dev/null \
+          | awk '{print $4}' | cut -d/ -f1 | head -1)
+  [ -n "$ip4" ] || return 1
+  printf '%s\t%s\n' "$iface" "$ip4"
+}
+
 # Read a value from stdin with a default. Pressing enter accepts the
 # default. `?` triggers a help message (passed in $4). Validators get
 # the value as $1; non-zero return rejects and re-prompts.
@@ -432,11 +449,42 @@ ok "robot = $robot"
 
 # --- AI PC URL ---
 heading "AI PC pairing"
-hint "Tailscale URL of the AI PC paired with this robot. operator-ui talks to it."
-example "http://100.124.202.97:5000"
-ai_default="$seed_ai"
-ai_pc_url="$(ask "aiPcUrl" "$ai_default" "Full URL with scheme + port. Tailscale IP recommended." validate_url)"
-ok "aiPcUrl = $ai_pc_url"
+hint "URL of the AI PC paired with this robot. operator-ui talks to it."
+hint "Two ways to set this:"
+hint "  1) enter a Tailscale IP/URL manually (recommended for production)"
+hint "  2) auto-detect from this robot's default-gateway interface"
+hint "     (use when the AI PC sits on the same LAN as the robot's"
+hint "     gateway-facing port, or when robot and AI PC are colocated)"
+
+ai_pc_url=""
+if [ "$YES" != 1 ]; then
+  if confirm "Auto-detect AI PC URL from default-gateway interface?" "n"; then
+    if iface_ip=$(detect_gateway_iface_ip); then
+      iface=$(printf '%s' "$iface_ip" | cut -f1)
+      ip=$(printf '%s'    "$iface_ip" | cut -f2)
+      ok "gateway interface: $iface"
+      ok "interface IP:      $ip"
+      candidate="http://$ip:5000"
+      if validate_url "$candidate"; then
+        ai_pc_url="$candidate"
+        ok "aiPcUrl = $ai_pc_url  (auto-detected)"
+      else
+        err "auto-detected URL failed validation: $candidate"
+        err "falling back to manual entry"
+      fi
+    else
+      err "could not detect a default gateway interface / IP on this host"
+      err "falling back to manual entry"
+    fi
+  fi
+fi
+
+if [ -z "$ai_pc_url" ]; then
+  example "http://100.124.202.97:5000"
+  ai_default="$seed_ai"
+  ai_pc_url="$(ask "aiPcUrl" "$ai_default" "Full URL with scheme + port. Tailscale IP recommended." validate_url)"
+  ok "aiPcUrl = $ai_pc_url"
+fi
 
 # --- targetRevision ---
 heading "ArgoCD target revision"
