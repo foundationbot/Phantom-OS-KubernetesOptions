@@ -12,6 +12,15 @@
 # can't be pulled from upstream (localhost:5443/* and *:PLACEHOLDER).
 # Override with --from-file <path> (one image per line, # comments OK).
 #
+# Extra images: refs whose tag isn't in manifests/ (e.g. dma-ethercat,
+# whose installer manifest carries :PLACEHOLDER and whose real tag is
+# operator-supplied via host-config.yaml) can be added via
+# packaging/deb-images/extra-images.txt (or --extra-images-file <path>).
+# Per-line {ARCH} and {KERNEL_ARCH} are substituted at build time so a
+# single template like
+#   foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH}
+# expands to -amd64 in the amd64 .deb and -aarch64 in the arm64 .deb.
+#
 # Multi-arch: defaults to building one .deb per architecture for both
 # amd64 and arm64. Pass --arch <list> (or ARCHES=<list>) to narrow.
 # Cross-arch pulls require docker on the build host to support the
@@ -53,16 +62,28 @@ TARGET_DIR="/var/lib/k0s/images"
 # Arch resolution precedence: --arch flag > ARCHES env > ARCH env > host.
 ARCHES_FLAG=""
 FROM_FILE=""
+# Extra-images file: a list of additional image refs to bundle that
+# aren't discoverable from manifests/ (for example the dma-ethercat
+# installer image, whose tag lives in host-config.yaml — the manifest
+# itself only carries a :PLACEHOLDER). Lines support per-arch templating
+# via {ARCH} (debian arch: amd64, arm64) and {KERNEL_ARCH} (uname -m
+# convention: amd64, aarch64). Default lookup path resolves to
+# packaging/deb-images/extra-images.txt and is silently skipped if absent.
+EXTRA_IMAGES_FILE_DEFAULT="$REPO_ROOT/packaging/deb-images/extra-images.txt"
+EXTRA_IMAGES_FILE="${EXTRA_IMAGES_FILE:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --from-file)
       [ -r "${2:-}" ] || { echo "error: --from-file needs a readable path" >&2; exit 2; }
       FROM_FILE="$2"; shift 2 ;;
+    --extra-images-file)
+      [ -r "${2:-}" ] || { echo "error: --extra-images-file needs a readable path" >&2; exit 2; }
+      EXTRA_IMAGES_FILE="$2"; shift 2 ;;
     --arch)
       [ -n "${2:-}" ] || { echo "error: --arch needs a value (e.g. amd64,arm64)" >&2; exit 2; }
       ARCHES_FLAG="$2"; shift 2 ;;
     -h|--help)
-      grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//' | head -40
+      grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//' | head -50
       exit 0 ;;
     *)
       echo "error: unknown flag: $1" >&2; exit 2 ;;
@@ -95,6 +116,41 @@ unset TMP
 if [ "${#ARCHES_LIST[@]}" -eq 0 ]; then
   echo "build-images-deb.sh: no architectures specified" >&2; exit 2
 fi
+
+# If --extra-images-file wasn't passed, fall back to the default path
+# but only if the file actually exists (silent no-op otherwise).
+if [ -z "$EXTRA_IMAGES_FILE" ] && [ -r "$EXTRA_IMAGES_FILE_DEFAULT" ]; then
+  EXTRA_IMAGES_FILE="$EXTRA_IMAGES_FILE_DEFAULT"
+fi
+
+# Map a debian arch to the kernel/uname convention so refs like
+# foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH} resolve
+# correctly (arm64 -> aarch64, amd64 -> amd64). Anything unknown
+# passes through unchanged.
+_kernel_arch_for() {
+  case "$1" in
+    arm64) printf 'aarch64' ;;
+    amd64) printf 'amd64' ;;
+    *)     printf '%s' "$1" ;;
+  esac
+}
+
+# Read EXTRA_IMAGES_FILE, drop comments/blanks, substitute {ARCH} and
+# {KERNEL_ARCH} for the requested arch, print one ref per line. No-op
+# if the file is empty/absent.
+read_extra_images_for_arch() {
+  local arch="$1" kernel_arch line
+  kernel_arch="$(_kernel_arch_for "$arch")"
+  [ -n "$EXTRA_IMAGES_FILE" ] && [ -r "$EXTRA_IMAGES_FILE" ] || return 0
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="$(printf '%s' "$line" | tr -d '[:space:]')"
+    [ -z "$line" ] && continue
+    line="${line//\{ARCH\}/$arch}"
+    line="${line//\{KERNEL_ARCH\}/$kernel_arch}"
+    printf '%s\n' "$line"
+  done < "$EXTRA_IMAGES_FILE"
+}
 
 # ---- prerequisites ------------------------------------------------------
 
@@ -304,11 +360,24 @@ build_for_arch() {
   mkdir -p "$stage_dir$TARGET_DIR"
   mkdir -p "$cache_dir"
 
+  # Per-arch image list: discovered/explicit images first, then any
+  # extras from EXTRA_IMAGES_FILE with {ARCH}/{KERNEL_ARCH} resolved.
+  local arch_images=("${IMAGES[@]}")
+  local extra
+  while IFS= read -r extra; do
+    [ -n "$extra" ] && arch_images+=("$extra")
+  done < <(read_extra_images_for_arch "$arch")
+
+  if [ "${#arch_images[@]}" -gt "${#IMAGES[@]}" ]; then
+    info_extra_count=$(( ${#arch_images[@]} - ${#IMAGES[@]} ))
+    echo "  + ${info_extra_count} extra image(s) from $(basename "$EXTRA_IMAGES_FILE")"
+  fi
+
   local included_images=() included_sizes=()
   local failed_images=() failed_reasons=()
   local img filename cache_path stage_path size
 
-  for img in "${IMAGES[@]}"; do
+  for img in "${arch_images[@]}"; do
     filename="$(sanitize_filename "$img").tar"
     cache_path="$cache_dir/$filename"
     stage_path="$stage_dir$TARGET_DIR/$filename"
