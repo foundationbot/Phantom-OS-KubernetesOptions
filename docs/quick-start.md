@@ -6,9 +6,71 @@ throughout.
 
 ---
 
+## Before you start
+
+A few minutes of system prep saves a lot of debugging later. Do these
+**before** installing anything.
+
+### Pin a static IP (strongly recommended)
+
+The cluster API server, ArgoCD UI, and operator UI all bind to the
+robot's network address. If that address changes after install (DHCP
+lease renewal, network move, reboot onto a different access point),
+those services need to be reconfigured. Set a static IP — or a DHCP
+reservation on your router — before running the installer.
+
+On Ubuntu 24.04 (headless robots):
+
+```bash
+# edit a netplan file; pick a free IP on your LAN
+sudoedit /etc/netplan/01-static.yaml
+sudo netplan apply
+```
+
+On a desktop install: **Settings → Network → Wired/Wireless →
+Configure → IPv4 → Manual**.
+
+Verify after configuring:
+
+```bash
+ip -4 addr show | grep inet
+```
+
+### System requirements
+
+- **Ubuntu 24.04** with root access (`sudo`).
+- **About 50 GB free** on `/` (for the cluster runtime + container
+  images).
+- **A reliable network connection for the first install.** The image
+  package contains pre-pulled container images, but the cluster
+  runtime binary itself is downloaded from the internet during the
+  bootstrap run.
+- **Standard system tools** — already on Ubuntu by default; if
+  anything is missing, `apt` pulls them in automatically when you
+  install the control-plane package: `python3`, `bash` (≥ 4),
+  `curl`, `jq`, `git`, `unzip`, `ca-certificates`.
+
+### Optional: Tailscale (remote access)
+
+Tailscale is a hosted VPN that gives you secure remote access to the
+robot's services from outside the local network. **It is optional** —
+if you only need to use the robot on its local network, skip this.
+
+If you want it, install before running the installer:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+The setup wizard will let you use either a Tailscale URL or a
+LAN/static IP for the AI PC pairing — pick whichever matches how you
+plan to reach the robot.
+
+---
+
 ## What you'll need
 
-- Ubuntu 24.04 on the robot, with root access.
 - Both `.deb` files transferred to the robot (e.g. via scp into
   `~/k0s-deploy/`):
   - The control plane package: `*-all.deb` (scripts + manifests).
