@@ -89,6 +89,12 @@ stacks:
 #   cpp-robot-state-estimator
 #                          core stack — IMU + kinematic state estimator
 #                          DaemonSet. Tag convention <branch>-latest-<arch>.
+#   dma-streams            core stack — single image, two DaemonSets:
+#                          dma-recorder (has-recorder) writes .rrd files,
+#                          rerun-streamer (has-streamer) serves live web
+#                          viz on :9788. manifest uses
+#                          foundationbot/dma-streams. One entry here
+#                          rewrites both. Tag convention <branch>-latest-<arch>.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
