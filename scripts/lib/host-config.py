@@ -541,7 +541,7 @@ def cmd_get_image_for_container(cfg: dict, container: str) -> int:
 DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
     "positronic-control": {
         "stack": "core",
-        "kind": "Deployment",
+        "kind": "DaemonSet",
         "namespace": "positronic",
         "container": "positronic-control",
     },

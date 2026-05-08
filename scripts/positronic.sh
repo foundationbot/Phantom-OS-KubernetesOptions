@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# positronic.sh — convenience wrapper for the positronic-control deployment.
+# positronic.sh — convenience wrapper for the positronic-control DaemonSet.
 #
 # Single entry point for the day-to-day lifecycle operations against the
-# positronic-control Deployment in the `positronic` namespace. Designed to
+# positronic-control DaemonSet in the `positronic` namespace. Designed to
 # be friendly on the robot (where only `k0s kubectl` is available) and on
 # laptops (where `kubectl` is the usual tool). Read-only commands degrade
 # gracefully when neither is available.
@@ -176,7 +176,7 @@ get_pod() {
 
 cmd_help() {
   cat <<EOF
-${C_BOLD}positronic.sh${C_RESET} — wrapper for the positronic-control deployment
+${C_BOLD}positronic.sh${C_RESET} — wrapper for the positronic-control DaemonSet
 
 ${C_BOLD}Usage:${C_RESET}
   bash scripts/positronic.sh [--robot <name>] [--dry-run] <subcommand> [args...]
@@ -198,7 +198,7 @@ ${C_BOLD}Subcommands:${C_RESET}
                                PASS iff cuda is available and result != 0.
   set-cmd <command...>         Set PHANTOM_CMD in $CONFIGMAP_NAME to the
                                joined args, then rollout restart the
-                               Deployment so the new command takes effect.
+                               DaemonSet so the new command takes effect.
   clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
                                mode → sleep infinity), rollout restart.
   push-image <src> [--tag <dest-tag>] [--no-redeploy]
@@ -227,7 +227,7 @@ ${C_BOLD}Subcommands:${C_RESET}
                                just isn't reverted. Resume with argo-resume.
   argo-resume                  Re-enable selfHeal on every enabled per-stack
                                Application.
-  teardown [-y|--yes]          Delete the Deployment + ConfigMap + ns.
+  teardown [-y|--yes]          Delete the DaemonSet + ConfigMap + ns.
                                Cluster-side only — does not touch manifests.
   help                         This message.
 
@@ -279,12 +279,12 @@ EOF
 cmd_status() {
   require_kubectl
 
-  bold "Deployment ($NAMESPACE/positronic-control)"
-  if ! $KUBECTL -n "$NAMESPACE" get deploy positronic-control >/dev/null 2>&1; then
-    fail "Deployment positronic-control not found in $NAMESPACE — not deployed"
+  bold "DaemonSet ($NAMESPACE/positronic-control)"
+  if ! $KUBECTL -n "$NAMESPACE" get ds positronic-control >/dev/null 2>&1; then
+    fail "DaemonSet positronic-control not found in $NAMESPACE — not deployed"
     return 0
   fi
-  $KUBECTL -n "$NAMESPACE" get deploy positronic-control \
+  $KUBECTL -n "$NAMESPACE" get ds positronic-control \
     -o wide 2>/dev/null | sed 's/^/    /'
 
   bold "Pod"
@@ -642,7 +642,7 @@ print(json.dumps({"data": {"PHANTOM_CMD": os.environ["VALUE"]}}))
   kctl -n "$NAMESPACE" patch cm "$CONFIGMAP_NAME" --type=merge -p "$json"
 
   bold "Rolling out positronic-control"
-  kctl -n "$NAMESPACE" rollout restart deploy/positronic-control
+  kctl -n "$NAMESPACE" rollout restart ds/positronic-control
 
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
 
@@ -799,11 +799,11 @@ cmd_redeploy() {
 
   bold "Watching rollout (Ctrl-C to exit)"
   if [ "$DRY_RUN" = 1 ]; then
-    printf '+ %s -n %q rollout status deploy/positronic-control --timeout=120s\n' \
+    printf '+ %s -n %q rollout status ds/positronic-control --timeout=120s\n' \
       "$KUBECTL" "$NAMESPACE"
     return 0
   fi
-  $KUBECTL -n "$NAMESPACE" rollout status deploy/positronic-control --timeout=120s || true
+  $KUBECTL -n "$NAMESPACE" rollout status ds/positronic-control --timeout=120s || true
   $KUBECTL -n "$NAMESPACE" get pod -l "$APP_LABEL" -o wide || true
 }
 
@@ -972,7 +972,7 @@ cmd_teardown() {
 
   bold "Teardown plan"
   cat <<EOF
-    delete deploy/positronic-control   in ns/$NAMESPACE
+    delete ds/positronic-control       in ns/$NAMESPACE
     delete cm/$CONFIGMAP_NAME           in ns/$NAMESPACE
     delete namespace/$NAMESPACE
     (manifest files in $REPO are NOT touched)
@@ -988,7 +988,7 @@ EOF
     esac
   fi
 
-  kctl -n "$NAMESPACE" delete deploy positronic-control --ignore-not-found
+  kctl -n "$NAMESPACE" delete ds positronic-control --ignore-not-found
   kctl -n "$NAMESPACE" delete cm "$CONFIGMAP_NAME" --ignore-not-found
   kctl delete namespace "$NAMESPACE" --ignore-not-found
   ok "teardown complete"
