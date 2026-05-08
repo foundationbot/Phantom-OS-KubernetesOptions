@@ -620,16 +620,26 @@ if [ "$inject_images" = 1 ]; then
   #      convention when migrating a config across machines);
   #   2. canonical_default_tags below (right default on a fresh wizard
   #      run with no seed).
-  local host_kernel_arch dma_ethercat_default_tag dma_ethercat_wrong_suffix
+  # Plain assignment (not `local`) — this block is at script scope.
+  # `uname -m` returns the kernel arch (`x86_64`, `aarch64`); the
+  # Debian / docker-tag convention is `amd64` / `arm64`. They mean
+  # the same hardware — normalize to the Debian convention so all
+  # downstream comparisons and user-facing messages use one vocabulary.
   host_kernel_arch="$(uname -m)"
+  host_deb_arch=""
+  dma_ethercat_default_tag=""
+  dma_ethercat_wrong_suffix=""
   case "$host_kernel_arch" in
     aarch64|arm64)
+      host_deb_arch="arm64"
       dma_ethercat_default_tag="main-latest-aarch64"
       dma_ethercat_wrong_suffix="-amd64" ;;
     x86_64|amd64)
+      host_deb_arch="amd64"
       dma_ethercat_default_tag="main-latest-amd64"
       dma_ethercat_wrong_suffix="-aarch64" ;;
     *)
+      host_deb_arch="$host_kernel_arch"
       dma_ethercat_default_tag="main-latest-${host_kernel_arch}"
       dma_ethercat_wrong_suffix="" ;;
   esac
@@ -644,9 +654,9 @@ if [ "$inject_images" = 1 ]; then
       # the prompt; we just stop offering them the wrong default.
       if [ "$cname" = "dma-ethercat" ] && [ -n "$dma_ethercat_wrong_suffix" ] \
          && [ "${img%$dma_ethercat_wrong_suffix}" != "$img" ]; then
-        local fixed="${img%$dma_ethercat_wrong_suffix}-${dma_ethercat_default_tag##*-}"
+        fixed="${img%$dma_ethercat_wrong_suffix}-${dma_ethercat_default_tag##*-}"
         printf '%s  warning%s seeded dma-ethercat ref %s\n' "$C_DIM" "$C_RESET" "$img" >&2
-        printf '%s           targets a different arch than this host (%s)\n' "$C_DIM" "$host_kernel_arch" >&2
+        printf '%s           targets a different arch than this host (%s)\n' "$C_DIM" "$host_deb_arch" >&2
         printf '%s           rewriting to %s%s\n' "$C_DIM" "$fixed" "$C_RESET" >&2
         img="$fixed"
       fi
