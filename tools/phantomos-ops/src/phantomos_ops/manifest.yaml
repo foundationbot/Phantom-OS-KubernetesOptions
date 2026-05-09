@@ -50,14 +50,15 @@ actions:
       End-to-end k0s + ArgoCD bootstrap. Idempotent on a populated host
       but heavy-handed on a fresh one — installs k0s, configures
       containerd mirrors, registers nvidia runtime, applies host config,
-      and renders Argo Applications.
+      and renders Argo Applications. Prompts (cpusets, argocd password,
+      Continue confirmations) render as native TUI modals via the
+      ops-prompt bridge.
     safety: red
     confirm_word: "bootstrap"
     requires: [root]
     runs_on: [robot]
     duration: "5-15 min"
     reversible: false
-    interactive: true
     command: ["bash", "scripts/bootstrap-robot.sh"]
 
   - id: bootstrap.configure_host
