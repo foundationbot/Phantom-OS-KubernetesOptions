@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if [ "${1:-}" = "--clean" ]; then
-  rm -rf dist build *.egg-info src/*.egg-info
+  rm -rf dist build *.egg-info src/*.egg-info .build-venv
 fi
 
 # Version + SHA stamp. The SHA stamp lands in src/phantomos_ops/_build.py
@@ -45,11 +45,19 @@ cat > src/phantomos_ops/_build.py <<EOF
 BUILD_TAG = "${BUILD_TAG}"
 EOF
 
-# Use the venv's tools where available; fall back to system pip if not.
-PIP="${PIP:-pip}"
-SHIV="${SHIV:-shiv}"
-if [ -x ".venv/bin/pip" ]; then PIP=".venv/bin/pip"; fi
-if [ -x ".venv/bin/shiv" ]; then SHIV=".venv/bin/shiv"; fi
+# Self-bootstrap a build venv so a fresh checkout produces a zipapp
+# with no manual setup. We don't reuse a system Python because PEP 668
+# (Ubuntu 24.04) blocks installing build-time tools into it. The venv
+# lives at .build-venv/ to keep it separate from .venv/ (which is the
+# editable dev install used by tests).
+BUILD_VENV=".build-venv"
+if [ ! -x "$BUILD_VENV/bin/shiv" ]; then
+  echo "Bootstrapping build venv at $BUILD_VENV/ (one-time, ~30s)…"
+  python3 -m venv "$BUILD_VENV"
+  "$BUILD_VENV/bin/pip" install --quiet --upgrade pip
+  "$BUILD_VENV/bin/pip" install --quiet shiv build
+fi
+SHIV="$BUILD_VENV/bin/shiv"
 
 mkdir -p dist
 echo "Building phantomos-ops $VERSION ($BUILD_TAG) → dist/phantomos-ops"
