@@ -41,6 +41,58 @@ compose with both selected-phases and full-bootstrap modes.
 
 ---
 
+## phantomos ops TUI
+
+A Textual-based terminal launcher that wraps the operator scripts in
+this repo (`bootstrap-robot.sh`, `positronic.sh`, registry helpers,
+recorder controls, etc.) behind a keyboard-driven menu of intent-named
+actions, organised into six groups (bootstrap, workloads, recording,
+registry, builds, diagnostics) totaling ~24 actions. Actions are
+classified green/yellow/red; destructive ones require a magic-word
+confirm. For screenshots and the full key map, see
+[ops-tui-user-guide.md](./ops-tui-user-guide.md).
+
+### Install on a robot
+
+The launcher ships as a pipx-installable Python package under
+`tools/phantomos-ops/`:
+
+```bash
+cd /opt/Phantom-OS-KubernetesOptions/tools/phantomos-ops
+pipx install --editable .
+phantomos-ops
+```
+
+`pipx` is preferred over `pip` so the dependencies (Textual, PyYAML)
+are isolated from system Python. The `phantomos-ops` entry point is
+on `$PATH` after install.
+
+### Daily use
+
+```bash
+phantomos-ops             # interactive menu
+phantomos-ops --read-only # green-only; safe to demo / share screen
+phantomos-ops --no-lock   # bypass the single-instance lock (e.g. when
+                          # re-attaching a stale tmux session)
+```
+
+`--read-only` filters yellow and red actions out of the manifest so
+you can scroll the menu without risk. `--no-lock` is for the rare
+case where the state file at `~/.config/phantomos-ops/state.json`
+shows another instance owning the lock but no process actually holds
+it; the second instance otherwise opens read-only.
+
+### Adding new actions
+
+The action registry is a single YAML file
+(`tools/phantomos-ops/src/phantomos_ops/manifest.yaml`). Most additions
+are one stanza there — pointing at a script, declaring its safety
+class, and optionally a parameter form. See
+[ops-tui-dev-guide.md](./ops-tui-dev-guide.md) for the field reference,
+form contract, and review checklist.
+
+---
+
 ## 1. First bringup
 
 ### Sequence overview

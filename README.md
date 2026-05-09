@@ -28,6 +28,9 @@ sudo bash scripts/bootstrap-robot.sh   # cluster bringup + ArgoCD + apply config
 - [`docs/operations.md`](docs/operations.md) — the operator runbook.
   First bringup, day-2 ops, per-phase invocations, migration scenarios,
   troubleshooting by symptom.
+- [`docs/ops-tui-user-guide.md`](docs/ops-tui-user-guide.md) —
+  `phantomos-ops` Textual TUI: keyboard-driven launcher for the
+  operator scripts under `tools/phantomos-ops/`.
 - [`docs/rfcs/0001-fleet-control-plane.md`](docs/rfcs/0001-fleet-control-plane.md) —
   long-term direction: control-plane API queried by hardware serial.
 - [`docs/positronic-design.md`](docs/positronic-design.md) — positronic-control

@@ -5,12 +5,14 @@ runtime services so screens can read them without globals.
 """
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 from textual.app import App
 
 from .manifest import SAMPLE_MANIFEST, Manifest, ManifestError, load_manifest
 from .screens.main import MainScreen
+from .screens.recovery import RecoveryScreen, write_crash_log
 from .state import State
 
 
@@ -77,3 +79,31 @@ class OpsApp(App):
 
     def on_mount(self) -> None:
         self.push_screen(MainScreen(self.manifest))
+
+    # ----- crash boundary -----------------------------------------------
+
+    def on_exception(self, exc: Exception) -> None:
+        """Catch widget errors and route them through the recovery
+        modal instead of dropping a Python traceback into the
+        operator's terminal.
+
+        Saves the full traceback to ~/.local/state/phantomos-ops/
+        crash.log; the modal shows a one-line summary plus the path
+        so the operator can `cat` it after they're back at a shell.
+        """
+        tb = "".join(traceback.format_exception(type(exc), exc,
+                                                exc.__traceback__))
+        log_path = write_crash_log(tb)
+        summary = f"{type(exc).__name__}: {exc}"
+
+        def _on_choice(choice: str | None) -> None:
+            if choice == "reload":
+                # Drop all screens and re-mount the menu. State (favorites,
+                # confirm memory) survives because it lives on the App.
+                while len(self.screen_stack) > 1:
+                    self.pop_screen()
+                self.push_screen(MainScreen(self.manifest))
+            elif choice == "quit":
+                self.exit()
+
+        self.push_screen(RecoveryScreen(summary, log_path), callback=_on_choice)

@@ -53,15 +53,18 @@ class GroupItem(ListItem):
 
 
 class ActionItem(ListItem):
-    def __init__(self, action: Action, gated_reason: str | None):
+    def __init__(self, action: Action, gated_reason: str | None,
+                 favorited: bool = False):
         style = safety.style(action.safety)
         prefix = f"[{style.css_class}]{style.glyph}[/{style.css_class}]"
-        text = f"{prefix}  {action.title}"
+        star = " ★" if favorited else ""
+        text = f"{prefix}  {action.title}{star}"
         if gated_reason:
             text += f"   [dim](disabled: {gated_reason})[/dim]"
         super().__init__(Static(text, markup=True))
         self.action = action
         self.gated = gated_reason is not None
+        self.favorited = favorited
 
 
 # ---------------------------------------------------------------------
@@ -109,6 +112,8 @@ class MainScreen(Screen):
         ("q", "app.quit", "Quit"),
         ("?", "help", "Help"),
         ("e", "edit_args", "Edit args"),
+        ("f", "toggle_favorite", "Favorite"),
+        ("slash", "search", "Search"),
     ]
 
     def __init__(self, manifest: Manifest):
@@ -156,9 +161,18 @@ class MainScreen(Screen):
         # subsequent index assignment lands on a populated view.
         await self.actions_view.clear()
         fp = env.fingerprint()
+        favorites: set[str] = self.app.state.favorites
+        # Favorited actions sort to the top of the group; within each
+        # bucket (favorited / not), preserve manifest order so
+        # operators can still find things by mental position.
+        actions = self.manifest.actions_in(group.id)
+        favs = [a for a in actions if a.id in favorites]
+        rest = [a for a in actions if a.id not in favorites]
+        ordered = (*favs, *rest)
         items = [
-            ActionItem(a, self._gate_reason(a, fp))
-            for a in self.manifest.actions_in(group.id)
+            ActionItem(a, self._gate_reason(a, fp),
+                       favorited=(a.id in favorites))
+            for a in ordered
         ]
         if items:
             await self.actions_view.extend(items)
@@ -202,8 +216,65 @@ class MainScreen(Screen):
             self.action_run_selected()
 
     def action_help(self) -> None:
-        # Help screen is M5; for M1 it's a no-op.
-        self.app.bell()
+        from .help import HelpScreen
+        self.app.push_screen(HelpScreen())
+
+    def action_search(self) -> None:
+        """Open the fuzzy-search modal. Picking a result navigates the
+        menu to that action; pressing esc returns silently."""
+        from .search import SearchScreen
+        self.app.push_screen(
+            SearchScreen(self.manifest),
+            callback=self._on_search_dismissed,
+        )
+
+    def _on_search_dismissed(self, action_id: str | None) -> None:
+        if not action_id:
+            return
+        action = self.manifest.by_id(action_id)
+        if action is None:
+            return
+        # Find which group the action lives in and switch to it, then
+        # highlight the action in the actions pane.
+        ordered = sorted(self.manifest.groups, key=lambda x: x.order)
+        for idx, g in enumerate(ordered):
+            if g.id == action.group:
+                self.groups_view.index = idx
+                # Schedule the action highlight for after the
+                # repopulate driven by the Highlighted handler.
+                self.call_after_refresh(self._focus_action_id, action.id)
+                break
+
+    def _focus_action_id(self, action_id: str) -> None:
+        for i, child in enumerate(self.actions_view.children):
+            if isinstance(child, ActionItem) and child.action.id == action_id:
+                self.actions_view.index = i
+                self.actions_view.focus()
+                return
+
+    async def action_toggle_favorite(self) -> None:
+        """Pin/unpin the highlighted action. Persists to state.json."""
+        action = self._selected_action()
+        if action is None:
+            return
+        favorites = self.app.state.favorites
+        if action.id in favorites:
+            favorites.discard(action.id)
+        else:
+            favorites.add(action.id)
+        try:
+            self.app.state.save()
+        except Exception:  # pragma: no cover
+            pass
+        # Repopulate the current group so the favorited entry jumps
+        # to the top (or unpinned drops back into manifest order).
+        idx = self.groups_view.index
+        if idx is not None:
+            ordered = sorted(self.manifest.groups, key=lambda x: x.order)
+            await self._populate_actions(ordered[idx])
+            # Re-focus the same action so the operator's cursor doesn't
+            # jump unexpectedly.
+            self._focus_action_id(action.id)
 
     def action_run_selected(self) -> None:
         """Run the highlighted action with its default args.

@@ -110,6 +110,88 @@ ActionForm Button {
   margin-left: 2;
 }
 
+/* ---------- Help overlay ---------- */
+
+HelpScreen {
+  align: center middle;
+}
+
+HelpScreen #help-pane {
+  width: 80;
+  height: 30;
+  background: $surface;
+  border: thick $primary;
+  padding: 1 2;
+}
+
+HelpScreen #help-keys, HelpScreen #help-actions, HelpScreen #help-about {
+  height: auto;
+}
+
+HelpScreen #help-footer {
+  margin-top: 1;
+  text-align: center;
+}
+
+/* ---------- Search modal ---------- */
+
+SearchScreen {
+  align: center middle;
+}
+
+SearchScreen #search-pane {
+  width: 80;
+  height: 26;
+  background: $surface;
+  border: thick $primary;
+  padding: 1 2;
+}
+
+SearchScreen #search-input {
+  margin-bottom: 1;
+}
+
+SearchScreen #search-results {
+  height: 1fr;
+}
+
+/* ---------- Recovery modal ---------- */
+
+RecoveryScreen {
+  align: center middle;
+}
+
+RecoveryScreen #recovery-pane {
+  width: 70;
+  height: auto;
+  background: $surface;
+  border: thick $warning;
+  padding: 1 2;
+}
+
+RecoveryScreen #recovery-title {
+  text-style: bold;
+  color: $warning;
+  margin-bottom: 1;
+}
+
+RecoveryScreen #recovery-summary {
+  margin-bottom: 1;
+}
+
+RecoveryScreen #recovery-log-path {
+  margin-bottom: 1;
+}
+
+RecoveryScreen #recovery-buttons {
+  height: auto;
+  align-horizontal: right;
+}
+
+RecoveryScreen Button {
+  margin-left: 2;
+}
+
 /* ---------- Confirmation modal (red actions) ---------- */
 
 ConfirmScreen {
