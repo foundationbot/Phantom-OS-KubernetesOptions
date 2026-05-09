@@ -54,18 +54,41 @@ confirm. For screenshots and the full key map, see
 
 ### Install on a robot
 
-The launcher ships as a pipx-installable Python package under
-`tools/phantomos-ops/`:
+Two install paths — pick by whether the host has Python ≥ 3.11 (yes
+on Ubuntu 24.04 / Jetson) and whether the operator wants to manage
+deps themselves.
+
+**Single-file zipapp (preferred for fleet rollout).** No pip, no
+pipx, no virtualenv. Build once on a dev host:
 
 ```bash
-cd /opt/Phantom-OS-KubernetesOptions/tools/phantomos-ops
+cd tools/phantomos-ops
+bash build.sh              # produces dist/phantomos-ops (~3 MB)
+```
+
+Copy that one file to the robot and run it:
+
+```bash
+scp tools/phantomos-ops/dist/phantomos-ops root@hwthor01:/usr/local/bin/
+ssh root@hwthor01 phantomos-ops --version
+# phantomos-ops 0.1.0 (a1b2c3d)   ← embedded git SHA of the build
+```
+
+The zipapp bundles Textual + PyYAML inside itself; the only host
+requirement is `python3` (≥ 3.11) on `$PATH`. Self-contained, single
+file, easy to roll back by replacing the binary.
+
+**Editable pipx install (dev workflow).** When iterating on the TUI
+itself:
+
+```bash
+cd tools/phantomos-ops
 pipx install --editable .
 phantomos-ops
 ```
 
-`pipx` is preferred over `pip` so the dependencies (Textual, PyYAML)
-are isolated from system Python. The `phantomos-ops` entry point is
-on `$PATH` after install.
+`git pull` immediately reflects in the installed CLI. Use this for
+TUI development, not for fleet operators.
 
 ### Daily use
 
