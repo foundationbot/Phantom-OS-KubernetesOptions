@@ -65,6 +65,51 @@ ListView:focus > ListItem.--highlight {
   color: $text-muted;
 }
 
+/* ---------- ActionForm (parameter form modal) ---------- */
+
+ActionForm {
+  align: center middle;
+}
+
+ActionForm #form-pane {
+  width: 80;
+  height: auto;
+  background: $surface;
+  border: thick $primary;
+  padding: 1 2;
+}
+
+ActionForm .form-row {
+  height: auto;
+  margin-bottom: 0;
+}
+
+ActionForm .form-label {
+  width: 30;
+  padding: 1 1 0 0;
+}
+
+ActionForm #form-fields {
+  height: auto;
+  margin-bottom: 1;
+}
+
+ActionForm #form-preview {
+  background: $surface-darken-1;
+  padding: 0 1;
+  margin-bottom: 1;
+  color: $text-muted;
+}
+
+ActionForm #form-buttons {
+  height: auto;
+  align-horizontal: right;
+}
+
+ActionForm Button {
+  margin-left: 2;
+}
+
 /* ---------- Confirmation modal (red actions) ---------- */
 
 ConfirmScreen {
