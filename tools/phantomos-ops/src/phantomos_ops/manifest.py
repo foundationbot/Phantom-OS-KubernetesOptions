@@ -57,6 +57,12 @@ class Action:
     confirm_word: str = ""
     dry_run: tuple[str, ...] | None = None
     form: str | None = None
+    # interactive=True hands the terminal over to the subprocess
+    # (App.suspend) instead of routing it through the run-screen's
+    # RichLog. Required for scripts that prompt via `read`, drop
+    # into a shell, or need a real TTY (configure-host, exec into a
+    # pod, bootstrap-robot's confirmation prompts).
+    interactive: bool = False
 
 
 @dataclass(frozen=True)
@@ -396,6 +402,7 @@ def _parse_actions(
             confirm_word=confirm_word,
             dry_run=dry_run,
             form=(str(entry["form"]) if entry.get("form") else None),
+            interactive=bool(entry.get("interactive", False)),
         ))
     return out
 
