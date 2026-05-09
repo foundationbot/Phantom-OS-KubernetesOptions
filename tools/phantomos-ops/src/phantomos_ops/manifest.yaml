@@ -66,11 +66,12 @@ actions:
     blurb: |
       Walks the operator through /etc/phantomos/host-config.yaml —
       robot identity, image overrides, mounts, node labels.
+      Prompts render as native TUI Input/Confirm modals via the
+      ops-prompt bridge.
     safety: yellow
     requires: [root]
     runs_on: [robot]
     duration: "interactive"
-    interactive: true
     command: ["bash", "scripts/configure-host.sh"]
 
   - id: bootstrap.containerd_mirror

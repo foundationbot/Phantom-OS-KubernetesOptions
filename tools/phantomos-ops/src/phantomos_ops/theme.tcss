@@ -155,6 +155,41 @@ SearchScreen #search-results {
   height: 1fr;
 }
 
+/* ---------- Bridge prompts (ask / yes-no) ---------- */
+
+AskModal, ConfirmYesNoModal {
+  align: center middle;
+}
+
+AskModal #ask-pane,
+ConfirmYesNoModal #ynconfirm-pane {
+  width: 60;
+  height: auto;
+  background: $surface;
+  border: thick $accent;
+  padding: 1 2;
+}
+
+AskModal #ask-label,
+ConfirmYesNoModal #ynconfirm-label {
+  margin-bottom: 1;
+}
+
+AskModal #ask-input {
+  margin-bottom: 1;
+}
+
+AskModal #ask-buttons,
+ConfirmYesNoModal #ynconfirm-buttons {
+  height: auto;
+  align-horizontal: right;
+}
+
+AskModal Button,
+ConfirmYesNoModal Button {
+  margin-left: 2;
+}
+
 /* ---------- Recovery modal ---------- */
 
 RecoveryScreen {
