@@ -209,7 +209,12 @@ class MainScreen(Screen):
 
         Gated entries fire a bell and stay put — the action greys out
         in the list with the reason; running them anyway would just
-        produce a misleading subprocess error."""
+        produce a misleading subprocess error.
+
+        Red actions detour through ConfirmScreen unless they were
+        already confirmed in this session (operator retried after
+        a transient failure).
+        """
         idx = self.actions_view.index
         if idx is None:
             self.app.bell()
@@ -218,7 +223,26 @@ class MainScreen(Screen):
         if not isinstance(item, ActionItem) or item.gated:
             self.app.bell()
             return
-        # Lazy import: keeps the screens/main.py → screens/run.py
-        # dependency one-way, simplifying test isolation of MainScreen.
+        action = item.action
+
+        # Lazy imports keep the screens module DAG one-way, which
+        # simplifies test isolation of MainScreen and avoids a
+        # circular import (run.py imports nothing back here).
+        if safety.needs_confirm(action.safety) \
+                and action.id not in self.app.confirmed_this_session:
+            from .confirm import ConfirmScreen
+            self.app.push_screen(
+                ConfirmScreen(action),
+                callback=lambda confirmed, a=action: self._on_confirmed(a, confirmed),
+            )
+            return
+
         from .run import RunScreen
-        self.app.push_screen(RunScreen(item.action))
+        self.app.push_screen(RunScreen(action))
+
+    def _on_confirmed(self, action, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        self.app.confirmed_this_session.add(action.id)
+        from .run import RunScreen
+        self.app.push_screen(RunScreen(action))

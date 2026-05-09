@@ -65,6 +65,48 @@ ListView:focus > ListItem.--highlight {
   color: $text-muted;
 }
 
+/* ---------- Confirmation modal (red actions) ---------- */
+
+ConfirmScreen {
+  align: center middle;
+}
+
+ConfirmScreen #confirm-pane {
+  width: 70;
+  height: auto;
+  background: $surface;
+  border: thick $error;
+  padding: 1 2;
+}
+
+ConfirmScreen #confirm-title {
+  text-style: bold;
+  color: $error;
+  margin-bottom: 1;
+}
+
+ConfirmScreen #confirm-blurb {
+  margin-bottom: 1;
+}
+
+ConfirmScreen #confirm-prompt {
+  margin-top: 1;
+  margin-bottom: 1;
+}
+
+ConfirmScreen #confirm-input {
+  margin-bottom: 1;
+}
+
+ConfirmScreen #confirm-buttons {
+  height: auto;
+  align-horizontal: right;
+}
+
+ConfirmScreen Button {
+  margin-left: 2;
+}
+
 /* ---------- Detail pane ---------- */
 
 #detail-pane .title {
