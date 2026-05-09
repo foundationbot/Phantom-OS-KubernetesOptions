@@ -1,0 +1,336 @@
+# phantomos ops — action registry.
+#
+# Single source of truth for the TUI menu. Adding a new entry is one
+# stanza here — see docs/ops-tui-dev-guide.md for the field reference,
+# safety classification, and conventions.
+#
+# Field cheat sheet:
+#   id              <group>.<short_name>, lowercase snake_case
+#   group           must match a groups[].id below
+#   title           operator intent — verb phrase, no script names
+#   blurb           1-4 lines of detail-pane copy
+#   safety          green | yellow | red
+#   confirm_word    required when safety: red (modal magic word)
+#   command         argv list (NEVER a shell string)
+#   requires        capabilities — kubectl, root, argocd, recorder_pod
+#   runs_on         [robot, dev] (default), [robot], or [dev]
+#   duration        operator hint — "~1s", "3-8 min", "interactive", "streams"
+#   reversible      defaults to true; false on red forces confirm modal
+#   form            null (launcher-only) or "<module>" under forms/
+#   dry_run         optional argv override for `d` keybinding
+
+groups:
+  - id: bootstrap
+    title: "Bootstrap & Host"
+    order: 1
+  - id: workloads
+    title: "Workloads"
+    order: 2
+  - id: streams
+    title: "Recording & Streams"
+    order: 3
+  - id: registry
+    title: "Registry"
+    order: 4
+  - id: builds
+    title: "Builds"
+    order: 5
+  - id: diagnostics
+    title: "Diagnostics"
+    order: 6
+
+actions:
+
+  # ---------------------------------------------------------------- Bootstrap
+
+  - id: bootstrap.bring_online
+    group: bootstrap
+    title: "Bring this machine online from scratch"
+    blurb: |
+      End-to-end k0s + ArgoCD bootstrap. Idempotent on a populated host
+      but heavy-handed on a fresh one — installs k0s, configures
+      containerd mirrors, registers nvidia runtime, applies host config,
+      and renders Argo Applications.
+    safety: red
+    confirm_word: "bootstrap"
+    requires: [root]
+    runs_on: [robot]
+    duration: "5-15 min"
+    reversible: false
+    command: ["bash", "scripts/bootstrap-robot.sh"]
+
+  - id: bootstrap.configure_host
+    group: bootstrap
+    title: "Edit per-host configuration"
+    blurb: |
+      Walks the operator through /etc/phantomos/host-config.yaml —
+      robot identity, image overrides, mounts, node labels.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "interactive"
+    command: ["bash", "scripts/configure-host.sh"]
+
+  - id: bootstrap.containerd_mirror
+    group: bootstrap
+    title: "Wire k0s to the local registry mirror"
+    blurb: |
+      Configures k0s containerd to route docker.io/* through the local
+      registry at localhost:5443 first, falling through on cache miss.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~10s"
+    command: ["bash", "scripts/configure-k0s-containerd-mirror.sh"]
+
+  - id: bootstrap.nvidia_runtime
+    group: bootstrap
+    title: "Enable the NVIDIA container runtime"
+    blurb: |
+      Registers the nvidia container runtime with k0s's containerd so
+      pods that request GPU resources actually get them.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~30s"
+    command: ["bash", "scripts/configure-k0s-nvidia-runtime.sh"]
+
+  - id: bootstrap.cpusets
+    group: bootstrap
+    title: "Carve out real-time CPU partitions"
+    blurb: |
+      Creates cgroup-v2 cpuset partitions and a systemd boot service
+      so EtherCAT RT loops have dedicated cores reserved across reboots.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~5s"
+    command: ["bash", "scripts/cpusets/manage_cpusets.sh"]
+
+  - id: bootstrap.ethercat_nic
+    group: bootstrap
+    title: "Pin the EtherCAT NIC to a real-time core"
+    blurb: |
+      Steers the EtherCAT NIC's IRQs onto a dedicated RT core, locks
+      its governor, and persists the policy via a systemd unit.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~5s"
+    command: ["bash", "scripts/cpusets/setup_ethercat_interface.sh"]
+
+  # ---------------------------------------------------------------- Workloads
+
+  - id: positronic.status
+    group: workloads
+    title: "Show what positronic-control is doing right now"
+    blurb: |
+      Snapshot of pod state: QoS, restarts, runtimeClass, PHANTOM_CMD
+      (CM + as-seen by pod), PID 1 cmd.
+    safety: green
+    requires: [kubectl]
+    duration: "~1s"
+    command: ["bash", "scripts/positronic.sh", "status"]
+
+  - id: positronic.logs
+    group: workloads
+    title: "Tail positronic-control logs"
+    blurb: "Streams the main container's logs. Ctrl-C to stop."
+    safety: green
+    requires: [kubectl]
+    duration: "streams"
+    command: ["bash", "scripts/positronic.sh", "logs", "-f"]
+
+  - id: positronic.exec
+    group: workloads
+    title: "Drop into a shell on positronic-control"
+    blurb: "Interactive bash inside the running pod."
+    safety: green
+    requires: [kubectl]
+    duration: "interactive"
+    command: ["bash", "scripts/positronic.sh", "exec", "positronic"]
+
+  - id: locomotion.exec
+    group: workloads
+    title: "Drop into a shell on phantom-locomotion"
+    blurb: "Interactive bash inside the locomotion DaemonSet pod."
+    safety: green
+    requires: [kubectl]
+    duration: "interactive"
+    command: ["bash", "scripts/positronic.sh", "exec", "locomotion"]
+
+  - id: positronic.diagnose
+    group: workloads
+    title: "Diagnose unhealthy positronic-control"
+    blurb: |
+      Investigates why the pod is unhappy: image pulls, volumes,
+      runtimeClass, recent restarts. Optionally applies a fix.
+    safety: yellow
+    requires: [kubectl]
+    duration: "~30s"
+    command: ["bash", "scripts/diagnose-positronic.sh"]
+
+  - id: deployment.reset
+    group: workloads
+    title: "Tear down + rebuild stateful resources"
+    blurb: |
+      Deletes the core Argo Application + workloads in phantom,
+      positronic, nimbus, argus. PVCs recreated; on-disk data
+      preserved. ArgoCD reconciles from git.
+    safety: red
+    confirm_word: "reset"
+    requires: [kubectl]
+    duration: "3-8 min"
+    reversible: false
+    command: ["bash", "scripts/reset-deployment.sh"]
+
+  # ---------------------------------------------------------------- Streams
+
+  - id: streams.record_start
+    group: streams
+    title: "Start a recording"
+    blurb: |
+      Sends RECORDING_START to the dma-recorder pod. A new
+      recording_YYYYMMDD_HHMMSS.rrd opens on the next sample.
+    safety: yellow
+    requires: [kubectl]
+    duration: "<1s"
+    command: ["bash", "scripts/dma-cmd.sh", "record", "start"]
+
+  - id: streams.record_stop
+    group: streams
+    title: "Stop the active recording"
+    blurb: |
+      Sends RECORDING_STOP. Recorder flushes its columnar batch and
+      closes the current .rrd.
+    safety: yellow
+    requires: [kubectl]
+    duration: "<1s"
+    command: ["bash", "scripts/dma-cmd.sh", "record", "stop"]
+
+  - id: streams.ping
+    group: streams
+    title: "Ping the recorder"
+    blurb: "Liveness probe — sends PING and prints round-trip latency."
+    safety: green
+    requires: [kubectl]
+    duration: "<1s"
+    command: ["bash", "scripts/dma-cmd.sh", "ping"]
+
+  - id: streams.raw
+    group: streams
+    title: "Send a raw opcode"
+    blurb: "Send any opcode by hex value. For experts only."
+    safety: yellow
+    requires: [kubectl]
+    duration: "<1s"
+    form: "streams_raw"
+    # command provided by the form module.
+    command: ["bash", "scripts/dma-cmd.sh", "raw"]
+
+  # ---------------------------------------------------------------- Registry
+
+  - id: registry.prime
+    group: registry
+    title: "Pre-pull upstream images into the local registry"
+    blurb: |
+      Pulls upstream images and pushes them to localhost:5443 so
+      pods don't go to the public network.
+    safety: yellow
+    requires: [kubectl]
+    duration: "1-15 min"
+    command: ["bash", "scripts/prime-registry-cache.sh"]
+
+  - id: registry.prune
+    group: registry
+    title: "List or remove tags & reclaim disk"
+    blurb: |
+      Lists tags via skopeo and optionally deletes matching ones,
+      then GCs the registry filesystem.
+    safety: red
+    confirm_word: "prune"
+    requires: [kubectl]
+    duration: "1-5 min"
+    reversible: false
+    form: "registry_prune"
+    command: ["bash", "scripts/prune-registry-tags.sh"]
+
+  - id: registry.resize
+    group: registry
+    title: "Resize the registry's storage"
+    blurb: |
+      Recreates the k0s-registry PVC at a target capacity. PV is
+      retained but rebound. Recovery: re-prime if needed.
+    safety: red
+    confirm_word: "wipe"
+    requires: [kubectl]
+    duration: "~1 min"
+    reversible: false
+    command: ["bash", "scripts/resize-registry-pvc.sh"]
+
+  - id: registry.validate
+    group: registry
+    title: "Verify the local registry is wired up correctly"
+    blurb: "Runs the 13-test smoke suite against localhost:5443."
+    safety: green
+    requires: [kubectl]
+    duration: "~30s"
+    command: ["bash", "scripts/validate-local-registry.sh"]
+
+  - id: registry.rebind_pvc
+    group: registry
+    title: "Recover a stuck (Lost) volume claim"
+    blurb: |
+      Manually rebinds a PersistentVolumeClaim stuck in phase Lost.
+      Use only when the PVC has gone Lost and ArgoCD can't fix it.
+    safety: red
+    confirm_word: "proceed"
+    requires: [kubectl]
+    duration: "~30s"
+    reversible: false
+    command: ["bash", "scripts/rebind-stuck-pvc.sh"]
+
+  # ---------------------------------------------------------------- Builds
+
+  - id: builds.phantom_models
+    group: builds
+    title: "Build & publish the phantom-models image"
+    blurb: |
+      Bundles model weights + configs into a busybox-based image and
+      pushes it to localhost:5443/phantom-models:<tag>.
+    safety: yellow
+    duration: "1-5 min"
+    runs_on: [dev]
+    command:
+      - "python3"
+      - "scripts/phantom-models/build.py"
+      - "--image"
+      - "phantom-models"
+
+  - id: builds.phantom_policies
+    group: builds
+    title: "Build & publish the phantom-policies image"
+    blurb: |
+      Slim ONNX-only image consumed by phantom-locomotion's
+      load-policies init. Pushed to localhost:5443/phantom-policies.
+    safety: yellow
+    duration: "<1 min"
+    runs_on: [dev]
+    command:
+      - "python3"
+      - "scripts/phantom-models/build.py"
+      - "--image"
+      - "phantom-policies"
+
+  # ---------------------------------------------------------------- Diagnostics
+
+  - id: diagnostics.perfmon
+    group: diagnostics
+    title: "Record system performance"
+    blurb: |
+      CPU / GPU / EMC / power / perf counters → CSV + PNG. Useful for
+      profiling RT-loop jitter and locomotion compute headroom.
+    safety: green
+    duration: "streams"
+    runs_on: [robot]
+    command: ["python3", "scripts/thor-perfmon.py"]
