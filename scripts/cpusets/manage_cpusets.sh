@@ -30,6 +30,28 @@
 set -u  # unbound-var errors; we deliberately do NOT use -e here because
         # subcommands do their own error handling with explicit die().
 
+# TUI bridge — op_confirm / op_ask helpers. Sourced when running from
+# this checkout; gracefully no-op'd when this script is symlinked
+# into /usr/lib/dma-ethercat/ for the .deb install where the bridge
+# helper isn't shipped. The bridge itself is also a no-op when fd 3
+# is closed (plain shell), so behavior outside the TUI is unchanged.
+_OPS_PROMPT="${BASH_SOURCE[0]%/*}/../lib/ops-prompt.sh"
+if [ -r "$_OPS_PROMPT" ]; then
+  # shellcheck disable=SC1090
+  . "$_OPS_PROMPT"
+else
+  op_confirm() {
+    local prompt="$1" default="${2:-false}" hint reply
+    [ "$default" = true ] && hint="[Y/n]" || hint="[y/N]"
+    read -r -p "$prompt $hint: " reply || return 1
+    if [ -z "$reply" ]; then
+      [ "$default" = true ] && return 0 || return 1
+    fi
+    case "$reply" in y|Y|yes|true) return 0 ;; *) return 1 ;; esac
+  }
+fi
+unset _OPS_PROMPT
+
 # ---------- Script locations -----------------------------------------------
 # Resolve symlinks so an installed entrypoint like /usr/sbin/dma-ethercat-cpusets
 # (symlinked into /usr/lib/dma-ethercat/cpusets/) still finds lib/ adjacent.
@@ -192,8 +214,12 @@ check_isolcpus_cmdline() {
     echo "  [2] Abort — remove isolcpus= with 'manage_cpusets.sh migrate-cmdline'"
     echo "  [3] Abort — let me pick different CPUs for the partition"
     echo ""
-    read -p "Choice [1/2/3]: " -n 1 -r choice
-    echo
+    if type op_ask >/dev/null 2>&1; then
+        choice="$(op_ask cpuset_isolcpus_choice "Choice [1/2/3]" "1")"
+    else
+        read -p "Choice [1/2/3]: " -n 1 -r choice
+        echo
+    fi
     case "$choice" in
         1) return 0 ;;
         2) info "Run: $0 migrate-cmdline"; exit 1 ;;
@@ -1059,10 +1085,10 @@ cmd_migrate_cmdline() {
     fi
 
     if [[ "${SKIP_PROMPTS:-0}" != "1" ]]; then
-        echo ""
-        read -p "Apply this change? [y/N] " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && { info "Aborted."; return 0; }
+        if ! op_confirm "Apply this change?" false; then
+            info "Aborted."
+            return 0
+        fi
     fi
 
     # Backup.

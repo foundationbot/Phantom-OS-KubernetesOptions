@@ -39,6 +39,10 @@
 
 set -euo pipefail
 
+# TUI bridge — op_confirm / status helpers.
+# shellcheck source=lib/ops-prompt.sh
+. "$(dirname "$0")/lib/ops-prompt.sh"
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -354,12 +358,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 if [ "$ASSUME_YES" -ne 1 ]; then
-  printf '\n  Proceed? [y/N] '
-  read -r reply
-  case "$reply" in
-    y|Y|yes|YES) : ;;
-    *) echo "  aborted."; exit 1 ;;
-  esac
+  if ! op_confirm "Proceed?" false; then
+    echo "  aborted."
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------

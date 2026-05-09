@@ -50,14 +50,17 @@ REPO_ROOT="$REPO"
 # shellcheck source=lib/robot-id.sh
 . "$(dirname "$0")/lib/robot-id.sh"
 
+# TUI bridge — op_ask / op_confirm helpers. No-op when fd 3 is closed.
+# shellcheck source=lib/ops-prompt.sh
+. "$(dirname "$0")/lib/ops-prompt.sh"
+
 # _resolve_robot — called after arg parsing to finalise ROBOT and derived vars.
 _resolve_robot() {
   local resolved
   if ! resolved="$(resolve_robot "$ROBOT")"; then
     # resolve_robot prints its own diagnostic. Fall back to interactive
     # prompt for backwards compatibility on dev laptops.
-    printf 'Enter robot name: ' >&2
-    read -r ROBOT
+    ROBOT="$(op_ask robot_name 'Enter robot name' '')"
     [ -n "$ROBOT" ] || die "robot name is required"
     if ! resolved="$(resolve_robot "$ROBOT")"; then
       die "robot name $ROBOT did not resolve"
@@ -986,9 +989,8 @@ cmd_teardown() {
 EOF
 
   if [ "$yes" != 1 ] && [ "$DRY_RUN" != 1 ]; then
-    printf '\nProceed? [y/N] '
-    local ans
-    read -r ans || ans=""
+    local ans=""
+    if op_confirm "Proceed?" false; then ans=y; fi
     case "$ans" in
       y|Y|yes|YES) ;;
       *) info "aborted."; return 0 ;;
