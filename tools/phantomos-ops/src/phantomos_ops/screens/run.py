@@ -23,14 +23,8 @@ from textual.screen import Screen
 from textual.widgets import RichLog, Static
 
 from ..manifest import Action
+from ..repo import find_repo_root_or_error
 from ..runner import Job, Outcome, run
-
-
-def _repo_root() -> Path:
-    """The repo root the runner cd's into so `bash scripts/foo.sh`
-    resolves regardless of where the operator launched the TUI."""
-    # tools/phantomos-ops/src/phantomos_ops/screens/run.py → repo root
-    return Path(__file__).resolve().parents[5]
 
 
 class RunScreen(Screen):
@@ -67,10 +61,22 @@ class RunScreen(Screen):
         return "$ " + " ".join(shlex.quote(s) for s in self.command)
 
     def on_mount(self) -> None:
+        repo_root, err = find_repo_root_or_error()
+        if repo_root is None:
+            # Render the error in the banner instead of trying to run
+            # the script — without a repo root, `bash scripts/foo.sh`
+            # is guaranteed to fail with a misleading "No such file"
+            # message that hides the real cause.
+            self.banner.update(
+                f"[red]✗ {err}[/red]"
+            )
+            for line in (err or "").splitlines():
+                self.log_view.write(line)
+            return
         self.job = run(
             list(self.command),
             on_line=self._on_line,
-            cwd=str(_repo_root()),
+            cwd=str(repo_root),
         )
         # Watch the job to render the final banner. Worker keeps
         # running even if the operator presses esc back to the menu.
