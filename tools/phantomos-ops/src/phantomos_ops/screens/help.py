@@ -15,6 +15,11 @@ from textual.widgets import Static, TabbedContent, TabPane
 
 from .. import __version__
 
+try:
+    from .._build import BUILD_TAG
+except ImportError:
+    BUILD_TAG = "dev"
+
 
 _KEYS_TEXT = """\
 [b]Navigation[/b]
@@ -70,7 +75,7 @@ developer guide:  docs/ops-tui-dev-guide.md
 
 def _about_text() -> str:
     return (
-        f"phantomos ops v{__version__}\n\n"
+        f"phantomos ops {__version__} ({BUILD_TAG})\n\n"
         "Textual TUI launcher for the Phantom-OS-KubernetesOptions\n"
         "fleet operator scripts.\n\n"
         "Operator guide:   docs/ops-tui-user-guide.md\n"
