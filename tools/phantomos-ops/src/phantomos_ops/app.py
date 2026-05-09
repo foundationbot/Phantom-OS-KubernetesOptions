@@ -11,6 +11,7 @@ from textual.app import App
 
 from .manifest import SAMPLE_MANIFEST, Manifest, ManifestError, load_manifest
 from .screens.main import MainScreen
+from .state import State
 
 
 def _theme_path() -> str:
@@ -44,7 +45,8 @@ class OpsApp(App):
     SUB_TITLE = "fleet operator launcher"
 
     def __init__(self, manifest: Manifest | None = None,
-                 read_only: bool = False):
+                 read_only: bool = False,
+                 state: State | None = None):
         super().__init__()
         # Errors collected at boot — surfaced in M3's startup banner.
         self.manifest_errors: list[str] = []
@@ -52,6 +54,9 @@ class OpsApp(App):
         # already confirmed. Cleared on quit. Per-action, never global.
         self.confirmed_this_session: set[str] = set()
         self.read_only = read_only
+        # Persisted state — favorites, last-form-values. Tests pass an
+        # in-memory State to avoid touching the real ~/.config path.
+        self.state = state if state is not None else State.load()
 
         if manifest is not None:
             self.manifest = manifest

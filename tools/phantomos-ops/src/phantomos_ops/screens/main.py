@@ -108,6 +108,7 @@ class MainScreen(Screen):
     BINDINGS = [
         ("q", "app.quit", "Quit"),
         ("?", "help", "Help"),
+        ("e", "edit_args", "Edit args"),
     ]
 
     def __init__(self, manifest: Manifest):
@@ -205,44 +206,87 @@ class MainScreen(Screen):
         self.app.bell()
 
     def action_run_selected(self) -> None:
-        """Push RunScreen for the highlighted action.
+        """Run the highlighted action with its default args.
 
-        Gated entries fire a bell and stay put — the action greys out
-        in the list with the reason; running them anyway would just
-        produce a misleading subprocess error.
-
-        Red actions detour through ConfirmScreen unless they were
-        already confirmed in this session (operator retried after
-        a transient failure).
+        Form-aware actions skip the form on plain Enter — this is the
+        "fast path" for operators who want defaults. Pressing 'e'
+        opens the form for parameter tweaks.
         """
+        action = self._selected_action()
+        if action is None:
+            return
+        self._dispatch(action, command_override=None)
+
+    def action_edit_args(self) -> None:
+        """Open the parameter form for the highlighted action.
+
+        Falls back to plain run if the action has no form."""
+        action = self._selected_action()
+        if action is None:
+            return
+        if action.form is None:
+            self._dispatch(action, command_override=None)
+            return
+        from ..forms import get_form_class
+        form_cls = get_form_class(action.form)
+        if form_cls is None:
+            # Manifest references an unknown form module — log into
+            # manifest_errors-equivalent and fall back to plain run.
+            self.app.bell()
+            self._dispatch(action, command_override=None)
+            return
+        recalled = self.app.state.recall_form(action.id)
+        self.app.push_screen(
+            form_cls(action, recalled=recalled),
+            callback=lambda cmd, a=action: self._on_form_dismissed(a, cmd),
+        )
+
+    def _selected_action(self):
+        """Resolve the currently highlighted ActionItem, or None.
+
+        Bells + returns None when nothing is selected or the entry
+        is gated (requires not met)."""
         idx = self.actions_view.index
         if idx is None:
             self.app.bell()
-            return
+            return None
         item = self.actions_view.children[idx]
         if not isinstance(item, ActionItem) or item.gated:
             self.app.bell()
-            return
-        action = item.action
+            return None
+        return item.action
 
-        # Lazy imports keep the screens module DAG one-way, which
-        # simplifies test isolation of MainScreen and avoids a
-        # circular import (run.py imports nothing back here).
+    def _dispatch(self, action, command_override: tuple[str, ...] | None) -> None:
+        """Final stage: confirm if needed, then push RunScreen."""
         if safety.needs_confirm(action.safety) \
                 and action.id not in self.app.confirmed_this_session:
             from .confirm import ConfirmScreen
             self.app.push_screen(
                 ConfirmScreen(action),
-                callback=lambda confirmed, a=action: self._on_confirmed(a, confirmed),
+                callback=lambda confirmed, a=action, c=command_override:
+                    self._on_confirmed(a, confirmed, c),
             )
             return
+        self._launch(action, command_override)
 
+    def _launch(self, action, command_override) -> None:
         from .run import RunScreen
-        self.app.push_screen(RunScreen(action))
+        self.app.push_screen(RunScreen(action, command=command_override))
 
-    def _on_confirmed(self, action, confirmed: bool | None) -> None:
+    def _on_confirmed(self, action, confirmed: bool | None,
+                      command_override) -> None:
         if not confirmed:
             return
         self.app.confirmed_this_session.add(action.id)
-        from .run import RunScreen
-        self.app.push_screen(RunScreen(action))
+        self._launch(action, command_override)
+
+    def _on_form_dismissed(self, action,
+                           cmd: tuple[str, ...] | None) -> None:
+        if cmd is None:
+            return  # Cancel / esc
+        # Persist the operator's choices for next time. The form
+        # screen exposed current_values via its instance — we read
+        # from state via the screen still on the stack? No — once
+        # dismissed it's gone. We persist via the form before
+        # dismiss; here we just dispatch to the runner.
+        self._dispatch(action, command_override=cmd)

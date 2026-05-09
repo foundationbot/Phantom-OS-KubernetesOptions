@@ -139,25 +139,18 @@ actions:
     safety: green
     requires: [kubectl]
     duration: "streams"
+    form: positronic_logs
     command: ["bash", "scripts/positronic.sh", "logs", "-f"]
 
   - id: positronic.exec
     group: workloads
-    title: "Drop into a shell on positronic-control"
-    blurb: "Interactive bash inside the running pod."
+    title: "Drop into a shell (positronic | locomotion)"
+    blurb: "Interactive bash inside the running pod. Pick the target."
     safety: green
     requires: [kubectl]
     duration: "interactive"
+    form: positronic_exec
     command: ["bash", "scripts/positronic.sh", "exec", "positronic"]
-
-  - id: locomotion.exec
-    group: workloads
-    title: "Drop into a shell on phantom-locomotion"
-    blurb: "Interactive bash inside the locomotion DaemonSet pod."
-    safety: green
-    requires: [kubectl]
-    duration: "interactive"
-    command: ["bash", "scripts/positronic.sh", "exec", "locomotion"]
 
   - id: positronic.diagnose
     group: workloads
@@ -239,6 +232,7 @@ actions:
     safety: yellow
     requires: [kubectl]
     duration: "1-15 min"
+    form: registry_prime
     command: ["bash", "scripts/prime-registry-cache.sh"]
 
   - id: registry.prune
