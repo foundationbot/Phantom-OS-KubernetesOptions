@@ -144,6 +144,11 @@ class MainScreen(Screen):
                 self.groups_view.index = idx
                 await self._populate_actions(group)
                 break
+        # Focus the actions pane so Up/Down/Enter operate on actions
+        # by default — that's the most common keyboard flow. To
+        # switch groups, the operator clicks a group or uses Tab.
+        if self.actions_view.children:
+            self.actions_view.focus()
 
     async def _populate_actions(self, group: Group) -> None:
         # ListView.clear / append are async — await them so the
@@ -186,6 +191,34 @@ class MainScreen(Screen):
         elif event.list_view is self.actions_view:
             self._update_detail()
 
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Enter on the actions pane fires the highlighted action.
+
+        ListView consumes the 'enter' key before screen-level bindings
+        see it, so we listen for the resulting Selected event.
+        """
+        if event.list_view is self.actions_view:
+            self.action_run_selected()
+
     def action_help(self) -> None:
         # Help screen is M5; for M1 it's a no-op.
         self.app.bell()
+
+    def action_run_selected(self) -> None:
+        """Push RunScreen for the highlighted action.
+
+        Gated entries fire a bell and stay put — the action greys out
+        in the list with the reason; running them anyway would just
+        produce a misleading subprocess error."""
+        idx = self.actions_view.index
+        if idx is None:
+            self.app.bell()
+            return
+        item = self.actions_view.children[idx]
+        if not isinstance(item, ActionItem) or item.gated:
+            self.app.bell()
+            return
+        # Lazy import: keeps the screens/main.py → screens/run.py
+        # dependency one-way, simplifying test isolation of MainScreen.
+        from .run import RunScreen
+        self.app.push_screen(RunScreen(item.action))

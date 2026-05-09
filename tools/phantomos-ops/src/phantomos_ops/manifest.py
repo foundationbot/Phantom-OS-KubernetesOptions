@@ -1,16 +1,38 @@
 """Manifest data model + loader.
 
-M1 ships in-code sample data so the screen layout is verifiable
-end-to-end before M2 wires the YAML loader. The dataclasses are the
-shape M2 will populate from `manifest.yaml`, so screens written
-against this module won't churn when the loader lands.
+The manifest is the single source of truth for the action registry.
+M2 added the YAML loader; the SAMPLE_MANIFEST below stays in-tree
+as a fallback used when the YAML file is missing — useful in tests
+and when the package is imported from a context that doesn't ship
+the asset.
+
+Loader contract:
+    manifest, errors = load_manifest(path)
+
+Validation philosophy: bad individual entries are DROPPED with a
+human-readable error string; the loader only RAISES (ManifestError)
+on catastrophic issues — file missing, invalid YAML, top-level shape
+wrong. This lets the app boot even with a partly-broken manifest
+and surface the issue in a startup banner instead of a stack trace.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
 
 from .safety import SafetyClass
+
+VALID_SAFETY: tuple[SafetyClass, ...] = ("green", "yellow", "red")
+VALID_RUNS_ON: tuple[str, ...] = ("robot", "dev")
+
+
+class ManifestError(Exception):
+    """Raised for catastrophic load failures (missing file, invalid
+    YAML, top-level shape wrong). Per-entry validation errors are
+    returned as the second element of load_manifest's tuple instead."""
 
 
 @dataclass(frozen=True)
@@ -198,3 +220,201 @@ SAMPLE_MANIFEST = Manifest(
         ),
     ),
 )
+
+
+# ---------------------------------------------------------------------
+# YAML loader
+
+# Required action fields. A missing one drops the entry.
+_REQUIRED_ACTION_FIELDS = ("id", "group", "title", "blurb", "safety", "command")
+_REQUIRED_GROUP_FIELDS = ("id", "title")
+
+
+def load_manifest(path: Path | str) -> tuple[Manifest, list[str]]:
+    """Load + validate a manifest YAML file.
+
+    Returns (manifest, errors). errors is empty when the file is fully
+    valid; non-empty when individual entries were dropped.
+
+    Raises ManifestError on catastrophic issues (file missing, invalid
+    YAML, top-level shape wrong) — these aren't recoverable for the
+    operator, so the caller should surface a hard banner.
+    """
+    p = Path(path)
+    try:
+        text = p.read_text()
+    except (FileNotFoundError, PermissionError, IsADirectoryError) as exc:
+        raise ManifestError(f"cannot read manifest at {p}: {exc}") from exc
+
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ManifestError(f"invalid YAML in {p}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ManifestError(f"{p}: top-level must be a mapping with "
+                            "'groups' and 'actions' keys")
+
+    errors: list[str] = []
+    groups = _parse_groups(data.get("groups") or [], errors)
+    actions = _parse_actions(data.get("actions") or [], groups, errors)
+
+    return Manifest(groups=tuple(groups), actions=tuple(actions)), errors
+
+
+def _parse_groups(raw: list[Any], errors: list[str]) -> list[Group]:
+    out: list[Group] = []
+    seen_ids: set[str] = set()
+    for i, entry in enumerate(raw):
+        loc = f"groups[{i}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{loc}: must be a mapping")
+            continue
+        missing = [f for f in _REQUIRED_GROUP_FIELDS if f not in entry]
+        if missing:
+            errors.append(f"{loc}: missing required fields: {', '.join(missing)}")
+            continue
+        gid = entry["id"]
+        if gid in seen_ids:
+            errors.append(f"{loc}: duplicate group id {gid!r} — keeping first")
+            continue
+        seen_ids.add(gid)
+        out.append(Group(
+            id=gid,
+            title=str(entry["title"]),
+            order=int(entry.get("order", 0)),
+        ))
+    return out
+
+
+def _parse_actions(
+    raw: list[Any],
+    groups: list[Group],
+    errors: list[str],
+) -> list[Action]:
+    known_groups = {g.id for g in groups}
+    out: list[Action] = []
+    seen_ids: set[str] = set()
+
+    for i, entry in enumerate(raw):
+        loc = f"actions[{i}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{loc}: must be a mapping")
+            continue
+
+        missing = [f for f in _REQUIRED_ACTION_FIELDS if f not in entry]
+        if missing:
+            errors.append(f"{loc}: missing required fields: {', '.join(missing)}")
+            continue
+
+        aid = str(entry["id"])
+        if aid in seen_ids:
+            errors.append(
+                f"{loc}: duplicate action id {aid!r} — keeping first occurrence"
+            )
+            continue
+
+        # Group reference must resolve.
+        gref = entry["group"]
+        if gref not in known_groups:
+            errors.append(
+                f"{loc} ({aid}): references unknown group {gref!r}"
+            )
+            continue
+
+        # Safety must be one of the known classes.
+        safety = entry["safety"]
+        if safety not in VALID_SAFETY:
+            errors.append(
+                f"{loc} ({aid}): invalid safety {safety!r} — "
+                f"must be one of {', '.join(VALID_SAFETY)}"
+            )
+            continue
+
+        # Command must be argv list, never a shell string. A scalar
+        # string would silently work via subprocess shell=False but
+        # opens a shell-injection door once forms feed user values in.
+        cmd = entry["command"]
+        if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
+            errors.append(
+                f"{loc} ({aid}): command must be a list of strings, "
+                f"not {type(cmd).__name__}"
+            )
+            continue
+        if len(cmd) == 0:
+            errors.append(f"{loc} ({aid}): command must be non-empty")
+            continue
+
+        # Red actions need a confirm_word; otherwise the modal can't
+        # render a magic-word prompt.
+        confirm_word = str(entry.get("confirm_word") or "")
+        if safety == "red" and not confirm_word:
+            errors.append(
+                f"{loc} ({aid}): safety=red requires a non-empty confirm_word"
+            )
+            continue
+
+        # Optional list-shaped fields.
+        requires = _parse_str_list(entry.get("requires"), loc, "requires", errors)
+        if requires is None:
+            continue
+        runs_on = _parse_str_list(entry.get("runs_on"), loc, "runs_on", errors,
+                                  default=("robot", "dev"))
+        if runs_on is None:
+            continue
+        # runs_on tokens must be valid.
+        bad = [t for t in runs_on if t not in VALID_RUNS_ON]
+        if bad:
+            errors.append(
+                f"{loc} ({aid}): runs_on has unknown tokens {bad!r} — "
+                f"valid: {', '.join(VALID_RUNS_ON)}"
+            )
+            continue
+
+        dry_run_raw = entry.get("dry_run")
+        if dry_run_raw is None:
+            dry_run = None
+        else:
+            if not isinstance(dry_run_raw, list) \
+                    or not all(isinstance(x, str) for x in dry_run_raw):
+                errors.append(f"{loc} ({aid}): dry_run must be a list of strings")
+                continue
+            dry_run = tuple(dry_run_raw)
+
+        seen_ids.add(aid)
+        out.append(Action(
+            id=aid,
+            group=gref,
+            title=str(entry["title"]),
+            blurb=str(entry["blurb"]),
+            safety=safety,                    # type: ignore[arg-type]
+            command=tuple(cmd),
+            requires=tuple(requires),
+            runs_on=tuple(runs_on),
+            duration=str(entry.get("duration") or ""),
+            reversible=bool(entry.get("reversible", True)),
+            confirm_word=confirm_word,
+            dry_run=dry_run,
+            form=(str(entry["form"]) if entry.get("form") else None),
+        ))
+    return out
+
+
+def _parse_str_list(
+    raw: Any,
+    loc: str,
+    field_name: str,
+    errors: list[str],
+    default: tuple[str, ...] = (),
+) -> tuple[str, ...] | None:
+    """Coerce raw → tuple[str,...] or record an error and return None.
+
+    None signals "skip this entry" to the caller; an empty tuple is a
+    valid result for a missing optional field.
+    """
+    if raw is None:
+        return tuple(default)
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        errors.append(f"{loc}: {field_name} must be a list of strings")
+        return None
+    return tuple(raw)
