@@ -341,8 +341,51 @@ class MainScreen(Screen):
         self._launch(action, command_override)
 
     def _launch(self, action, command_override) -> None:
+        if action.interactive:
+            self._launch_interactive(action, command_override)
+            return
         from .run import RunScreen
         self.app.push_screen(RunScreen(action, command=command_override))
+
+    def _launch_interactive(self, action, command_override) -> None:
+        """Hand the terminal over to the subprocess so prompts work.
+
+        Required for scripts that read from stdin (configure-host,
+        bootstrap-robot's confirmations, exec into a pod, etc.).
+        Routing those through the run-screen's RichLog hangs because
+        the script blocks on a `read` that never gets fed.
+
+        Textual's App.suspend() is a context manager that restores the
+        terminal to a normal mode for the duration of the with-block;
+        on exit, the TUI redraws fresh.
+        """
+        import subprocess
+        from ..repo import find_repo_root_or_error
+
+        repo_root, err = find_repo_root_or_error()
+        if repo_root is None:
+            self.app.bell()
+            self.notify(err or "could not locate repo root", severity="error")
+            return
+
+        cmd = list(command_override) if command_override else list(action.command)
+        with self.app.suspend():
+            # Tiny visual cue so the operator sees what's about to run
+            # before the terminal hands over to the script. Print is
+            # plain text — Textual is suspended, this is the bare TTY.
+            print(f"\n[phantomos ops] $ {' '.join(cmd)}", flush=True)
+            try:
+                rc = subprocess.call(cmd, cwd=str(repo_root))
+            except KeyboardInterrupt:
+                rc = 130
+            print(f"\n[phantomos ops] exit {rc}. Press Enter to return…",
+                  flush=True)
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
+        self.notify(f"{action.title}: exit {rc}",
+                    severity="information" if rc == 0 else "warning")
 
     def _on_confirmed(self, action, confirmed: bool | None,
                       command_override) -> None:

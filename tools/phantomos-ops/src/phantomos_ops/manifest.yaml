@@ -57,6 +57,7 @@ actions:
     runs_on: [robot]
     duration: "5-15 min"
     reversible: false
+    interactive: true
     command: ["bash", "scripts/bootstrap-robot.sh"]
 
   - id: bootstrap.configure_host
@@ -69,6 +70,7 @@ actions:
     requires: [root]
     runs_on: [robot]
     duration: "interactive"
+    interactive: true
     command: ["bash", "scripts/configure-host.sh"]
 
   - id: bootstrap.containerd_mirror
@@ -149,6 +151,7 @@ actions:
     safety: green
     requires: [kubectl]
     duration: "interactive"
+    interactive: true
     form: positronic_exec
     command: ["bash", "scripts/positronic.sh", "exec", "positronic"]
 
