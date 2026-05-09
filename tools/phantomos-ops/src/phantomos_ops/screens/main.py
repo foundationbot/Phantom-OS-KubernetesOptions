@@ -1,0 +1,191 @@
+"""Main screen — three-pane menu (groups · actions · detail).
+
+M1 reads the in-code SAMPLE_MANIFEST so the layout is verifiable
+end-to-end. M2 swaps in the YAML loader without touching this file.
+"""
+from __future__ import annotations
+
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.reactive import reactive
+from textual.screen import Screen
+from textual.widgets import Footer, ListItem, ListView, Static
+
+from .. import env, safety
+from ..manifest import Action, Group, Manifest
+
+
+# ---------------------------------------------------------------------
+# env header
+
+class EnvBar(Static):
+    """One-line status of host / robot / kubectl / online."""
+
+    fingerprint: reactive[env.Fingerprint | None] = reactive(None, recompose=True)
+
+    def on_mount(self) -> None:
+        self.fingerprint = env.fingerprint()
+        self.set_interval(5.0, self._refresh)
+
+    def _refresh(self) -> None:
+        self.fingerprint = env.fingerprint(refresh=True)
+
+    def render(self) -> str:
+        fp = self.fingerprint
+        if fp is None:
+            return ""
+        host_part   = f"host {fp.host}"
+        robot_part  = f"robot {fp.robot_id or '—'}"
+        kc_glyph    = "✓" if fp.kubectl.available else "✗"
+        kc_part     = f"kubectl {kc_glyph}"
+        # M2 will add argocd / online state here. Keep the layout
+        # stable so the bar doesn't reflow when we add to it.
+        return f"  {host_part}   {robot_part}   {kc_part}"
+
+
+# ---------------------------------------------------------------------
+# group + action list rows
+
+class GroupItem(ListItem):
+    def __init__(self, group: Group):
+        super().__init__(Static(group.title))
+        self.group = group
+
+
+class ActionItem(ListItem):
+    def __init__(self, action: Action, gated_reason: str | None):
+        style = safety.style(action.safety)
+        prefix = f"[{style.css_class}]{style.glyph}[/{style.css_class}]"
+        text = f"{prefix}  {action.title}"
+        if gated_reason:
+            text += f"   [dim](disabled: {gated_reason})[/dim]"
+        super().__init__(Static(text, markup=True))
+        self.action = action
+        self.gated = gated_reason is not None
+
+
+# ---------------------------------------------------------------------
+# detail pane
+
+class DetailPane(Vertical):
+    """Right-hand pane — full description of the highlighted action."""
+
+    action: reactive[Action | None] = reactive(None, recompose=True)
+
+    def compose(self) -> ComposeResult:
+        a = self.action
+        if a is None:
+            yield Static("[dim]Pick an action to see details.[/dim]", markup=True)
+            return
+
+        sty = safety.style(a.safety)
+        yield Static(a.title, classes="title")
+        yield Static("─" * 40, classes="dim")
+        yield Static(a.blurb, classes="blurb")
+        meta_lines = [sty.word]
+        if a.duration:
+            meta_lines.append(a.duration)
+        if a.requires:
+            meta_lines.append("needs " + ", ".join(a.requires))
+        if a.runs_on and set(a.runs_on) != {"robot", "dev"}:
+            meta_lines.append("runs on " + ", ".join(a.runs_on))
+        for line in meta_lines:
+            yield Static(line, classes="meta")
+        yield Static("", classes="meta")
+        yield Static(
+            f"[dim]▸ Show command (c)[/dim]",
+            markup=True,
+            classes="meta",
+        )
+
+
+# ---------------------------------------------------------------------
+# screen
+
+class MainScreen(Screen):
+    """Three-pane menu. Default screen at app boot."""
+
+    BINDINGS = [
+        ("q", "app.quit", "Quit"),
+        ("?", "help", "Help"),
+    ]
+
+    def __init__(self, manifest: Manifest):
+        super().__init__()
+        self.manifest = manifest
+
+    def compose(self) -> ComposeResult:
+        self.env_bar = EnvBar(id="env-bar")
+        yield self.env_bar
+
+        with Horizontal(id="main-grid"):
+            self.groups_view = ListView(
+                *(GroupItem(g) for g in sorted(self.manifest.groups, key=lambda x: x.order)),
+                id="groups-pane",
+            )
+            yield self.groups_view
+
+            self.actions_view = ListView(id="actions-pane")
+            yield self.actions_view
+
+            self.detail = DetailPane(id="detail-pane")
+            yield self.detail
+
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        # Highlight first non-empty group → first action so the screen
+        # never opens empty. If every group is empty (manifest only has
+        # `groups:` and no `actions:`) we still mount cleanly with an
+        # empty actions pane.
+        ordered = sorted(self.manifest.groups, key=lambda x: x.order)
+        for idx, group in enumerate(ordered):
+            if self.manifest.actions_in(group.id):
+                self.groups_view.index = idx
+                await self._populate_actions(group)
+                break
+
+    async def _populate_actions(self, group: Group) -> None:
+        # ListView.clear / append are async — await them so the
+        # subsequent index assignment lands on a populated view.
+        await self.actions_view.clear()
+        fp = env.fingerprint()
+        items = [
+            ActionItem(a, self._gate_reason(a, fp))
+            for a in self.manifest.actions_in(group.id)
+        ]
+        if items:
+            await self.actions_view.extend(items)
+            self.actions_view.index = 0
+            self._update_detail()
+        else:
+            self.detail.action = None
+
+    def _gate_reason(self, action: Action, fp: env.Fingerprint) -> str | None:
+        for cap in action.requires:
+            if not fp.has_capability(cap):
+                return f"needs {cap}"
+        return None
+
+    def _update_detail(self) -> None:
+        idx = self.actions_view.index
+        if idx is None:
+            self.detail.action = None
+            return
+        item = self.actions_view.children[idx]
+        if isinstance(item, ActionItem):
+            self.detail.action = item.action
+
+    # ----- event handlers --------------------------------------------
+
+    async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.list_view is self.groups_view:
+            item = event.item
+            if isinstance(item, GroupItem):
+                await self._populate_actions(item.group)
+        elif event.list_view is self.actions_view:
+            self._update_detail()
+
+    def action_help(self) -> None:
+        # Help screen is M5; for M1 it's a no-op.
+        self.app.bell()
