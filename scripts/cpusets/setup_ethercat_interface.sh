@@ -37,6 +37,25 @@
 
 set -u  # explicit error handling via die(); no -e (matches manage_cpusets.sh)
 
+# TUI bridge — op_confirm helper. Sourced when present; else a local
+# fallback keeps the .deb-installed copy working.
+_OPS_PROMPT="${BASH_SOURCE[0]%/*}/../lib/ops-prompt.sh"
+if [ -r "$_OPS_PROMPT" ]; then
+  # shellcheck disable=SC1090
+  . "$_OPS_PROMPT"
+else
+  op_confirm() {
+    local prompt="$1" default="${2:-false}" hint reply
+    [ "$default" = true ] && hint="[Y/n]" || hint="[y/N]"
+    read -r -p "$prompt $hint: " reply || return 1
+    if [ -z "$reply" ]; then
+      [ "$default" = true ] && return 0 || return 1
+    fi
+    case "$reply" in y|Y|yes|true) return 0 ;; *) return 1 ;; esac
+  }
+fi
+unset _OPS_PROMPT
+
 # ---------- Colors ---------------------------------------------------------
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -352,14 +371,12 @@ if [[ -n "$SELECTOR_KIND" ]]; then
         || die "could not resolve selector to a NIC"
 
     if [[ "$ASSUME_YES" != true ]]; then
-        if [[ ! -t 0 ]]; then
+        if [[ ! -t 0 ]] && [[ "${_OPS_TUI:-0}" != 1 ]]; then
             die "non-interactive mode requires --yes when stdin is not a TTY"
         fi
         echo "About to bind iface $TARGET_IFACE to MAC $target_mac"
         echo "  udev rule: $UDEV_RULE_FILE"
-        read -p "Proceed? [y/N] " -n 1 -r
-        echo
-        [[ "$REPLY" =~ ^[Yy]$ ]] || die "aborted by operator"
+        if ! op_confirm "Proceed?" false; then die "aborted by operator"; fi
     fi
 
     apply_named_iface "$TARGET_IFACE" "$target_mac"
@@ -367,7 +384,7 @@ if [[ -n "$SELECTOR_KIND" ]]; then
 fi
 
 # ---------- No selectors: interactive or hard-fail ------------------------
-if [[ ! -t 0 ]]; then
+if [[ ! -t 0 ]] && [[ "${_OPS_TUI:-0}" != 1 ]]; then
     die "no selector flags supplied and stdin is not a TTY. Pass --mac, --pci, or --driver+--index, or run from a terminal."
 fi
 
@@ -387,18 +404,18 @@ if [[ -f "$UDEV_RULE_FILE" ]]; then
     cat "$UDEV_RULE_FILE"
     echo ""
     if [[ "$ASSUME_YES" == true ]]; then
-        REPLY="y"
+        replace_rule=true
+    elif op_confirm "Add/replace the rule for $TARGET_IFACE?" false; then
+        replace_rule=true
     else
-        read -p "Do you want to add/replace the rule for $TARGET_IFACE? [y/N] " -n 1 -r
-        echo
+        replace_rule=false
     fi
-    if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+    if [[ "$replace_rule" != true ]]; then
         echo "Keeping existing rule."
         if ip link show "$TARGET_IFACE" &>/dev/null; then
-            echo ""
-            read -p "Configure IRQ and CPU core pinning for real-time? [Y/n] " -n 1 -r
-            echo
-            [[ ! "$REPLY" =~ ^[Nn]$ ]] && run_rt_setup "$TARGET_IFACE"
+            if op_confirm "Configure IRQ and CPU core pinning for real-time?" true; then
+                run_rt_setup "$TARGET_IFACE"
+            fi
         fi
         exit 0
     fi
@@ -409,10 +426,9 @@ target_mac=$(nic_resolve_target_mac_interactive "$TARGET_IFACE") \
     || die "no adapter selected"
 apply_named_iface "$TARGET_IFACE" "$target_mac"
 
-echo ""
-read -p "Configure IRQ and CPU core pinning for real-time? [Y/n] " -n 1 -r
-echo
-[[ ! "$REPLY" =~ ^[Nn]$ ]] && run_rt_setup "$TARGET_IFACE"
+if op_confirm "Configure IRQ and CPU core pinning for real-time?" true; then
+    run_rt_setup "$TARGET_IFACE"
+fi
 
 echo ""
 echo -e "${GREEN}Setup complete!${NC}"

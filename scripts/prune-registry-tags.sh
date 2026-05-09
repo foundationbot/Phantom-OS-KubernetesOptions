@@ -48,6 +48,11 @@
 
 set -u -o pipefail
 
+# TUI bridge — op_confirm / status helpers. No-op when fd 3 is closed
+# (cron / ssh / manual shell).
+# shellcheck source=lib/ops-prompt.sh
+. "$(dirname "$0")/lib/ops-prompt.sh"
+
 REGISTRY_HOST="${REGISTRY_HOST:-localhost:5443}"
 REGISTRY_NAMESPACE="${REGISTRY_NAMESPACE:-registry}"
 REGISTRY_DEPLOYMENT="${REGISTRY_DEPLOYMENT:-k0s-registry}"
@@ -192,9 +197,7 @@ run_gc() {
 
 confirm() {
   [ "$YES" = 1 ] && return 0
-  printf '%s [y/N] ' "$1"
-  read -r reply || return 1
-  [[ "$reply" =~ ^[Yy] ]]
+  op_confirm "$1" false
 }
 
 # parse args

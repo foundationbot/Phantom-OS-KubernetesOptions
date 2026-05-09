@@ -51,6 +51,10 @@
 
 set -u -o pipefail
 
+# TUI bridge — op_confirm / status helpers.
+# shellcheck source=lib/ops-prompt.sh
+. "$(dirname "$0")/lib/ops-prompt.sh"
+
 # kubectl resolution — robot has only `k0s kubectl`; laptops may have either.
 KUBECTL=""
 if command -v kubectl >/dev/null 2>&1; then
@@ -169,9 +173,7 @@ deploy_replicas() {
 confirm() {
   local prompt="$1"
   if [ "$ASSUME_YES" = 1 ]; then return 0; fi
-  printf '\n%s [y/N]: ' "$prompt"
-  read -r ans </dev/tty || return 1
-  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+  op_confirm "$prompt" false
 }
 
 # Validate PVC phase. Echoes the phase. Returns:

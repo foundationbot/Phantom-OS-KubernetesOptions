@@ -41,6 +41,10 @@
 
 set -u -o pipefail
 
+# TUI bridge — op_confirm / status helpers.
+# shellcheck source=lib/ops-prompt.sh
+. "$(dirname "$0")/lib/ops-prompt.sh"
+
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 ARGOCD_NS="${ARGOCD_NS:-argocd}"
 
@@ -105,9 +109,7 @@ run() {
 confirm() {
   local prompt="$1"
   if [ "$ASSUME_YES" = 1 ]; then return 0; fi
-  printf '\n%s [y/N]: ' "$prompt"
-  read -r ans </dev/tty || return 1
-  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+  op_confirm "$prompt" false
 }
 
 # --- 0. Plan summary ------------------------------------------------------
