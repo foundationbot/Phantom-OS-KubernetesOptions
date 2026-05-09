@@ -136,19 +136,42 @@ _kernel_arch_for() {
 }
 
 # Read EXTRA_IMAGES_FILE, drop comments/blanks, substitute {ARCH} and
-# {KERNEL_ARCH} for the requested arch, print one ref per line. No-op
-# if the file is empty/absent.
+# {KERNEL_ARCH}, honor per-line `# arch:<arch>[,<arch>...]` filters,
+# and print one ref per line for the requested arch. No-op if the file
+# is empty/absent.
+#
+# Line formats:
+#   foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH}
+#       Templated; expands to the right tag for each arch.
+#   foundationbot/dma-ethercat:main-latest-amd64    # arch:amd64
+#       Pinned to one arch; lines for other arches are skipped.
+#   foundationbot/dma-ethercat:custom-tag           # arch:amd64,arm64
+#       Same line in multiple arches (rarely useful, supported anyway).
 read_extra_images_for_arch() {
-  local arch="$1" kernel_arch line
+  local arch="$1" kernel_arch line ref filter filter_csv match
   kernel_arch="$(_kernel_arch_for "$arch")"
   [ -n "$EXTRA_IMAGES_FILE" ] && [ -r "$EXTRA_IMAGES_FILE" ] || return 0
   while IFS= read -r line; do
-    line="${line%%#*}"
-    line="$(printf '%s' "$line" | tr -d '[:space:]')"
-    [ -z "$line" ] && continue
-    line="${line//\{ARCH\}/$arch}"
-    line="${line//\{KERNEL_ARCH\}/$kernel_arch}"
-    printf '%s\n' "$line"
+    # Pull out any `# arch:<csv>` filter before stripping comments.
+    filter=""
+    if printf '%s' "$line" | grep -qE '#[[:space:]]*arch:'; then
+      filter="$(printf '%s' "$line" | sed -nE 's/.*#[[:space:]]*arch:([^[:space:]#]+).*/\1/p')"
+    fi
+    # Strip comments and whitespace from the ref.
+    ref="${line%%#*}"
+    ref="$(printf '%s' "$ref" | tr -d '[:space:]')"
+    [ -z "$ref" ] && continue
+    # Apply the arch filter if present.
+    if [ -n "$filter" ]; then
+      match=0
+      filter_csv=",${filter},"
+      case "$filter_csv" in *,${arch},*) match=1 ;; esac
+      [ "$match" = 0 ] && continue
+    fi
+    # Now do template substitution.
+    ref="${ref//\{ARCH\}/$arch}"
+    ref="${ref//\{KERNEL_ARCH\}/$kernel_arch}"
+    printf '%s\n' "$ref"
   done < "$EXTRA_IMAGES_FILE"
 }
 
@@ -249,10 +272,10 @@ FILENAME_VERSION="${VERSION//./-}"
 FILENAME_VERSION="${FILENAME_VERSION//+/-}"
 
 # Sanitize an image ref into a filesystem-safe filename.
-#   foundationbot/argus.auth:qa  ->  foundationbot--argus.auth_qa.tar
+#   foundationbot/argus.auth:qa  ->  foundationbot-argus.auth_qa.tar
 #   nginx:latest                 ->  nginx_latest.tar
 sanitize_filename() {
-  printf '%s' "$1" | sed 's|/|--|g; s|:|_|g'
+  printf '%s' "$1" | sed 's|/|-|g; s|:|_|g'
 }
 
 # Strip an image ref to just its repository (no tag, no digest).
