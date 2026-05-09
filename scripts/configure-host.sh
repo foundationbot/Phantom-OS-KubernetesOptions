@@ -76,6 +76,12 @@ done
 
 # ---- helpers ------------------------------------------------------------
 
+# When run under phantomos-ops, ops-prompt.sh wires up native TUI
+# prompts (Input modal for ask, Yes/No modal for confirm). When run
+# from a plain shell, sourcing the helper is a no-op for the local
+# ask()/confirm() below — they keep working as before.
+. "$(dirname "$0")/lib/ops-prompt.sh"
+
 C_BOLD=$'\033[1m'
 C_DIM=$'\033[2m'
 C_GREEN=$'\033[32m'
@@ -105,6 +111,24 @@ die() { err "$1"; exit "${2:-1}"; }
 ask() {
   local prompt="$1"; local default="${2:-}"; local help="${3:-}"; local validator="${4:-}"
   local input value
+
+  # Bridge fast path: ask the TUI for a typed value, validate it,
+  # return. The TUI already shows the prompt label as a modal — no
+  # need to print to stderr here. We don't yet expose `?`-help
+  # through the bridge; help text is logged ahead of the prompt.
+  if [ "${_OPS_TUI:-0}" = 1 ]; then
+    [ -n "$help" ] && hint "$help"
+    while :; do
+      value="$(op_ask "$prompt" "$prompt" "$default")"
+      [ -z "$value" ] && value="$default"
+      if [ -n "$validator" ] && ! "$validator" "$value"; then
+        op_warn "rejected: $value"
+        continue
+      fi
+      printf '%s' "$value"
+      return 0
+    done
+  fi
 
   while :; do
     if [ -n "$default" ]; then
@@ -146,6 +170,14 @@ ask() {
 
 confirm() {
   local prompt="$1"; local default="${2:-y}"; local input
+
+  if [ "${_OPS_TUI:-0}" = 1 ]; then
+    # Translate y/n default to true/false for the TUI confirm modal.
+    local d_bool=false
+    [ "$default" = "y" ] && d_bool=true
+    if op_confirm "$prompt" "$d_bool"; then return 0; else return 1; fi
+  fi
+
   while :; do
     if [ "$default" = "y" ]; then
       printf '  %s%s%s [Y/n]: ' "$C_CYAN" "$prompt" "$C_RESET" >&2

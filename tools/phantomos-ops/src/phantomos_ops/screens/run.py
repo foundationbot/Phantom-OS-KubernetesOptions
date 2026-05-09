@@ -76,11 +76,70 @@ class RunScreen(Screen):
         self.job = run(
             list(self.command),
             on_line=self._on_line,
+            on_event=self._on_event,
             cwd=str(repo_root),
         )
         # Watch the job to render the final banner. Worker keeps
         # running even if the operator presses esc back to the menu.
         self.run_worker(self._await_outcome(), exclusive=False)
+
+    # ----- bridge events ---------------------------------------------
+
+    _STATUS_GLYPHS = {
+        "pass": "[green]✓ PASS[/green]",
+        "warn": "[yellow]! WARN[/yellow]",
+        "fail": "[red]✗ FAIL[/red]",
+        "skip": "[dim]• SKIP[/dim]",
+    }
+
+    def _on_event(self, event: dict) -> None:
+        """Called by the runner on each fd-3 JSON event. Dispatches to
+        either inline rendering (phase/status) or a modal (ask/confirm)
+        whose result is fed back via job.respond()."""
+        kind = event.get("event")
+        if kind == "phase":
+            title = event.get("title", "")
+            self.log_view.write(f"\n[b]══ {title} ══[/b]")
+        elif kind == "status":
+            level = event.get("level", "")
+            msg = event.get("msg", "")
+            glyph = self._STATUS_GLYPHS.get(level, level)
+            self.log_view.write(f"  {glyph}  {msg}")
+        elif kind == "ask":
+            self.app.call_from_thread(self._present_ask, event) \
+                if False else self._present_ask(event)
+        elif kind == "confirm":
+            self._present_confirm(event)
+        # Unknown events: ignore. Forward-compatible.
+
+    def _present_ask(self, event: dict) -> None:
+        from .bridge_modals import AskModal
+        label = str(event.get("label", "?"))
+        default = str(event.get("default", ""))
+        self.app.push_screen(
+            AskModal(label, default),
+            callback=self._reply,
+        )
+
+    def _present_confirm(self, event: dict) -> None:
+        from .bridge_modals import ConfirmYesNoModal
+        label = str(event.get("label", "?"))
+        # Default arrives as a string from the bash helper.
+        default = str(event.get("default", "false")).lower() == "true"
+        self.app.push_screen(
+            ConfirmYesNoModal(label, default),
+            callback=self._reply_yesno,
+        )
+
+    def _reply(self, value: str | None) -> None:
+        if self.job is None:
+            return
+        self.job.respond(value or "")
+
+    def _reply_yesno(self, value: bool | None) -> None:
+        if self.job is None:
+            return
+        self.job.respond("y" if value else "n")
 
     # ----- runner integration ----------------------------------------
 
