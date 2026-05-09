@@ -5,6 +5,8 @@ you're trying to do — not by which file does it. Hides the script
 names; shows them only on demand. Confirms before anything
 destructive. Streams output without crashing if a script does.
 
+> Adding new functions? See [ops-tui-dev-guide.md](./ops-tui-dev-guide.md).
+
 ## What you see when you launch it
 
 ```
