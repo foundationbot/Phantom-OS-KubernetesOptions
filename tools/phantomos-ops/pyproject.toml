@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phantomos-ops"
+version = "0.1.0"
+description = "Textual TUI launcher for the phantomos fleet operator scripts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Foundation Robotics" }]
+
+dependencies = [
+  "textual>=0.50",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "pytest-asyncio>=0.21",
+  "textual-dev>=1.0",
+]
+
+[project.scripts]
+phantomos-ops = "phantomos_ops.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/phantomos_ops"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Disable third-party plugin auto-discovery so a polluted PYTHONPATH
+# (e.g. /opt/ros/.../site-packages) can't drag launch_testing or
+# similar into our test session.
+addopts = "-p no:cacheprovider"
+# Belt + braces: also force explicit plugin opt-in via env.
+required_plugins = ["pytest-asyncio"]

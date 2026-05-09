@@ -1,0 +1,88 @@
+/* phantomos ops — Textual stylesheet.
+ *
+ * Visual rules from docs/ops-tui-user-guide.md:
+ *   - Solid-line box drawing only.
+ *   - One accent color (cyan) for selection.
+ *   - Saturated colors reserved for safety bullets.
+ *   - Minimal moving parts.
+ */
+
+Screen {
+  background: $surface;
+}
+
+/* ---------- Header (env fingerprint) ---------- */
+
+#env-bar {
+  height: 1;
+  padding: 0 2;
+  background: $surface-lighten-1;
+  color: $text;
+}
+
+#env-bar .ok    { color: $success; }
+#env-bar .warn  { color: $warning; }
+#env-bar .bad   { color: $error;   }
+#env-bar .dim   { color: $text-muted; }
+
+/* ---------- Three-pane layout ---------- */
+
+#main-grid {
+  layout: horizontal;
+  height: 1fr;
+}
+
+#groups-pane  { width: 22%;  border-right: solid $primary-darken-2; }
+#actions-pane { width: 38%;  border-right: solid $primary-darken-2; }
+#detail-pane  { width: 1fr;  padding: 1 2; }
+
+/* ListView selection — single accent color, no saturation elsewhere. */
+ListView > ListItem.--highlight {
+  background: $accent 30%;
+}
+ListView:focus > ListItem.--highlight {
+  background: $accent 60%;
+  color: $text;
+}
+
+/* ---------- Action list rows ---------- */
+
+.action-row {
+  padding: 0 1;
+  height: auto;
+}
+
+.action-row > .glyph     { width: 3; }
+.action-row > .glyph.green   { color: $success; }
+.action-row > .glyph.yellow  { color: $warning; }
+.action-row > .glyph.red     { color: $error;   }
+
+.action-row > .title {
+  width: 1fr;
+}
+
+.action-row.disabled {
+  color: $text-muted;
+}
+
+/* ---------- Detail pane ---------- */
+
+#detail-pane .title {
+  text-style: bold;
+  margin-bottom: 1;
+}
+#detail-pane .meta {
+  color: $text-muted;
+  margin-top: 1;
+}
+#detail-pane .blurb {
+  margin-bottom: 1;
+}
+#detail-pane .safety-band {
+  width: 1;
+  height: 1fr;
+  dock: left;
+}
+#detail-pane.green   .safety-band { background: $success; }
+#detail-pane.yellow  .safety-band { background: $warning; }
+#detail-pane.red     .safety-band { background: $error;   }
