@@ -244,12 +244,14 @@ seed_robot=""; seed_ai=""; seed_target_rev=""; seed_production=""; seed_images_y
 # Per-deployment seed values (populated below from either the new
 # `deployments:` block or the legacy `devMode:` block during migration).
 seed_pos_privileged="false"
-declare -a seed_pos_mount_names
-declare -a seed_pos_mount_hosts
-declare -a seed_pos_mount_containers
-declare -a seed_api_mount_names
-declare -a seed_api_mount_hosts
-declare -a seed_api_mount_containers
+# Bash 5.3 treats a bare `declare -a foo` as unset under `set -u`, so
+# `${#foo[@]}` errors until something is assigned. Initialize empty.
+declare -a seed_pos_mount_names=()
+declare -a seed_pos_mount_hosts=()
+declare -a seed_pos_mount_containers=()
+declare -a seed_api_mount_names=()
+declare -a seed_api_mount_hosts=()
+declare -a seed_api_mount_containers=()
 # Per-stack seed values. Empty string = "not set in seed" (use default).
 seed_core_selfheal=""
 seed_operator_enabled=""
@@ -628,20 +630,32 @@ if [ "$inject_images" = 1 ]; then
   host_kernel_arch="$(uname -m)"
   host_deb_arch=""
   dma_ethercat_default_tag=""
-  dma_ethercat_wrong_suffix=""
+  # `dma_ethercat_wrong_tags` is a space-separated list of TAG strings
+  # the auto-correct should rewrite to dma_ethercat_default_tag. It
+  # covers two cases:
+  #   1. Wrong-arch tag (e.g. -aarch64 ref on an amd64 host).
+  #   2. Outdated-same-arch tag (e.g. -amd64 ref on an amd64 host
+  #      where CI now publishes as bare `main-latest`).
+  dma_ethercat_wrong_tags=""
   case "$host_kernel_arch" in
     aarch64|arm64)
       host_deb_arch="arm64"
+      # CI publishes the arm64 build as `main-latest-aarch64`.
+      # Wrong: -amd64 suffix (other arch), or bare `main-latest`
+      # (amd64 convention used by mistake).
       dma_ethercat_default_tag="main-latest-aarch64"
-      dma_ethercat_wrong_suffix="-amd64" ;;
+      dma_ethercat_wrong_tags="main-latest-amd64 main-latest" ;;
     x86_64|amd64)
       host_deb_arch="amd64"
-      dma_ethercat_default_tag="main-latest-amd64"
-      dma_ethercat_wrong_suffix="-aarch64" ;;
+      # CI publishes the amd64 build as bare `main-latest`. Wrong:
+      # -aarch64 suffix (other arch), or -amd64 suffix (obsolete CI
+      # naming used before the bare-tag move).
+      dma_ethercat_default_tag="main-latest"
+      dma_ethercat_wrong_tags="main-latest-aarch64 main-latest-amd64" ;;
     *)
       host_deb_arch="$host_kernel_arch"
       dma_ethercat_default_tag="main-latest-${host_kernel_arch}"
-      dma_ethercat_wrong_suffix="" ;;
+      dma_ethercat_wrong_tags="" ;;
   esac
 
   # Parse seed entries (one TSV line per container) into arrays.
@@ -652,13 +666,24 @@ if [ "$inject_images" = 1 ]; then
       # arch than this host (typical when an existing host-config is
       # copied across architectures). Operator can still override at
       # the prompt; we just stop offering them the wrong default.
-      if [ "$cname" = "dma-ethercat" ] && [ -n "$dma_ethercat_wrong_suffix" ] \
-         && [ "${img%$dma_ethercat_wrong_suffix}" != "$img" ]; then
-        fixed="${img%$dma_ethercat_wrong_suffix}-${dma_ethercat_default_tag##*-}"
-        printf '%s  warning%s seeded dma-ethercat ref %s\n' "$C_DIM" "$C_RESET" "$img" >&2
-        printf '%s           targets a different arch than this host (%s)\n' "$C_DIM" "$host_deb_arch" >&2
-        printf '%s           rewriting to %s%s\n' "$C_DIM" "$fixed" "$C_RESET" >&2
-        img="$fixed"
+      if [ "$cname" = "dma-ethercat" ] && [ -n "$dma_ethercat_wrong_tags" ]; then
+        # Pull the tag part of the seed (everything after the last `:`)
+        # and check it against the list of known-wrong tags for this
+        # host's arch. Covers both wrong-arch suffixes and outdated
+        # same-arch tags (the latter happens when CI changed naming
+        # convention but operator host-configs still carry the old tag).
+        seeded_tag="${img##*:}"
+        needs_fix=0
+        for wrong_tag in $dma_ethercat_wrong_tags; do
+          [ "$seeded_tag" = "$wrong_tag" ] && needs_fix=1 && break
+        done
+        if [ "$needs_fix" = 1 ]; then
+          fixed="foundationbot/dma-ethercat:${dma_ethercat_default_tag}"
+          printf '%s  warning%s seeded dma-ethercat ref %s\n' "$C_DIM" "$C_RESET" "$img" >&2
+          printf '%s           is wrong/outdated for this host (%s)\n' "$C_DIM" "$host_deb_arch" >&2
+          printf '%s           rewriting to %s%s\n' "$C_DIM" "$fixed" "$C_RESET" >&2
+          img="$fixed"
+        fi
       fi
       img_containers+=("$cname")
       img_refs+=("$img")
@@ -727,9 +752,9 @@ hint "everything else — source checkout, data partitions, recordings,"
 hint "torch cache, training data — comes from this list."
 
 # Final state:
-declare -a pos_mount_names
-declare -a pos_mount_hosts
-declare -a pos_mount_containers
+declare -a pos_mount_names=()
+declare -a pos_mount_hosts=()
+declare -a pos_mount_containers=()
 pos_privileged="false"
 
 # Production preset — paths a real production robot needs. Configurable
@@ -798,7 +823,7 @@ case "$preset_choice" in
 esac
 
 # Edit each pre-filled mount in place; allow drop with 'd'.
-declare -a kept_names kept_hosts kept_containers
+declare -a kept_names=() kept_hosts=() kept_containers=()
 for i in "${!pos_mount_names[@]}"; do
   n="${pos_mount_names[$i]}"
   h="${pos_mount_hosts[$i]}"
@@ -853,9 +878,9 @@ hint "phantomos-api-server runs without any extra hostPath mounts by"
 hint "default. Enable this only if you need to expose on-host project"
 hint "trees (operator-ui compose, phantom scripts) into the api pod."
 
-declare -a api_mount_names
-declare -a api_mount_hosts
-declare -a api_mount_containers
+declare -a api_mount_names=()
+declare -a api_mount_hosts=()
+declare -a api_mount_containers=()
 
 api_default="n"
 [ "${#seed_api_mount_names[@]}" -gt 0 ] && api_default="y"
@@ -866,7 +891,7 @@ if confirm "Configure phantomos-api-server mounts?" "$api_default"; then
     api_mount_containers=("${seed_api_mount_containers[@]}")
     hint "Editing ${#api_mount_names[@]} mounts from seed."
   fi
-  declare -a api_kept_names api_kept_hosts api_kept_containers
+  declare -a api_kept_names=() api_kept_hosts=() api_kept_containers=()
   for i in "${!api_mount_names[@]}"; do
     n="${api_mount_names[$i]}"
     h="${api_mount_hosts[$i]}"

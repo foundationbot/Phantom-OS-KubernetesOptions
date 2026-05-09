@@ -1431,6 +1431,90 @@ EOF
   return 1
 }
 
+# Detect a hostname change after k0s install: the kubelet client cert
+# is signed with CN=system:node:<old-hostname> but `hostname` now
+# returns something different. Symptom in journalctl is endless
+# "nodes \"<new>\" not found" + "leases ... cannot get resource"
+# because kubelet identifies as the old name and can't claim the new
+# node's lease. Cluster never goes Ready -> phase 9's `kubectl wait`
+# times out -> bootstrap halts with a misleading dma-ethercat banner.
+#
+# Returns 0 if a mismatch is detected, 1 otherwise (cert missing,
+# unreadable, or matches). Quiet on success/no-cert; the caller
+# decides whether to surface and what to do.
+KUBELET_CLIENT_CERT="${KUBELET_CLIENT_CERT:-/var/lib/k0s/kubelet/pki/kubelet-client-current.pem}"
+_kubelet_cert_hostname_mismatch() {
+  [ -r "$KUBELET_CLIENT_CERT" ] || return 1
+  local cert_cn current_host
+  cert_cn=$(openssl x509 -in "$KUBELET_CLIENT_CERT" -noout -subject 2>/dev/null \
+    | sed -nE 's|.*CN[[:space:]]*=[[:space:]]*system:node:([^,/[:space:]]+).*|\1|p')
+  [ -n "$cert_cn" ] || return 1
+  current_host=$(hostname)
+  [ -n "$current_host" ] || return 1
+  [ "$cert_cn" != "$current_host" ]
+}
+
+# Heal a cluster whose kubelet identity no longer matches the host's
+# hostname. The only reliable fix is `k0s reset` + reinstall: certs,
+# kine DB, and registered node identity are all baked in at install
+# time. Image bundles under /var/lib/k0s/images/ are preserved across
+# the reset (k0s reset wipes the whole data dir, but our
+# phantomos-k0s-images .deb owns those files — we stash and restore
+# them so the operator doesn't have to reinstall the .deb).
+#
+# After this returns 0, the caller falls through to the normal install
+# path (which will see /etc/k0s/k0s.yaml gone and re-run `k0s install`).
+_reset_for_hostname_change() {
+  local cert_cn current_host
+  cert_cn=$(openssl x509 -in "$KUBELET_CLIENT_CERT" -noout -subject 2>/dev/null \
+    | sed -nE 's|.*CN[[:space:]]*=[[:space:]]*system:node:([^,/[:space:]]+).*|\1|p')
+  current_host=$(hostname)
+  note "hostname change detected: kubelet cert CN=$cert_cn, hostname=$current_host"
+  note "k0s identity is baked in at install time; running 'k0s reset' to rebuild"
+
+  # Stash image bundles before reset wipes /var/lib/k0s. Restored after
+  # so phase 3's import check doesn't come up empty.
+  local img_save=""
+  if [ -d /var/lib/k0s/images ] \
+     && find /var/lib/k0s/images -maxdepth 1 -name '*.tar' -type f 2>/dev/null \
+        | grep -q .; then
+    img_save=$(mktemp -d -t k0s-images-save-XXXXXX)
+    if mv /var/lib/k0s/images/*.tar "$img_save/" 2>/dev/null; then
+      info "stashed image bundles under $img_save"
+    else
+      img_save=""
+      info "could not stash image bundles; reset will wipe them — reinstall phantomos-k0s-images afterward"
+    fi
+  fi
+
+  systemctl stop k0scontroller k0sworker 2>/dev/null || true
+  if ! k0s reset 2>&1 | sed 's/^/    /' ; then
+    fail "k0s reset failed"
+    [ -n "$img_save" ] && rm -rf "$img_save"
+    return 1
+  fi
+  pass "k0s reset (data dir wiped, systemd unit removed)"
+
+  # Drop our generated config so the install path runs fresh and writes
+  # a new one against the current hostname / API IP. Operator-edited
+  # k0s.yaml would also be replaced — the prior file is unrecoverable
+  # at this point anyway since kine is gone.
+  rm -f /etc/k0s/k0s.yaml
+
+  # Restore image bundles into the (recreated) data dir.
+  if [ -n "$img_save" ]; then
+    mkdir -p /var/lib/k0s/images
+    if mv "$img_save"/*.tar /var/lib/k0s/images/ 2>/dev/null; then
+      pass "restored $(find /var/lib/k0s/images -maxdepth 1 -name '*.tar' -type f | wc -l) image bundle(s)"
+    else
+      info "could not restore image bundles from $img_save (left in place for manual recovery)"
+    fi
+    rmdir "$img_save" 2>/dev/null || true
+  fi
+
+  return 0
+}
+
 # Reconcile foundation.bot/* labels on $1 (node name) against the
 # desired set: foundation.bot/robot=true plus host-config.yaml's
 # nodeLabels:. Adds/updates desired labels; removes any
@@ -1538,6 +1622,15 @@ cluster() {
   # Tailscale is a hard prerequisite — spec.api.address pins to it.
   if [ "$DRY_RUN" = 0 ]; then
     _require_tailscale || return
+  fi
+
+  # Hostname-change self-heal: must happen BEFORE the already_running
+  # check, because a hostname-mismatch cluster IS technically "running"
+  # — k0scontroller is up, but kubelet can't register the renamed node.
+  # Reset rebuilds k0s with the current hostname; we then fall through
+  # into the normal install path.
+  if [ "$DRY_RUN" = 0 ] && _kubelet_cert_hostname_mismatch; then
+    _reset_for_hostname_change || return
   fi
 
   local already_running=0
@@ -2780,15 +2873,17 @@ EOF
       fail "journalctl --header failed after restart"
       return
     fi
-    # Validate logrotate only when we actually installed a drop-in.
-    # Capture stderr so the operator sees the real parse error instead
-    # of a generic "parse failed" message.
+    # Logrotate validation is informational — `logrotate --debug` can
+    # exit non-zero for environmental reasons (missing /var/log/syslog
+    # despite `missingok`, postrotate-script path quirks, etc.) even
+    # when the stanza itself is fine. The file is still installed; the
+    # rotation will work the next time logrotate runs. Surface the
+    # warning so the operator can investigate, but don't halt bootstrap.
     if [ "$rsyslog_present" = 1 ] && command -v logrotate >/dev/null 2>&1 && [ -f "$lr_target" ]; then
       local lr_err
       if ! lr_err=$(logrotate --debug "$lr_target" 2>&1 >/dev/null); then
-        fail "logrotate --debug parse failed for $lr_target"
+        info "logrotate --debug reported issues for $lr_target (drop-in installed anyway):"
         printf '%s\n' "$lr_err" | sed 's/^/    logrotate: /' >&2
-        return
       fi
     fi
   fi
@@ -3080,6 +3175,48 @@ _cpu_isolation_prompt() {
     # Empty input means use default. Operators who really want "no nic"
     # can hand-edit later — most robots want the NIC pinned.
     nic_iface="ecat0"
+  fi
+
+  # If the chosen iface isn't currently visible to the kernel, show a
+  # list of real interfaces and let the operator pick one. Common case:
+  # `ecat0` doesn't exist yet because phase 7's udev rename hasn't run
+  # — phase 7 will create it on the next bootstrap. Operators can keep
+  # the default (rename later) or pick a real interface to use directly.
+  if ! ip link show dev "$nic_iface" >/dev/null 2>&1; then
+    printf '\n  iface "%s" is not present on this host. Available interfaces:\n' "$nic_iface" >&2
+    local _ifname _imac _istate _i=0
+    local -a _iface_names=()
+    while IFS=$'\t' read -r _ifname _imac _istate; do
+      [ -z "$_ifname" ] && continue
+      _i=$((_i+1))
+      _iface_names+=("$_ifname")
+      printf '    %d) %-16s  %s  (%s)\n' "$_i" "$_ifname" "$_imac" "$_istate" >&2
+    done < <(
+      command -v ip >/dev/null 2>&1 \
+        && ip -br link show 2>/dev/null \
+            | awk '$1!="lo" && $1!~/^(docker|veth|br-|cni|flannel|kube-bridge|kube-ipvs|tailscale|wg)/ {
+                     printf "%s\t%s\t%s\n", $1, $3, $2
+                   }'
+    )
+    if [ "${#_iface_names[@]}" -eq 0 ]; then
+      printf '  (no other interfaces detected; keeping "%s" — phase 7 will set it up later)\n' "$nic_iface" >&2
+    else
+      printf '\n  Pick a number [1-%d] to use that interface, or press Enter to keep "%s".\n' \
+        "${#_iface_names[@]}" "$nic_iface" >&2
+      printf '  Pressing Enter only makes sense if you have phase 7 selectors set\n' >&2
+      printf '  (mac/pci/driver) so phase 7 can rename a real NIC to "%s".\n' "$nic_iface" >&2
+      local _pick
+      printf '  > ' >&2
+      IFS= read -r _pick </dev/tty || return 1
+      if [ -n "$_pick" ] \
+         && printf '%s' "$_pick" | grep -Eq '^[0-9]+$' \
+         && [ "$_pick" -ge 1 ] && [ "$_pick" -le "${#_iface_names[@]}" ]; then
+        nic_iface="${_iface_names[$((_pick-1))]}"
+        printf '  ✓ using nic.iface=%s\n' "$nic_iface" >&2
+      else
+        printf '  keeping nic.iface=%s\n' "$nic_iface" >&2
+      fi
+    fi
   fi
 
   # Compute partition's expanded cpu list and pick two distinct
