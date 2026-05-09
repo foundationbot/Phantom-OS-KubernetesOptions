@@ -17,22 +17,32 @@ from textual.widgets import Button, Input, Static
 
 class AskModal(ModalScreen[str]):
     """String input modal — resolves to the typed value (or default
-    on esc).
+    on esc). When ``kind="password"``, the Input renders masked.
     """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, label: str, default: str = ""):
+    def __init__(self, label: str, default: str = "", kind: str = "string"):
         super().__init__()
         self.label = label
         self.default = default
+        self.kind = kind
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ask-pane", classes="ask-pane"):
             yield Static(self.label, id="ask-label")
-            self.input = Input(value=self.default,
-                               placeholder=self.default or "answer",
-                               id="ask-input")
+            # password: never pre-fill the input — that would defeat
+            # the masking. Show only a placeholder hinting "default
+            # will be used on empty submit". Visible string fields
+            # pre-fill with the default so the operator can edit.
+            is_password = (self.kind == "password")
+            self.input = Input(
+                value="" if is_password else self.default,
+                placeholder=("password" if is_password
+                             else (self.default or "answer")),
+                password=is_password,
+                id="ask-input",
+            )
             yield self.input
             with Horizontal(id="ask-buttons"):
                 yield Button("Cancel", id="cancel-btn", variant="default")

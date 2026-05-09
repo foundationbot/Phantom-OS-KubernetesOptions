@@ -96,10 +96,20 @@ op_skip() { _op_status skip "$@"; }
 # op_ask <field> <label> [default]
 # Prints the operator's answer on stdout. Caller captures with $().
 op_ask() {
-  local field="$1" label="$2" default="${3:-}"
+  _op_ask_kind string "$@"
+}
+
+# op_ask_password <field> <label> [default]
+# Same as op_ask but the TUI renders a masked input; falls back to
+# `read -s` (no echo) in plain shell mode.
+op_ask_password() {
+  _op_ask_kind password "$@"
+}
+
+_op_ask_kind() {
+  local kind="$1" field="$2" label="$3" default="${4:-}"
   if [ "$_OPS_TUI" = 1 ]; then
-    _op_emit "event=ask" "field=$field" "label=$label" "default=$default" "kind=string"
-    # Reply arrives as a single line on stdin.
+    _op_emit "event=ask" "field=$field" "label=$label" "default=$default" "kind=$kind"
     local reply
     IFS= read -r reply
     if [ -z "$reply" ] && [ -n "$default" ]; then
@@ -108,7 +118,16 @@ op_ask() {
     printf '%s' "$reply"
   else
     local reply
-    if [ -n "$default" ]; then
+    if [ "$kind" = password ]; then
+      # -s suppresses echo; works under bash + zsh + dash.
+      if [ -n "$default" ]; then
+        read -r -s -p "$label [default]: " reply
+      else
+        read -r -s -p "$label: " reply
+      fi
+      printf '\n' >&2
+      reply="${reply:-$default}"
+    elif [ -n "$default" ]; then
       read -r -p "$label [$default]: " reply
       reply="${reply:-$default}"
     else

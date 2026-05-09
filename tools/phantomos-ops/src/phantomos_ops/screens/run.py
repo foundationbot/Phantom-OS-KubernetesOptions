@@ -116,8 +116,9 @@ class RunScreen(Screen):
         from .bridge_modals import AskModal
         label = str(event.get("label", "?"))
         default = str(event.get("default", ""))
+        kind = str(event.get("kind", "string"))
         self.app.push_screen(
-            AskModal(label, default),
+            AskModal(label, default, kind=kind),
             callback=self._reply,
         )
 

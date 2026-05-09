@@ -142,6 +142,37 @@ async def test_bridge_confirm_no(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bridge_password_event_carries_kind(tmp_path):
+    """op_ask_password emits an ask event with kind=password so the
+    TUI knows to render a masked Input."""
+    helper = _ops_prompt_path()
+    script = tmp_path / "go.sh"
+    script.write_text(
+        f". {helper}\n"
+        "pw=\"$(op_ask_password admin_pw 'argocd password' '1984')\"\n"
+        "echo \"got=$pw\"\n"
+    )
+    job_holder: list = []
+    events: list[dict] = []
+    lines: list[str] = []
+
+    def _on_event(event):
+        events.append(event)
+        if event.get("event") == "ask":
+            job_holder[0].respond("supersecret")
+
+    job = run(["bash", str(script)],
+              on_line=lines.append, on_event=_on_event)
+    job_holder.append(job)
+    await job.wait()
+    # The ask event must signal kind=password.
+    ask_events = [e for e in events if e.get("event") == "ask"]
+    assert len(ask_events) == 1
+    assert ask_events[0]["kind"] == "password"
+    assert "got=supersecret" in lines
+
+
+@pytest.mark.asyncio
 async def test_bridge_falls_back_to_plain_when_fd3_closed(tmp_path):
     """A script using ops-prompt.sh but run WITHOUT on_event sees no
     fd 3 and uses plain `read` — keeps cron / ssh use working."""

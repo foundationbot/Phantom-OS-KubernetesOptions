@@ -533,6 +533,15 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/lib/robot-id.sh
 . "$SCRIPT_DIR/lib/robot-id.sh"
 
+# Bridge to phantomos-ops TUI. Sourcing this provides op_ask /
+# op_ask_password / op_confirm / op_phase / op_pass / op_warn /
+# op_skip helpers that emit JSON events on fd 3 when run under
+# phantomos-ops, and fall back to plain `read` / `printf` when run
+# from a regular shell (cron, ssh, manual). No-op for non-bridge
+# invocations.
+# shellcheck source=scripts/lib/ops-prompt.sh
+. "$SCRIPT_DIR/lib/ops-prompt.sh"
+
 # CPU isolation (cpuset partitions, NIC IRQ pinning, kernel cmdline
 # migration). Helper wraps the vendored scripts/cpusets/manage_cpusets.sh
 # and renders /etc/cpusets.conf from host-config.yaml.
@@ -938,9 +947,9 @@ Preserved (k0s reset does NOT touch these):
   - /var/lib/recordings/                          dma-video hostPath PV (if used)
 
 EOF
-    printf 'Continue? [y/N] '
-    read -r reply || true
-    [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
+    if ! op_confirm "Reset cluster state and continue?" false; then
+      echo "aborted"; exit 1
+    fi
   fi
 
   local ts
@@ -3708,9 +3717,9 @@ _dma_ethercat_prompt_for_config() {
   } >&2
 
   local choice
-  printf '  selection [1-%d]: ' "${#files[@]}" >&2
-  if ! IFS= read -r choice </dev/tty; then
-    fail "no input on /dev/tty" >&2
+  choice="$(op_ask hw_config_choice "selection [1-${#files[@]}]" "")"
+  if [ -z "$choice" ]; then
+    fail "no input" >&2
     return 1
   fi
   case "$choice" in
@@ -3748,40 +3757,31 @@ _cpu_isolation_prompt() {
     printf '  See docs/internal/cpu-isolation.md for the full schema.\n\n'
   } >&2
 
-  local ans
-  printf '  configure CPU isolation now? [Y/n]: ' >&2
-  IFS= read -r ans </dev/tty || return 1
-  case "${ans,,}" in
-    n|no)
-      if _cpu_isolation_persist "$hc" '{"enabled": false}'; then
-        info "wrote cpuIsolation.enabled=false to $hc — phase will skip on re-runs"
-      fi
-      return 1
-      ;;
-  esac
+  if ! op_confirm "Configure CPU isolation now?" true; then
+    if _cpu_isolation_persist "$hc" '{"enabled": false}'; then
+      info "wrote cpuIsolation.enabled=false to $hc — phase will skip on re-runs"
+    fi
+    return 1
+  fi
 
-  local partition_cpus partition_name nic_iface nic_irq dma_rt_cpu aff_ans mig_ans
+  local partition_cpus partition_name nic_iface nic_irq dma_rt_cpu aff_bool
   while :; do
-    printf '  partition cpus (e.g. 11-13, 10,12-13) [11-13]: ' >&2
-    IFS= read -r partition_cpus </dev/tty || return 1
-    [ -z "$partition_cpus" ] && partition_cpus="11-13"
-    if printf '%s' "$partition_cpus" | grep -Eq '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'; then
+    partition_cpus="$(op_ask partition_cpus \
+      "Partition cpus (e.g. 11-13, 10,12-13)" "11-13")"
+    if printf '%s' "$partition_cpus" \
+        | grep -Eq '^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$'; then
       break
     fi
-    printf '    invalid — must match kernel cpu-list syntax\n' >&2
+    op_warn "invalid — must match kernel cpu-list syntax"
   done
 
-  printf '  partition name [ecat]: ' >&2
-  IFS= read -r partition_name </dev/tty || return 1
-  [ -z "$partition_name" ] && partition_name="ecat"
+  partition_name="$(op_ask partition_name "Partition name" "ecat")"
 
-  printf '  EtherCAT NIC interface (empty to skip NIC pinning) [ecat0]: ' >&2
-  IFS= read -r nic_iface </dev/tty || return 1
-  if [ -z "$nic_iface" ]; then
-    # Empty input means use default. Operators who really want "no nic"
-    # can hand-edit later — most robots want the NIC pinned.
-    nic_iface="ecat0"
-  fi
+  nic_iface="$(op_ask nic_iface \
+    "EtherCAT NIC interface (empty to skip NIC pinning)" "ecat0")"
+  # Empty input means use default. Operators who really want "no nic"
+  # can hand-edit later — most robots want the NIC pinned.
+  [ -z "$nic_iface" ] && nic_iface="ecat0"
 
   # If the chosen iface isn't currently visible to the kernel, show a
   # list of real interfaces and let the operator pick one. Common case:
@@ -3838,11 +3838,11 @@ _cpu_isolation_prompt() {
 
   if [ -n "$nic_iface" ]; then
     while :; do
-      printf '  NIC IRQ core (integer inside %s) [%s]: ' "$partition_cpus" "$first_cpu" >&2
-      IFS= read -r nic_irq </dev/tty || return 1
+      nic_irq="$(op_ask nic_irq \
+        "NIC IRQ core (integer inside $partition_cpus)" "$first_cpu")"
       [ -z "$nic_irq" ] && nic_irq="$first_cpu"
       case "$nic_irq" in
-        ''|*[!0-9]*) printf '    not a number\n' >&2 ;;
+        ''|*[!0-9]*) op_warn "not a number: $nic_irq" ;;
         *) break ;;
       esac
     done
@@ -3854,27 +3854,25 @@ _cpu_isolation_prompt() {
     rt_default="$first_cpu"
   fi
   while :; do
-    printf '  SOEM RT loop core (integer inside %s) [%s]: ' "$partition_cpus" "$rt_default" >&2
-    IFS= read -r dma_rt_cpu </dev/tty || return 1
+    dma_rt_cpu="$(op_ask dma_rt_cpu \
+      "SOEM RT loop core (integer inside $partition_cpus)" "$rt_default")"
     [ -z "$dma_rt_cpu" ] && dma_rt_cpu="$rt_default"
     case "$dma_rt_cpu" in
-      ''|*[!0-9]*) printf '    not a number\n' >&2; continue ;;
+      ''|*[!0-9]*) op_warn "not a number: $dma_rt_cpu"; continue ;;
     esac
     if [ -n "$nic_irq" ] && [ "$dma_rt_cpu" = "$nic_irq" ]; then
-      printf '    warning: same core as NIC IRQ (%s) — async interrupts may\n' "$nic_irq" >&2
-      printf '    preempt the SOEM loop. Continue anyway? [y/N]: ' >&2
-      local same_ans
-      IFS= read -r same_ans </dev/tty || return 1
-      case "${same_ans,,}" in y|yes) break ;; *) continue ;; esac
+      op_warn "same core as NIC IRQ ($nic_irq) — async interrupts may preempt the SOEM loop"
+      if op_confirm "Continue anyway?" false; then break; fi
+      continue
     fi
     break
   done
 
-  printf '  install systemd CPUAffinity drop-in? [Y/n]: ' >&2
-  IFS= read -r aff_ans </dev/tty || return 1
-
-  local aff_bool="true"
-  case "${aff_ans,,}" in n|no) aff_bool="false" ;; esac
+  if op_confirm "Install systemd CPUAffinity drop-in?" true; then
+    aff_bool="true"
+  else
+    aff_bool="false"
+  fi
 
   # Build JSON. Validator post-persist re-checks the integers fall
   # inside the partition. Kernel cmdline editing is now always-on
@@ -3955,24 +3953,21 @@ PY
   fi
 
   while :; do
-    printf '\n  SOEM RT loop core (integer inside %s, distinct from nic.irqCore=%s) [%s]: ' \
-      "$part_cpus" "$nic_irq" "$rt_default" >&2
-    IFS= read -r rt_input </dev/tty || return 1
+    rt_input="$(op_ask dma_rt_cpu \
+      "SOEM RT loop core (in $part_cpus, distinct from nic.irqCore=$nic_irq)" \
+      "$rt_default")"
     [ -z "$rt_input" ] && rt_input="$rt_default"
     case "$rt_input" in
-      ''|*[!0-9]*) printf '    not a number\n' >&2; continue ;;
+      ''|*[!0-9]*) op_warn "not a number: $rt_input"; continue ;;
     esac
-    # Must be inside the partition.
     if ! printf '%s\n' "$part_expanded" | grep -qx "$rt_input"; then
-      printf '    %s is not inside %s\n' "$rt_input" "$part_cpus" >&2
+      op_warn "$rt_input is not inside $part_cpus"
       continue
     fi
     if [ "$rt_input" = "$nic_irq" ]; then
-      printf '    warning: same core as NIC IRQ (%s) — async interrupts may\n' "$nic_irq" >&2
-      printf '    preempt the SOEM loop. Continue with co-located cores? [y/N]: ' >&2
-      local same_ans
-      IFS= read -r same_ans </dev/tty || return 1
-      case "${same_ans,,}" in y|yes) break ;; *) continue ;; esac
+      op_warn "same core as NIC IRQ ($nic_irq) — async interrupts may preempt the SOEM loop"
+      if op_confirm "Continue with co-located cores?" false; then break; fi
+      continue
     fi
     break
   done
@@ -5382,28 +5377,25 @@ argocd_admin() {
     return
   fi
 
-  if [ -t 0 ] && [ -t 2 ]; then
+  # Bridge mode (TUI) and TTY mode (plain shell) both work via op_ask_password.
+  # Non-interactive non-TUI shells (cron, ssh -T) skip the prompt and use
+  # the default — same behaviour as before.
+  if [ "${_OPS_TUI:-0}" = 1 ] || { [ -t 0 ] && [ -t 2 ]; }; then
     local pw_a pw_b
     while :; do
-      printf '  argocd admin password [%s]: ' "$_argocd_default_password" >&2
-      stty -echo 2>/dev/null || true
-      IFS= read -r pw_a || pw_a=""
-      stty echo 2>/dev/null || true
-      printf '\n' >&2
+      pw_a="$(op_ask_password argocd_admin_pw \
+              "argocd admin password" "$_argocd_default_password")"
       pw_a="${pw_a:-$_argocd_default_password}"
 
-      printf '  confirm: ' >&2
-      stty -echo 2>/dev/null || true
-      IFS= read -r pw_b || pw_b=""
-      stty echo 2>/dev/null || true
-      printf '\n' >&2
+      pw_b="$(op_ask_password argocd_admin_pw_confirm \
+              "Confirm argocd admin password" "$_argocd_default_password")"
       pw_b="${pw_b:-$_argocd_default_password}"
 
       if [ "$pw_a" = "$pw_b" ]; then
         pw="$pw_a"
         break
       fi
-      printf '  passwords do not match — try again\n' >&2
+      op_warn "passwords do not match — try again"
     done
   else
     pw="$_argocd_default_password"
@@ -5593,9 +5585,9 @@ print_plan
 # When --reset is set, it has its own confirmation prompt with a
 # detailed warning. Skip the generic confirmation.
 if [ "$YES" = 0 ] && [ "$DRY_RUN" = 0 ] && [ "$RESET" = 0 ]; then
-  printf '\nProceed? [y/N] '
-  read -r reply || true
-  [[ "$reply" =~ ^[Yy] ]] || { echo "aborted"; exit 1; }
+  if ! op_confirm "Proceed with the planned phases?" false; then
+    echo "aborted"; exit 1
+  fi
 fi
 
 purge_workload_pods     ; guard
