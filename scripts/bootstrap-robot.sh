@@ -2079,6 +2079,43 @@ locomotion_config() {
   fi
 }
 
+# ---- pre-phase: cpu-isolation first-bringup prompt -------------------
+
+# On first bringup the cpuIsolation: block doesn't exist in
+# host-config.yaml yet. Phase 7 (below) reads cpuIsolation.nic.iface
+# to know what to name the NIC; phase 8 reads partitions/dmaRtCpu/etc.
+# Before this hoist, the prompt that populates the block lived inside
+# phase 8 — so phase 7 ran first, saw an empty block, skipped, then
+# phase 8 prompted, persisted, and immediately tried to pin IRQs on a
+# NIC that nothing had named. Operators had to re-run bootstrap to
+# unstick the loop.
+#
+# Run the same _cpu_isolation_prompt up front so both phases see a
+# populated block in the same run. Strictly a TTY-only convenience:
+# in dry-run, non-interactive shells, or when both downstream phases
+# are skipped, this is a no-op and the existing skip-with-actionable-
+# message paths in phases 7 and 8 still fire.
+ensure_cpu_isolation_block() {
+  # Cheap exits first.
+  if [ "$DRY_RUN" = 1 ]; then return; fi
+  if [ "$SKIP_ECAT_INTERFACE" = 1 ] && [ "$SKIP_CPU_ISOLATION" = 1 ]; then
+    return
+  fi
+  if [ ! -t 0 ] || [ ! -t 2 ]; then return; fi
+
+  local hc="$HOST_CONFIG_FILE"
+  if [ ! -r "$hc" ]; then return; fi
+
+  local ci_json
+  ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  if [ "$ci_json" != "{}" ]; then return; fi
+
+  phase "pre-phase: cpu-isolation first-bringup setup"
+  if ! _cpu_isolation_prompt "$hc"; then
+    info "operator declined; phases 7 and 8 will skip with their normal messages"
+  fi
+}
+
 # ---- phase 7: ecat-interface (gates phase 8) -------------------------
 
 # Resolve the EtherCAT NIC adapter and rename it to the requested
@@ -2123,8 +2160,8 @@ ecat_interface() {
   ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
   if [ -z "$ci_json" ] || [ "$ci_json" = "{}" ]; then
     phase "phase 7: ecat-interface  (skipped — no cpuIsolation block)"
-    info "phase 8 (cpu-isolation) will prompt for cpuIsolation.nic.iface;"
-    info "the ecat-interface phase becomes active once that block exists."
+    info "the pre-phase prompt populates this on a TTY; non-interactive"
+    info "runs must hand-edit $hc (see docs/cpu-isolation.md) and re-run."
     return
   fi
   { read -r iface; } < <(cpusets_json_nic "$ci_json")
@@ -2259,9 +2296,11 @@ PY
 # starts unisolated.
 #
 # Host-config-driven. The cpuIsolation: block in host-config.yaml is
-# the source of truth. Default-on: if the cpuIsolation block is missing
-# entirely AND stdin is a TTY, bootstrap prompts the operator and
-# persists the answers back to host-config.yaml. Only an explicit
+# the source of truth. The pre-phase prompt above (run before phase 7)
+# normally populates the block on first bringup; the prompt here is a
+# defensive fallback for runs that bypass the pre-phase (e.g., the
+# operator answered N at the pre-phase prompt, or someone hand-rolled
+# `--cpu-isolation` only without `--ecat-interface`). Only an explicit
 # `enabled: false` skips the phase. See docs/cpu-isolation.md for the
 # schema and lifecycle.
 #
@@ -4702,6 +4741,7 @@ host_config        ; guard
 seed_pull_secrets  ; guard
 operator_ui_config ; guard
 locomotion_config  ; guard
+ensure_cpu_isolation_block ; guard
 ecat_interface     ; guard
 cpu_isolation      ; guard
 log_management     ; guard
