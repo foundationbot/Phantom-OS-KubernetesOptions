@@ -902,8 +902,40 @@ def cmd_inject_kustomize_block(
     return 0
 
 
+# Bundle manifest sidecar written by the image .deb's build script
+# (RFC 0005). Hidden filename keeps it out of k0s's auto-import scan.
+# When present, host-config.py validate cross-checks images.<container>.image
+# against bundle[].ref and emits informational `note:` lines on drift —
+# the operator's value still wins (host-config is the source of truth),
+# notes are purely informational about expected operator overrides.
+BUNDLE_MANIFEST_PATH = "/var/lib/k0s/images/.phantomos-image-bundle.yaml"
+
+
+def _load_bundle_manifest(path: "str | None" = None) -> "dict | None":
+    """Read and parse the bundle manifest. Returns None when the file is
+    missing or unparseable — callers treat that as "no bundle, no
+    cross-check" rather than an error. Older .debs predate the manifest;
+    parse errors mean a corrupt sidecar that the wizard's separate arch
+    check will already have flagged.
+
+    Reads ``BUNDLE_MANIFEST_PATH`` from the module at call time (rather
+    than capturing it as a default argument) so tests can rebind the
+    module-level constant to a fixture path."""
+    if path is None:
+        path = BUNDLE_MANIFEST_PATH
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+    except (FileNotFoundError, yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 def cmd_validate(cfg: dict) -> int:
     errors: list[str] = []
+    notes: list[str] = []
     if not cfg.get("robot"):
         errors.append("'robot' is required")
     ai_pc = cfg.get("aiPcUrl") or ""
@@ -1319,6 +1351,43 @@ def cmd_validate(cfg: dict) -> int:
                                 f"default"
                             )
 
+            # Soft drift check against the bundle manifest sidecar
+            # (RFC 0005 phase 5). The host-config is the authoritative
+            # source of truth — operators may legitimately pin an older
+            # ref or swap to an upstream registry — so disagreements with
+            # the bundle are *expected* and don't fail validation. We
+            # surface them as `note:` lines so that re-running validate
+            # after a fresh `dpkg -i` of a new image .deb makes "operator
+            # override active" visible at a glance.
+            #
+            # Skipped silently when the bundle manifest is absent or
+            # unparseable; the wizard's bundle-arch and parse checks
+            # already handle that path.
+            bundle = _load_bundle_manifest()
+            if bundle is not None:
+                bundle_by_container: dict[str, str] = {}
+                for entry in bundle.get("bundle") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    bc = entry.get("container")
+                    bref = entry.get("ref")
+                    if isinstance(bc, str) and isinstance(bref, str) and bref:
+                        bundle_by_container[bc] = bref
+                for cname, spec in images_raw.items():
+                    if cname not in CONTAINER_TARGETS:
+                        continue  # already errored above
+                    if not isinstance(spec, dict):
+                        continue
+                    img = spec.get("image")
+                    if not isinstance(img, str) or not img:
+                        continue
+                    bref = bundle_by_container.get(cname)
+                    if bref and bref != img:
+                        notes.append(
+                            f"images.{cname}.image={img} differs from "
+                            f"bundle's {bref} — operator override active"
+                        )
+
     # deployments is optional. Each key must be a known deployment.
     # Reject relative paths and '~' — bootstrap runs as root, so '~'
     # resolves to /root, which is almost never what the operator meant.
@@ -1447,6 +1516,12 @@ def cmd_validate(cfg: dict) -> int:
                     f"(got {policy!r})"
                 )
 
+    # Notes are purely informational (e.g. host-config drift from bundle
+    # sidecar). They're printed regardless of error/success — operators
+    # want to see expected overrides whether or not validation passed —
+    # and never affect the exit code.
+    for n in notes:
+        print(f"note: {n}", file=sys.stderr)
     if errors:
         for e in errors:
             print(f"error: {e}", file=sys.stderr)
