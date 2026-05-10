@@ -594,10 +594,24 @@ if [ -z "$seed_images_yaml" ]; then
     inject_images=0
   fi
 else
+  # Pre-filter the seed display: any row whose tag is a wizard
+  # placeholder (REPLACE-WITH-*) is rendered as `<cleared placeholder>`
+  # in the display so the operator isn't told the wizard will offer
+  # a default that won't actually appear at the prompt. The actual
+  # img_refs[] cleanup happens further down (single source of truth);
+  # this is purely a display patch.
   hint "Defaults from seed:"
   while IFS=$'\t' read -r cname img; do
     [ -z "$cname" ] && continue
-    printf '%s    %s -> %s%s\n' "$C_DIM" "$cname" "$img" "$C_RESET" >&2
+    case "${img##*:}" in
+      REPLACE-WITH-*)
+        printf '%s    %s -> <cleared placeholder, will re-prompt>%s\n' \
+          "$C_DIM" "$cname" "$C_RESET" >&2
+        ;;
+      *)
+        printf '%s    %s -> %s%s\n' "$C_DIM" "$cname" "$img" "$C_RESET" >&2
+        ;;
+    esac
   done <<< "$seed_images_yaml"
   if ! confirm "Use these as the starting point?" "y"; then
     if ! confirm "Skip image overrides entirely?" "n"; then
@@ -690,11 +704,36 @@ if [ "$inject_images" = 1 ]; then
     done <<< "$seed_images_yaml"
   fi
 
+  # operator-ui default tag — derived from the bundled image .deb if
+  # installed, so press-enter accepts a tag the worker can actually
+  # serve from containerd's local store. The .deb's tarball naming
+  # convention is `<repo-with-slashes-as-dashes>_<tag>.tar`, so
+  # e.g. /var/lib/k0s/images/foundationbot-argus.operator-ui_qa.tar
+  # implies tag `qa`. Falls back to empty when the .deb isn't
+  # installed — the prompt's "Empty to skip" path then kicks in and
+  # the manifest's in-tree default applies (currently `:qa`).
+  operator_ui_default_tag=""
+  for f in /var/lib/k0s/images/foundationbot-argus.operator-ui_*.tar; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"
+    base="${base%.tar}"
+    operator_ui_default_tag="${base##*_}"
+    break
+  done
+
   # Canonical fleet container set + default repo (without tag). Each
   # entry in CONTAINER_TARGETS gets a row here so adding a workload
   # is a single-line change. Tag defaults are held in
   # canonical_default_tags; the operator can override the whole
   # ref (repo + tag) at the prompt.
+  #
+  # Empty default tag = the prompt is offered with no preloaded value,
+  # press-Enter skips the override entirely, and the base manifest's
+  # in-tree image:tag wins. This is the right default for containers
+  # the operator must build locally (positronic-control,
+  # phantom-models): an unfilled placeholder used to be silently
+  # injected into Argo as a non-resolving tag. See
+  # docs/image-flow-and-registry-bootstrap.md for the post-mortem.
   declare -a canonical_containers=(
     "positronic-control"
     "phantom-models"
@@ -708,15 +747,18 @@ if [ "$inject_images" = 1 ]; then
     "foundationbot/dma-ethercat"
   )
   declare -a canonical_default_tags=(
-    "REPLACE-WITH-LOCAL-BUILD-TAG"
-    "REPLACE-WITH-MODEL-BUILD-DATE"
-    "REPLACE-WITH-OPERATOR-UI-COMMIT-SHA"
-    "$dma_ethercat_default_tag"
+    ""                              # positronic-control: must be local build
+    ""                              # phantom-models:     must be local build
+    "$operator_ui_default_tag"      # operator-ui:        from .deb if installed
+    "$dma_ethercat_default_tag"     # dma-ethercat:       arch-derived
   )
 
   # Append any canonical container missing from the seed. Existing
   # seed entries are preserved as-is; missing ones get the canonical
-  # default ref so the operator can press enter to accept.
+  # default ref so the operator can press enter to accept. When the
+  # canonical default tag is empty (no real value to suggest) the
+  # row is added with an empty ref — press-Enter then drops the
+  # override and the manifest default applies.
   for c_i in "${!canonical_containers[@]}"; do
     c_name="${canonical_containers[$c_i]}"
     found=0
@@ -725,12 +767,35 @@ if [ "$inject_images" = 1 ]; then
     done
     if [ "$found" = 0 ]; then
       img_containers+=("$c_name")
-      img_refs+=("${canonical_default_repos[$c_i]}:${canonical_default_tags[$c_i]}")
+      if [ -n "${canonical_default_tags[$c_i]}" ]; then
+        img_refs+=("${canonical_default_repos[$c_i]}:${canonical_default_tags[$c_i]}")
+      else
+        img_refs+=("")
+      fi
     fi
   done
 
+  # Auto-clear seed entries that carry a REPLACE-WITH-* placeholder
+  # tag. These were previously written by configure-host.sh itself (a
+  # bug — see docs/image-flow-and-registry-bootstrap.md), but they
+  # would never resolve at pull time. Treat them as if the seed had
+  # no entry, so the prompt offers the canonical default (typically
+  # empty) instead of carrying the placeholder forward.
+  for i in "${!img_refs[@]}"; do
+    case "${img_refs[$i]##*:}" in
+      REPLACE-WITH-*)
+        printf '%s  warning%s seed %s ref %s carries placeholder tag,\n' \
+          "$C_DIM" "$C_RESET" "${img_containers[$i]}" "${img_refs[$i]}" >&2
+        printf '%s           clearing — re-prompt with canonical default%s\n' \
+          "$C_DIM" "$C_RESET" >&2
+        img_refs[$i]=""
+        ;;
+    esac
+  done
+
   echo
-  hint "Press enter to keep, or type a new image ref (repo:tag)."
+  hint "Press enter to keep the shown default; an empty default means"
+  hint "no override (the manifest's in-tree image:tag will apply)."
   hint "Swapping repos is fine — bootstrap renames+retags in one step."
   example "localhost:5443/positronic-control:0.2.44-production-cu130"
   example "foundationbot/phantom-cuda:0.2.46-dev.1-production-cu130 (swap repo)"

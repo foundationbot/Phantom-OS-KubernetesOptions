@@ -21,6 +21,14 @@
 #   foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH}
 # expands to -amd64 in the amd64 .deb and -aarch64 in the arm64 .deb.
 #
+# Locally-built images: positronic-control and phantom-models live at
+# localhost:5443/* and don't exist on DockerHub, so they can't be
+# pulled — they have to be saved straight from the local docker
+# daemon. Pass --positronic-image <ref> and --phantom-models-image
+# <ref> with refs already present in `docker images`, or run the
+# script on a TTY and answer the two prompts. Refs whose architecture
+# doesn't match the build arch are skipped per-arch (no error).
+#
 # Multi-arch: defaults to building one .deb per architecture for both
 # amd64 and arm64. Pass --arch <list> (or ARCHES=<list>) to narrow.
 # Cross-arch pulls require docker on the build host to support the
@@ -42,6 +50,10 @@
 #   scripts/build-images-deb.sh --arch amd64               # narrow to one arch
 #   scripts/build-images-deb.sh --from-file list.txt       # explicit image list
 #   ARCHES=amd64 scripts/build-images-deb.sh               # env-var form
+#   scripts/build-images-deb.sh \
+#     --positronic-image localhost:5443/positronic-control:0.2.44 \
+#     --phantom-models-image localhost:5443/phantom-models:2026-05-09
+#                                                          # bundle local builds
 #
 # Prerequisites:
 #   - docker (running, logged in to DockerHub for foundationbot/* images)
@@ -71,6 +83,15 @@ FROM_FILE=""
 # packaging/deb-images/extra-images.txt and is silently skipped if absent.
 EXTRA_IMAGES_FILE_DEFAULT="$REPO_ROOT/packaging/deb-images/extra-images.txt"
 EXTRA_IMAGES_FILE="${EXTRA_IMAGES_FILE:-}"
+# Local-only image refs (already present in `docker images`, not pullable
+# from DockerHub). Empty by default; populated by flag or interactive
+# prompt. The values are full refs the manifest will look up at deploy
+# time (e.g. localhost:5443/positronic-control:0.2.44).
+POSITRONIC_IMAGE="${POSITRONIC_IMAGE:-}"
+PHANTOM_MODELS_IMAGE="${PHANTOM_MODELS_IMAGE:-}"
+# When set to 1, suppresses the interactive prompts even on a TTY (use
+# from CI to take the flag/env values verbatim).
+NO_PROMPT="${NO_PROMPT:-0}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --from-file)
@@ -82,8 +103,16 @@ while [ "$#" -gt 0 ]; do
     --arch)
       [ -n "${2:-}" ] || { echo "error: --arch needs a value (e.g. amd64,arm64)" >&2; exit 2; }
       ARCHES_FLAG="$2"; shift 2 ;;
+    --positronic-image)
+      [ -n "${2:-}" ] || { echo "error: --positronic-image needs a value" >&2; exit 2; }
+      POSITRONIC_IMAGE="$2"; shift 2 ;;
+    --phantom-models-image)
+      [ -n "${2:-}" ] || { echo "error: --phantom-models-image needs a value" >&2; exit 2; }
+      PHANTOM_MODELS_IMAGE="$2"; shift 2 ;;
+    --no-prompt)
+      NO_PROMPT=1; shift ;;
     -h|--help)
-      grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//' | head -50
+      grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//' | head -60
       exit 0 ;;
     *)
       echo "error: unknown flag: $1" >&2; exit 2 ;;
@@ -219,8 +248,64 @@ if [ "${#IMAGES[@]}" -eq 0 ]; then
   exit 1
 fi
 
-echo "Bundling ${#IMAGES[@]} image(s) for arches: ${ARCHES_LIST[*]}"
+# ---- locally-built image prompts ---------------------------------------
+#
+# positronic-control and phantom-models live at localhost:5443/* and
+# can't be pulled from DockerHub. The operator either supplied them
+# via flag/env or we prompt interactively (only on a TTY, only when
+# --no-prompt isn't set). `docker image inspect` is the gate — if the
+# ref isn't already present in the local daemon, we don't try to do
+# anything clever (no auto-build, no implicit `docker tag`).
+
+prompt_local_image() {
+  # prompt_local_image <container-label> <varname>
+  # Prints the chosen ref to stdout (empty if skipped).
+  local label="$1" var="$2" current="${!2}" reply
+  if [ -n "$current" ]; then
+    printf '%s' "$current"
+    return
+  fi
+  if [ "$NO_PROMPT" = 1 ] || [ ! -t 0 ]; then
+    printf ''
+    return
+  fi
+  printf '\n' >&2
+  printf 'Bundle a local %s image?\n' "$label" >&2
+  printf '  Type the local docker ref (e.g. localhost:5443/%s:<tag>)\n' "$label" >&2
+  printf '  or press Enter to skip.\n' >&2
+  printf '  %s ref> ' "$label" >&2
+  IFS= read -r reply || reply=""
+  printf '%s' "$reply"
+}
+
+POSITRONIC_IMAGE="$(prompt_local_image positronic-control POSITRONIC_IMAGE)"
+PHANTOM_MODELS_IMAGE="$(prompt_local_image phantom-models PHANTOM_MODELS_IMAGE)"
+
+# Verify each supplied ref exists locally — fail fast rather than
+# discovering it per-arch inside the build loop. A ref that's present
+# but built for a different platform is allowed through here; the
+# per-arch save_local_image() check skips it cleanly for that arch.
+for pair in "positronic-control:$POSITRONIC_IMAGE" "phantom-models:$PHANTOM_MODELS_IMAGE"; do
+  label="${pair%%:*}"
+  ref="${pair#*:}"
+  [ -z "$ref" ] && continue
+  if ! docker image inspect "$ref" >/dev/null 2>&1; then
+    echo "error: $label ref '$ref' not found in local docker daemon" >&2
+    echo "  hint: 'docker images $ref' — build/tag it first" >&2
+    exit 1
+  fi
+done
+
+LOCAL_IMAGES=()
+[ -n "$POSITRONIC_IMAGE" ]     && LOCAL_IMAGES+=("$POSITRONIC_IMAGE")
+[ -n "$PHANTOM_MODELS_IMAGE" ] && LOCAL_IMAGES+=("$PHANTOM_MODELS_IMAGE")
+
+echo "Bundling ${#IMAGES[@]} pullable image(s) for arches: ${ARCHES_LIST[*]}"
 for i in "${IMAGES[@]}"; do echo "  - $i"; done
+if [ "${#LOCAL_IMAGES[@]}" -gt 0 ]; then
+  echo "Bundling ${#LOCAL_IMAGES[@]} local-only image(s) (saved straight from docker daemon):"
+  for i in "${LOCAL_IMAGES[@]}"; do echo "  - $i"; done
+fi
 echo
 
 # ---- version derivation -------------------------------------------------
@@ -360,6 +445,34 @@ pull_and_save_arch() {
   return 0
 }
 
+# Save a ref that's already present in the local docker daemon to a
+# tarball. Verifies the image's architecture matches the build arch and
+# silently skips (return 2) when it doesn't, so a developer who builds
+# only for their own host's arch doesn't get a hard failure on the
+# other arch's .deb. Hard failures (return 1) are reserved for
+# unexpected docker errors. Reason ends up in PULL_FAIL_REASON.
+save_local_image() {
+  local img="$1" arch="$2" out_path="$3"
+  local img_arch
+  PULL_FAIL_REASON=""
+
+  if ! docker image inspect "$img" >/dev/null 2>&1; then
+    PULL_FAIL_REASON="not present in local docker daemon"
+    return 1
+  fi
+  img_arch="$(docker image inspect --format '{{.Architecture}}' "$img" 2>/dev/null || true)"
+  if [ -n "$img_arch" ] && [ "$img_arch" != "$arch" ]; then
+    PULL_FAIL_REASON="local image is $img_arch, build is $arch (skipping)"
+    return 2
+  fi
+  if ! docker save "$img" -o "$out_path" 2>/dev/null; then
+    PULL_FAIL_REASON="docker save failed"
+    rm -f "$out_path"
+    return 1
+  fi
+  return 0
+}
+
 # ---- per-arch build -----------------------------------------------------
 
 # Track outcomes across arches for the final summary.
@@ -425,6 +538,35 @@ build_for_arch() {
     size=$(du -h "$cache_path" 2>/dev/null | awk '{print $1}')
     included_images+=("$img")
     included_sizes+=("${size:-?}")
+  done
+
+  # Local-only images (positronic-control, phantom-models). Saved
+  # straight from the local docker daemon — no pull. NOT cached across
+  # runs: the same tag commonly points at a freshly-rebuilt image
+  # between runs, and a stale cache would silently ship the wrong
+  # bytes. We always re-save.
+  local rc
+  for img in "${LOCAL_IMAGES[@]}"; do
+    filename="$(sanitize_filename "$img").tar"
+    stage_path="$stage_dir$TARGET_DIR/$filename"
+    printf '==> %s  (local)\n' "$img"
+    if save_local_image "$img" "$arch" "$stage_path"; then
+      printf '    saved %s\n' "$filename"
+      size=$(du -h "$stage_path" 2>/dev/null | awk '{print $1}')
+      included_images+=("$img")
+      included_sizes+=("${size:-?}")
+    else
+      rc=$?
+      # rc=2 is "wrong arch for this build" — informational, not a
+      # failure, since dev hosts typically build for one arch only.
+      if [ "$rc" = 2 ]; then
+        printf '    skip: %s\n' "$PULL_FAIL_REASON" >&2
+      else
+        printf '    SKIP: %s\n' "$PULL_FAIL_REASON" >&2
+        failed_images+=("$img")
+        failed_reasons+=("$PULL_FAIL_REASON")
+      fi
+    fi
   done
 
   local ok="${#included_images[@]}"
