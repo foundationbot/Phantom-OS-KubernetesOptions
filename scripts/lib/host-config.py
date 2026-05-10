@@ -1299,9 +1299,25 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(f"images.{cname}.image: must be a string")
                 else:
                     try:
-                        _split_image_ref(img)
+                        _, tag = _split_image_ref(img)
                     except ValueError as exc:
                         errors.append(f"images.{cname}.image: {exc}")
+                    else:
+                        # Reject wizard-placeholder tags. configure-host.sh
+                        # used to write `REPLACE-WITH-*` strings as
+                        # canonical defaults; pressing enter through the
+                        # prompt left them in the file, and bootstrap
+                        # phase 12 would dutifully inject them as
+                        # kustomize.images overrides — guaranteeing
+                        # ImagePullBackOff. See
+                        # docs/image-flow-and-registry-bootstrap.md.
+                        if tag.startswith("REPLACE-WITH-"):
+                            errors.append(
+                                f"images.{cname}.image: tag {tag!r} is a "
+                                f"wizard placeholder; either set a real tag "
+                                f"or remove the entry to use the manifest "
+                                f"default"
+                            )
 
     # deployments is optional. Each key must be a known deployment.
     # Reject relative paths and '~' — bootstrap runs as root, so '~'
