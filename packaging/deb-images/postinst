@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# RFC 0005 phase 6 — image .deb postinst.
+# RFC 0007 phase 2 — adds sidecar-data-bundle presence check.
+#
+# Four responsibilities, in order:
+#   1. Read the bundle manifest sidecar; soft-warn (and exit 0) if absent
+#      or unparseable so older/foreign image .debs without RFC 0005
+#      metadata still install cleanly.
+#   0b. (RFC 0007) Verify that every tarball named in bundle[].tarball
+#      exists under $IMAGES_DIR. Hard-refuse with an actionable error
+#      pointing at the sidecar tar.zst extract command if any are
+#      missing. Runs before the arch check so the same failure path
+#      surfaces regardless of which sidecar mistake the operator made.
+#   2. Hard-refuse on arch mismatch (bundle's arch != host's
+#      dpkg --print-architecture) by exiting 2; dpkg rolls back.
+#   3. When k0scontroller is active, walk /var/lib/k0s/images/*.tar and
+#      import each into containerd via `k0s ctr -n k8s.io images import`,
+#      so newly-installed tarballs are usable without restarting k0s.
+#      When k0scontroller is inactive (or absent), skip — k0s scans the
+#      directory at startup and will import everything itself.
+#
+# All output goes to stderr — dpkg captures stdout for status text.
+# Individual tarball import failures don't fail the install; they're
+# counted into a one-line summary.
+
+set -u
+
+# Hardcoded production paths, overridable via env for smoke testing
+# (the dpkg-invoked install path never sets these; the defaults stand).
+IMAGES_DIR="${IMAGES_DIR:-/var/lib/k0s/images}"
+BUNDLE="${BUNDLE:-${IMAGES_DIR}/.phantomos-image-bundle.yaml}"
+
+# dpkg invokes us as `postinst <action> [args...]`. Only `configure`
+# does work; abort-upgrade / abort-remove / abort-deconfigure are no-ops.
+action="${1:-configure}"
+if [ "$action" != "configure" ]; then
+    exit 0
+fi
+
+# ---- 1. bundle manifest soft-warn ---------------------------------------
+
+if [ ! -r "$BUNDLE" ]; then
+    echo "warning: no image bundle manifest at $BUNDLE" >&2
+    echo "  older .deb format — arch and import-state checks skipped" >&2
+    echo "  tarballs will auto-import at next k0scontroller start" >&2
+    exit 0
+fi
+
+# Parse the bundle's `arch:` field. Prefer python3 + PyYAML (a documented
+# dep of phantomos-k0s-all.deb), but fall back to a shallow grep+awk for
+# defensiveness on hosts where the python yaml module is missing.
+bundle_arch=""
+if command -v python3 >/dev/null 2>&1; then
+    bundle_arch="$(python3 -c "import yaml,sys
+try:
+    d = yaml.safe_load(open('$BUNDLE')) or {}
+    print(d.get('arch','') or '')
+except Exception:
+    sys.exit(1)
+" 2>/dev/null || true)"
+fi
+if [ -z "$bundle_arch" ]; then
+    bundle_arch="$(grep -E '^arch:[[:space:]]+' "$BUNDLE" 2>/dev/null \
+        | head -n1 | awk '{print $2}' || true)"
+fi
+
+# Treat an empty/unparseable arch as a corrupt manifest and soft-warn
+# (per spec: "if the parse fails (corrupt YAML), treat as missing").
+if [ -z "$bundle_arch" ]; then
+    echo "warning: bundle manifest at $BUNDLE is unparseable or missing 'arch'" >&2
+    echo "  arch and import-state checks skipped" >&2
+    echo "  tarballs will auto-import at next k0scontroller start" >&2
+    exit 0
+fi
+
+# ---- 0. tarball-presence check (RFC 0007) -------------------------------
+#
+# The sidecar tar.zst carries the *.tar files; the .deb only carries the
+# manifest. If the operator forgot to extract the sidecar (or scp'd the
+# wrong-arch sidecar so its tarballs unpacked under a different name),
+# we must hard-refuse here so dpkg rolls back rather than half-install
+# a broken state. Runs before the arch check: missing-tarballs and
+# wrong-arch-tarballs both arrive at the same actionable error first;
+# arch mismatch then refines the diagnostic when tarballs ARE present.
+
+# Pull bundle[].tarball filenames + builderVersion out of the manifest.
+# Single python3 invocation when available — newline-separated:
+#   line 1: builderVersion (may be empty)
+#   line 2..: one tarball filename per entry (skipping malformed ones)
+# Malformed entries (missing/empty `tarball:`) emit a stderr warning and
+# are skipped rather than counted against the operator.
+bundle_builder_version=""
+bundle_tarballs_raw=""
+parse_ok="0"
+if command -v python3 >/dev/null 2>&1; then
+    bundle_tarballs_raw="$(python3 -c "import yaml,sys
+try:
+    d = yaml.safe_load(open('$BUNDLE')) or {}
+    print(d.get('builderVersion','') or '')
+    for i, e in enumerate(d.get('bundle', []) or []):
+        if not isinstance(e, dict):
+            sys.stderr.write('warning: bundle manifest entry %d is not a mapping; skipping\n' % i)
+            continue
+        t = (e.get('tarball') or '').strip()
+        if not t:
+            sys.stderr.write('warning: bundle manifest entry %d has no tarball field; skipping\n' % i)
+            continue
+        print(t)
+except Exception as ex:
+    sys.exit(1)
+" 2>/dev/null || true)"
+    if [ -n "$bundle_tarballs_raw" ]; then
+        parse_ok="1"
+    fi
+fi
+
+# Fallback: shallow grep parse. Catches the common case where python3
+# or PyYAML is absent. We accept that this won't validate structure;
+# we only need the filenames to check existence.
+if [ "$parse_ok" != "1" ]; then
+    bundle_builder_version="$(grep -E '^builderVersion:[[:space:]]+' "$BUNDLE" 2>/dev/null \
+        | head -n1 | awk '{print $2}' || true)"
+    bundle_tarballs_raw="$(printf '%s\n' "$bundle_builder_version"
+        grep -E '^[[:space:]]+tarball:[[:space:]]+' "$BUNDLE" 2>/dev/null \
+            | awk '{print $2}' | tr -d '"' | tr -d "'" || true)"
+fi
+
+# Split: first line is builderVersion, rest are tarball filenames.
+bundle_builder_version="$(printf '%s\n' "$bundle_tarballs_raw" | sed -n '1p')"
+expected_tarballs=()
+while IFS= read -r line; do
+    [ -n "$line" ] && expected_tarballs+=("$line")
+done < <(printf '%s\n' "$bundle_tarballs_raw" | sed -n '2,$p')
+
+expected_count="${#expected_tarballs[@]}"
+
+if [ "$expected_count" -gt 0 ]; then
+    # Count present vs. missing. IMAGES_DIR may not exist on a fresh
+    # host where the sidecar was never extracted — treat that as
+    # everything missing.
+    found_count=0
+    missing_count=0
+    missing_list=()
+    for tb in "${expected_tarballs[@]}"; do
+        if [ -f "$IMAGES_DIR/$tb" ]; then
+            found_count=$((found_count + 1))
+        else
+            missing_count=$((missing_count + 1))
+            missing_list+=("$tb")
+        fi
+    done
+
+    if [ "$missing_count" -gt 0 ]; then
+        # Build the suggested extract command. arch and builderVersion
+        # both come from the manifest (the RFC 0005 schema validator
+        # guarantees `arch` is present; `builderVersion` is also part
+        # of the schema). Defensively fall back if either is empty.
+        if [ -n "$bundle_builder_version" ] && [ -n "$bundle_arch" ]; then
+            sidecar_name="phantomos-k0s-images-${bundle_builder_version}-${bundle_arch}.tar.zst"
+        elif [ -n "$bundle_arch" ]; then
+            sidecar_name="phantomos-k0s-images-<ver>-${bundle_arch}.tar.zst"
+        else
+            sidecar_name="phantomos-k0s-images-<ver>-<arch>.tar.zst"
+        fi
+        echo "error: image data bundle not extracted" >&2
+        echo "  bundle manifest expects $expected_count tarball(s) under $IMAGES_DIR/" >&2
+        echo "  found $found_count; missing $missing_count" >&2
+        echo "  install the data bundle first:" >&2
+        echo "    sudo tar -I 'zstd -d -T0' -xf $sidecar_name -C /" >&2
+        exit 2
+    fi
+
+    echo "data bundle: $expected_count tarball(s) verified" >&2
+fi
+
+# ---- 2. arch-mismatch hard-refuse ---------------------------------------
+
+host_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+if [ -n "$host_arch" ] && [ "$bundle_arch" != "$host_arch" ]; then
+    echo "error: bundle arch=$bundle_arch host arch=$host_arch" >&2
+    echo "  this .deb was built for $bundle_arch; install the *-$host_arch.deb instead" >&2
+    exit 2
+fi
+
+# ---- 3. auto-import tarballs when k0s is running ------------------------
+
+# /var/lib/k0s/images/ might not exist on a truly fresh host — bail
+# silently, k0s creates it at first start.
+if [ ! -d "$IMAGES_DIR" ]; then
+    exit 0
+fi
+
+# systemctl is-active prints `active`/`inactive` and exits 0/3
+# respectively. On hosts without systemd or where k0scontroller isn't a
+# unit, treat it as inactive.
+k0s_state="inactive"
+if command -v systemctl >/dev/null 2>&1; then
+    k0s_state="$(systemctl is-active k0scontroller 2>/dev/null || true)"
+    [ -z "$k0s_state" ] && k0s_state="inactive"
+fi
+
+if [ "$k0s_state" != "active" ]; then
+    echo "k0s not running — tarballs will auto-import at next k0scontroller start" >&2
+    exit 0
+fi
+
+# k0s active but binary missing — shouldn't happen, but don't crash the
+# install over it. Tarballs will get imported on the next k0s restart.
+if ! command -v k0s >/dev/null 2>&1; then
+    echo "warning: k0scontroller is active but 'k0s' binary not on PATH — skipping import" >&2
+    exit 0
+fi
+
+# Collect tarballs. Use a glob with nullglob semantics so an empty dir
+# doesn't yield a literal "*.tar".
+shopt -s nullglob
+tarballs=("$IMAGES_DIR"/*.tar)
+shopt -u nullglob
+
+if [ "${#tarballs[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+# Import each. containerd's image import is idempotent — re-importing
+# an existing image is a no-op — so we don't try to dedupe by content.
+#
+# Caveat: multi-arch OCI-index tarballs (e.g. upstream postgres:16
+# is published for 8 platforms) cause `k0s ctr images import` to
+# exit non-zero on re-import even though the image is correctly
+# registered. The error is "content digest ... not found" against
+# blobs for the platforms NOT in the tarball — the importer follows
+# the index manifest references for all platforms, can't find the
+# off-arch blobs, and reports failure. The on-host platform (amd64
+# or arm64, depending on the .deb) imports cleanly and is what
+# kubelets actually use. To avoid scaring operators with spurious
+# "1 failed" messages, on a non-zero exit we cross-check by reading
+# the tarball's RepoTags and asking containerd whether the image
+# is registered. If it is, count as success. If it isn't, real
+# failure — print the warning.
+imported=0
+failed=0
+for tar in "${tarballs[@]}"; do
+    if k0s ctr -n k8s.io images import "$tar" >/dev/null 2>&1; then
+        imported=$((imported + 1))
+        continue
+    fi
+    # Import exited non-zero. Check if the image was registered
+    # anyway (multi-arch quirk vs. real failure).
+    repo_tag="$(tar -xOf "$tar" manifest.json 2>/dev/null \
+                  | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+    print((d[0].get("RepoTags") or [""])[0])
+except Exception:
+    pass
+' 2>/dev/null || true)"
+    if [ -n "$repo_tag" ] && \
+       k0s ctr -n k8s.io images list -q 2>/dev/null \
+         | grep -qF -- "$repo_tag"; then
+        imported=$((imported + 1))
+        continue
+    fi
+    failed=$((failed + 1))
+    echo "warning: failed to import $tar into containerd" >&2
+done
+
+echo "imported $imported tarball(s) into containerd ($failed failed)" >&2
+
+exit 0
