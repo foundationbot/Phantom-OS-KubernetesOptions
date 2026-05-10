@@ -3927,6 +3927,14 @@ PY
 # stack and indexing image references in the rendered output. Then it
 # patches each stack's Application with only the images it owns.
 #
+# Every ENABLED stack is patched on every run, including stacks with
+# zero routed entries. A stack with no entries gets `kustomize.images:
+# []` patched onto its Application, which CLEARS any stale overrides
+# left over from a previous bootstrap run. This matters when the
+# wizard removes a row from host-config (e.g. operator-ui): without an
+# explicit empty-list patch, the prior `:REPLACE-WITH-...` retag would
+# persist on the Application and keep the pod in ImagePullBackOff.
+#
 # The image-to-stack map is computed once and cached for use by both
 # image_overrides and dev_mounts (the latter currently only targets
 # positronic-control which is hardcoded to `core`, but the same
@@ -4076,10 +4084,18 @@ print(f"  DRY-RUN  {len(imgs)} image(s) to route across enabled stacks")
   fi
 
   # Group images by owning stack (Python — easier than nested bash).
+  #
+  # per_stack is authoritative: every ENABLED stack gets a key, even if
+  # host-config has zero entries that route there. Stacks with no
+  # entries get an empty list, which the patch loop downstream sends to
+  # Argo as `kustomize.images: []`. That empty patch CLEARS any stale
+  # overrides left by a prior bootstrap run (e.g. operator-ui retags
+  # left over after the wizard removes the row from host-config), so
+  # the Application reverts to its manifest defaults.
   local routing_json
-  routing_json="$(python3 - "$_IMAGE_STACK_MAP" "$images_json" <<'PY' 2>&1
+  routing_json="$(python3 - "$_IMAGE_STACK_MAP" "$images_json" "$enabled_stacks" <<'PY' 2>&1
 import json, sys
-mapping_raw, images_json = sys.argv[1], sys.argv[2]
+mapping_raw, images_json, enabled_stacks_raw = sys.argv[1], sys.argv[2], sys.argv[3]
 img_to_stack = {}
 for line in mapping_raw.splitlines():
     if "\t" in line:
@@ -4095,7 +4111,17 @@ NON_STACK_IMAGES = {
     "foundationbot/dma-ethercat",  # phase 9 install_dma_ethercat
 }
 
+# Seed every enabled stack with an empty list. This makes per_stack
+# authoritative — stacks with no host-config entries still get a key
+# (with []), so the patch loop downstream emits an empty
+# `kustomize.images: []` patch and clears any stale overrides from
+# prior bootstrap runs.
 per_stack: dict[str, list[str]] = {}
+for stack in enabled_stacks_raw.splitlines():
+    stack = stack.strip()
+    if stack:
+        per_stack[stack] = []
+
 unrouted: list[str] = []
 for entry in json.loads(images_json):
     # entry is "name:newTag" or "name=newName:newTag"
@@ -4103,8 +4129,13 @@ for entry in json.loads(images_json):
     if name in NON_STACK_IMAGES:
         continue
     stack = img_to_stack.get(name)
-    if stack:
-        per_stack.setdefault(stack, []).append(entry)
+    if stack and stack in per_stack:
+        per_stack[stack].append(entry)
+    elif stack:
+        # Routing map says this image lives in a stack that isn't
+        # enabled on this host — treat as unrouted so the warning
+        # below surfaces it.
+        unrouted.append(entry)
     else:
         unrouted.append(entry)
 
@@ -4134,7 +4165,8 @@ for entry in d["unrouted"]:
 import json, sys
 d = json.load(sys.stdin)
 for stack, imgs in d["per_stack"].items():
-    print(f"  DRY-RUN  patch phantomos-'"$ROBOT"'-{stack} kustomize.images = {imgs}")
+    suffix = " (cleared)" if not imgs else ""
+    print(f"  DRY-RUN  patch phantomos-'"$ROBOT"'-{stack} kustomize.images = {imgs}{suffix}")
 '
     return
   fi
@@ -4144,7 +4176,12 @@ for stack, imgs in d["per_stack"].items():
     return
   fi
 
-  # For each stack that has routed images, patch its Application.
+  # Iterate every enabled stack — including those whose kustomize.images
+  # list is empty. Patching an empty list is how we clear stale
+  # overrides from prior bootstrap runs (see the seed-with-empty-list
+  # logic in the heredoc above). Argo treats `images: []` as "no
+  # overrides", drops any retag, and the pod rolls onto the manifest
+  # default tag.
   local stacks_with_overrides
   stacks_with_overrides="$(printf '%s' "$routing_json" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["per_stack"].keys()))')"
   while IFS= read -r stack; do
@@ -4163,7 +4200,14 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
     local patch
     patch=$(printf '{"spec":{"source":{"kustomize":{"images":%s}}}}' "$stack_imgs_json")
     if "${KUBECTL[@]}" -n argocd patch app "$app" --type=merge -p "$patch" >/dev/null; then
-      pass "patched $app  kustomize.images: $stack_imgs_json"
+      # Specialize the log line for the empty case so operators can see
+      # at a glance that the stack got cleaned (vs. an unhelpful
+      # "kustomize.images: []" with no context).
+      if [ "$stack_imgs_json" = "[]" ]; then
+        pass "patched $app  kustomize.images: [] (cleared)"
+      else
+        pass "patched $app  kustomize.images: $stack_imgs_json"
+      fi
     else
       fail "kubectl patch app $app failed"
       continue
