@@ -507,3 +507,38 @@ Once phases 1+3 ship:
 - Replacing the wizard with a fully declarative input file. That's
   a separate, larger conversation about how host-config is
   authored across a fleet.
+
+## Known limitation — `.deb` ar size cap (resolved by RFC 0007)
+
+Surfaced during smoke testing of this RFC: the `.deb` format uses an
+`ar` archive whose member size field is 10 ASCII decimal digits,
+capping each member at `9999999999` bytes (~9.3 GB). When the
+combined image bundle's `data.tar.{xz,gz,zst}` exceeds that cap,
+`dpkg-deb --build` fails with `ar member size <N> too large` and no
+.deb is produced.
+
+Real-world impact: bundling a CUDA-class workload's main image
+(e.g. `foundationbot/phantom-cuda` at ~12 GB content, ~18 GB after
+xz with the rest) blows past the cap. The `.deb` doesn't build at
+all — there's no graceful failure mode, just a hard `dpkg-deb` error.
+
+The bundle-manifest writer (Phase 1 of this RFC) is unaffected —
+it generates the YAML correctly regardless of size. The cap is
+purely on the .deb packaging step.
+
+**Resolution: RFC 0007.** Split the build into two artifacts: a
+small metadata `.deb` (containing the bundle manifest + postinst)
+plus a sidecar `<name>-<arch>.tar.zst` (containing the image
+tarballs). The sidecar isn't subject to ar's size cap. The
+postinst gains a Responsibility 0 that verifies the operator has
+extracted the sidecar before install, and fails fast with a clear
+extract-the-sidecar-first error if not.
+
+Until RFC 0007 ships, operators with images that exceed the cap
+should use the manual path documented in
+`image-flow-and-registry-bootstrap.md`: `docker save` the giant
+image directly into `/var/lib/k0s/images/`, `k0s ctr images
+import` it, and add a corresponding entry to
+`/etc/phantomos/host-config.yaml`'s `images:` block by hand. The
+wizard's `--auto-images` mode will read the (smaller) .deb's
+bundle manifest for the rest.
