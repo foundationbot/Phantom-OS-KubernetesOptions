@@ -37,9 +37,22 @@
 #   --no-write               write only if user confirms (always on by default,
 #                            included for symmetry with --yes)
 #   -y, --yes                accept all defaults, no prompts
+#   --auto-images            opt into automatic image-override resolution from
+#                            the bundle manifest (default ON when the bundle
+#                            manifest is present and parses; OFF otherwise).
+#                            With --auto-images, the four canonical-container
+#                            image prompts are skipped — refs come straight
+#                            from seed → bundle → section-A precedence.
+#   --no-auto-images         force interactive image prompts (overrides the
+#                            default ON behavior). Each prompt is pre-filled
+#                            with the resolved precedence value.
 #   --show                   print the current host-config and exit
 #   --validate               validate the current host-config and exit
 #   -h, --help               this help
+#
+# Environment:
+#   PHANTOMOS_AUTO_IMAGES=1  equivalent to --auto-images
+#   PHANTOMOS_AUTO_IMAGES=0  equivalent to --no-auto-images
 
 set -u -o pipefail
 
@@ -57,20 +70,34 @@ YES=0
 SHOW=0
 VALIDATE=0
 
+# Auto-images mode: -1 = unset (use bundle-presence default), 0 = off, 1 = on.
+# CLI flags (--auto-images / --no-auto-images) take precedence over the
+# PHANTOMOS_AUTO_IMAGES env var; both override the bundle-presence default.
+AUTO_IMAGES=-1
+case "${PHANTOMOS_AUTO_IMAGES:-}" in
+  1) AUTO_IMAGES=1 ;;
+  0) AUTO_IMAGES=0 ;;
+  "") ;;
+  *) printf 'warning: PHANTOMOS_AUTO_IMAGES=%s ignored (expected 0 or 1)\n' \
+       "$PHANTOMOS_AUTO_IMAGES" >&2 ;;
+esac
+
 # ---- arg parsing --------------------------------------------------------
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --from-template) FROM_TEMPLATE="${2:-}"; shift 2 ;;
-    --output)        OUTPUT_FILE="${2:-}"; shift 2 ;;
-    --no-write)      shift ;;  # accepted but no-op; default behavior
-    -y|--yes)        YES=1; shift ;;
-    --show)          SHOW=1; shift ;;
-    --validate)      VALIDATE=1; shift ;;
-    -h|--help)       usage; exit 0 ;;
-    *)               printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
+    --from-template)   FROM_TEMPLATE="${2:-}"; shift 2 ;;
+    --output)          OUTPUT_FILE="${2:-}"; shift 2 ;;
+    --no-write)        shift ;;  # accepted but no-op; default behavior
+    -y|--yes)          YES=1; shift ;;
+    --auto-images)     AUTO_IMAGES=1; shift ;;
+    --no-auto-images)  AUTO_IMAGES=0; shift ;;
+    --show)            SHOW=1; shift ;;
+    --validate)        VALIDATE=1; shift ;;
+    -h|--help)         usage; exit 0 ;;
+    *)                 printf 'error: unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
@@ -181,6 +208,95 @@ confirm() {
       [Nn]|[Nn][Oo])     return 1 ;;
     esac
   done
+}
+
+# ---- bundle manifest reader --------------------------------------------
+
+# Path to the bundle manifest sidecar written by the image .deb (RFC 0005
+# Phase 1). When present and parseable, it provides build-time intent
+# (which canonical container each tarball is meant to satisfy) so the
+# wizard doesn't have to guess from filenames.
+BUNDLE_MANIFEST_PATH="${BUNDLE_MANIFEST_PATH:-/var/lib/k0s/images/.phantomos-image-bundle.yaml}"
+
+# Cache of the bundle's builderVersion field for the post-resolution
+# summary header. Populated by _read_bundle_manifest on a successful
+# parse, left empty on failure / absence / arch mismatch.
+BUNDLE_BUILDER_VERSION=""
+
+# _read_bundle_manifest
+#
+#   Emits stdout with a `__BUILDER_VERSION__\t<value>` line (always
+#   first when output is produced) followed by one TSV line per
+#   canonical-container entry: `<container>\t<ref>`.
+#
+#   Empty stdout means: bundle absent, unparseable, missing required
+#   fields, or arch mismatch — caller falls back to section-A defaults.
+#   Diagnostics (warnings, mismatch errors) go to stderr; this function
+#   never fails the wizard outright.
+#
+#   The caller is responsible for splitting off the BUILDER_VERSION
+#   sentinel from the TSV body. Done this way (rather than mutating a
+#   global) because the caller will run this inside command
+#   substitution, which is a subshell — globals don't propagate up.
+#
+#   Args:
+#     $1 — bundle manifest path (default: $BUNDLE_MANIFEST_PATH)
+#     $2 — host arch (Debian convention: amd64, arm64). Required for
+#          arch-match check.
+_read_bundle_manifest() {
+  local path="${1:-$BUNDLE_MANIFEST_PATH}"
+  local host_arch="${2:-}"
+  [ -r "$path" ] || return 0
+  python3 - "$path" "$host_arch" <<'PY'
+import sys, yaml
+path = sys.argv[1]
+host_arch = sys.argv[2] if len(sys.argv) > 2 else ""
+try:
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+except Exception as e:
+    sys.stderr.write(f"warning: bundle manifest at {path}: {e}; ignoring\n")
+    sys.exit(0)
+if not isinstance(cfg, dict):
+    sys.stderr.write(f"warning: bundle manifest at {path}: top-level not a mapping; ignoring\n")
+    sys.exit(0)
+schema = cfg.get("schemaVersion")
+if schema not in (1, "1"):
+    sys.stderr.write(f"warning: bundle manifest at {path}: unsupported schemaVersion={schema!r}; ignoring\n")
+    sys.exit(0)
+bundle_arch = cfg.get("arch")
+if not bundle_arch:
+    sys.stderr.write(f"warning: bundle manifest at {path}: missing 'arch'; ignoring\n")
+    sys.exit(0)
+if host_arch and bundle_arch != host_arch:
+    sys.stderr.write(
+        f"warning: bundle arch={bundle_arch} host arch={host_arch}; ignoring bundle defaults\n"
+    )
+    sys.exit(0)
+entries = cfg.get("bundle")
+if not isinstance(entries, list):
+    sys.stderr.write(f"warning: bundle manifest at {path}: 'bundle' is not a list; ignoring\n")
+    sys.exit(0)
+# Sentinel first, so bash callers can read a single line to grab the
+# builder version even if the TSV body is huge.
+bv = cfg.get("builderVersion") or ""
+print(f"__BUILDER_VERSION__\t{bv}")
+seen = set()
+for e in entries:
+    if not isinstance(e, dict):
+        continue
+    cname = e.get("container")
+    ref = e.get("ref")
+    if not cname or not ref:
+        continue
+    if cname in seen:
+        sys.stderr.write(
+            f"warning: bundle manifest at {path}: duplicate container {cname!r}; using first only\n"
+        )
+        continue
+    seen.add(cname)
+    print(f"{cname}\t{ref}")
+PY
 }
 
 # ---- show / validate shortcuts -----------------------------------------
@@ -621,10 +737,17 @@ else
   fi
 fi
 
-# Container-keyed image entries: parallel arrays (container, image-ref).
+# Container-keyed image entries: parallel arrays (container, image-ref,
+# provenance). `img_provenance[i]` records where img_refs[i] came from
+# so the auto-images summary header can show the operator what landed:
+#   "seed"      — preserved from /etc/phantomos/host-config.yaml
+#   "bundle"    — filled from /var/lib/k0s/images/.phantomos-image-bundle.yaml
+#   "section-A" — filled from operator-ui filename scan / arch derivation
+#   ""          — empty / no override (manifest default applies)
 # Emitted as `images: { <container>: { image: <ref> } }` at the end.
 img_containers=()
 img_refs=()
+img_provenance=()
 
 if [ "$inject_images" = 1 ]; then
   # dma-ethercat is the one container whose default tag depends on
@@ -701,7 +824,80 @@ if [ "$inject_images" = 1 ]; then
       fi
       img_containers+=("$cname")
       img_refs+=("$img")
+      img_provenance+=("seed")
     done <<< "$seed_images_yaml"
+  fi
+
+  # Auto-clear seed entries that carry a REPLACE-WITH-* placeholder
+  # tag. These were previously written by configure-host.sh itself (a
+  # bug — see docs/image-flow-and-registry-bootstrap.md), but they
+  # would never resolve at pull time. Treat them as if the seed had
+  # no entry, so the bundle / section-A defaults can fill the gap.
+  #
+  # MUST run before bundle resolution: clearing turns the seed entry
+  # back into an empty row, letting the bundle-fill step below give
+  # it a real ref. This was previously after the canonical_default
+  # loop; moved up so the bundle reader sees the correct empty state.
+  for i in "${!img_refs[@]}"; do
+    case "${img_refs[$i]##*:}" in
+      REPLACE-WITH-*)
+        printf '%s  warning%s seed %s ref %s carries placeholder tag,\n' \
+          "$C_DIM" "$C_RESET" "${img_containers[$i]}" "${img_refs[$i]}" >&2
+        printf '%s           clearing — re-prompt with canonical default%s\n' \
+          "$C_DIM" "$C_RESET" >&2
+        img_refs[$i]=""
+        img_provenance[$i]=""
+        ;;
+    esac
+  done
+
+  # ---- Phase 3: bundle-manifest reader -----------------------------
+  #
+  # Read /var/lib/k0s/images/.phantomos-image-bundle.yaml (when present
+  # and arch-matched) and use bundle[].ref as the default for any
+  # canonical container that doesn't already have a non-empty seed
+  # entry. Seed wins absolutely; bundle fills gaps.
+  #
+  # _read_bundle_manifest emits TSV `<container>\t<ref>` lines. Empty
+  # output means no bundle / unparseable / arch mismatch — we just
+  # don't fill any rows here and the section-A defaults below take
+  # over (preserving the older code path verbatim).
+  bundle_seen_count=0
+  # Capture stdout from the function into a string (not process
+  # substitution) so the BUILDER_VERSION sentinel parse below stays
+  # in the same shell. The function emits the sentinel as the first
+  # line, followed by TSV `<container>\t<ref>` rows.
+  _bundle_tsv="$(_read_bundle_manifest "$BUNDLE_MANIFEST_PATH" "$host_deb_arch")"
+  if [ -n "$_bundle_tsv" ]; then
+    while IFS=$'\t' read -r bcname bref; do
+      [ -z "$bcname" ] && continue
+      if [ "$bcname" = "__BUILDER_VERSION__" ]; then
+        BUNDLE_BUILDER_VERSION="$bref"
+        continue
+      fi
+      [ -z "$bref" ] && continue
+      bundle_seen_count=$((bundle_seen_count + 1))
+      # Find existing row, or append.
+      found_idx=-1
+      for i in "${!img_containers[@]}"; do
+        if [ "${img_containers[$i]}" = "$bcname" ]; then
+          found_idx=$i; break
+        fi
+      done
+      if [ "$found_idx" -ge 0 ]; then
+        # Seed entry exists. Preserve it absolutely — only fill when
+        # the slot is currently empty (REPLACE-WITH-* clear path or
+        # operator hand-cleared the line on a previous run).
+        if [ -z "${img_refs[$found_idx]}" ]; then
+          img_refs[$found_idx]="$bref"
+          img_provenance[$found_idx]="bundle"
+        fi
+      else
+        img_containers+=("$bcname")
+        img_refs+=("$bref")
+        img_provenance+=("bundle")
+      fi
+    done <<< "$_bundle_tsv"
   fi
 
   # operator-ui default tag — derived from the bundled image .deb if
@@ -753,60 +949,131 @@ if [ "$inject_images" = 1 ]; then
     "$dma_ethercat_default_tag"     # dma-ethercat:       arch-derived
   )
 
-  # Append any canonical container missing from the seed. Existing
-  # seed entries are preserved as-is; missing ones get the canonical
-  # default ref so the operator can press enter to accept. When the
-  # canonical default tag is empty (no real value to suggest) the
-  # row is added with an empty ref — press-Enter then drops the
-  # override and the manifest default applies.
+  # Append any canonical container missing from the seed/bundle.
+  # Existing entries are preserved as-is; missing ones get the
+  # canonical (section-A) default so the operator can press enter to
+  # accept. When the canonical default tag is empty (no real value to
+  # suggest) the row is added with an empty ref — press-Enter then
+  # drops the override and the manifest default applies.
+  #
+  # Seed and bundle wins are already in place from earlier steps;
+  # this loop only fills rows that are truly empty after both higher-
+  # priority sources had a chance.
   for c_i in "${!canonical_containers[@]}"; do
     c_name="${canonical_containers[$c_i]}"
-    found=0
+    found_idx=-1
     for i in "${!img_containers[@]}"; do
-      if [ "${img_containers[$i]}" = "$c_name" ]; then found=1; break; fi
+      if [ "${img_containers[$i]}" = "$c_name" ]; then
+        found_idx=$i; break
+      fi
     done
-    if [ "$found" = 0 ]; then
+    if [ "$found_idx" = -1 ]; then
       img_containers+=("$c_name")
       if [ -n "${canonical_default_tags[$c_i]}" ]; then
         img_refs+=("${canonical_default_repos[$c_i]}:${canonical_default_tags[$c_i]}")
+        img_provenance+=("section-A")
       else
         img_refs+=("")
+        img_provenance+=("")
       fi
+    elif [ -z "${img_refs[$found_idx]}" ]; then
+      # Row exists but is empty (REPLACE-WITH-* clear, or hand-cleared
+      # seed). Bundle didn't fill it. Last-resort section-A fill.
+      if [ -n "${canonical_default_tags[$c_i]}" ]; then
+        img_refs[$found_idx]="${canonical_default_repos[$c_i]}:${canonical_default_tags[$c_i]}"
+        img_provenance[$found_idx]="section-A"
+      fi
+      # else: still empty, provenance stays "" — that's fine, means
+      # "no override, manifest default applies".
     fi
   done
 
-  # Auto-clear seed entries that carry a REPLACE-WITH-* placeholder
-  # tag. These were previously written by configure-host.sh itself (a
-  # bug — see docs/image-flow-and-registry-bootstrap.md), but they
-  # would never resolve at pull time. Treat them as if the seed had
-  # no entry, so the prompt offers the canonical default (typically
-  # empty) instead of carrying the placeholder forward.
-  for i in "${!img_refs[@]}"; do
-    case "${img_refs[$i]##*:}" in
-      REPLACE-WITH-*)
-        printf '%s  warning%s seed %s ref %s carries placeholder tag,\n' \
-          "$C_DIM" "$C_RESET" "${img_containers[$i]}" "${img_refs[$i]}" >&2
-        printf '%s           clearing — re-prompt with canonical default%s\n' \
-          "$C_DIM" "$C_RESET" >&2
-        img_refs[$i]=""
-        ;;
-    esac
-  done
+  # ---- Phase 4: --auto-images resolution ----------------------------
+  #
+  # Decide whether to skip the per-row prompts. Default ON when the
+  # bundle manifest yielded any usable entries (bundle_seen_count>0);
+  # default OFF otherwise. CLI flags / env var override.
+  effective_auto_images="$AUTO_IMAGES"
+  if [ "$effective_auto_images" = -1 ]; then
+    if [ "$bundle_seen_count" -gt 0 ]; then
+      effective_auto_images=1
+    else
+      effective_auto_images=0
+    fi
+  fi
 
-  echo
-  hint "Press enter to keep the shown default; an empty default means"
-  hint "no override (the manifest's in-tree image:tag will apply)."
-  hint "Swapping repos is fine — bootstrap renames+retags in one step."
-  example "localhost:5443/positronic-control:0.2.44-production-cu130"
-  example "foundationbot/phantom-cuda:0.2.46-dev.1-production-cu130 (swap repo)"
-  example "localhost:5443/phantom-models:2026-04-30                  (date-stamped)"
-  example "foundationbot/argus.operator-ui:<git-sha>"
-  example "foundationbot/dma-ethercat:main-latest-aarch64            (arm64)"
-  example "foundationbot/dma-ethercat:main-latest-amd64              (x86)"
-  for i in "${!img_containers[@]}"; do
-    new_ref="$(ask "${img_containers[$i]} image" "${img_refs[$i]}" "Full image ref (repo:tag). Empty to skip this container.")"
-    img_refs[$i]="$new_ref"
-  done
+  # If --auto-images is on but resolution leaves ALL canonical rows
+  # empty (no seed, no bundle, no section-A fill), refuse to ship a
+  # host-config with no images: block. Drop into the prompt loop as a
+  # safety net — better to ask than to ship a guaranteed
+  # ImagePullBackOff.
+  if [ "$effective_auto_images" = 1 ]; then
+    nonempty_resolution=0
+    for i in "${!img_refs[@]}"; do
+      [ -n "${img_refs[$i]}" ] && nonempty_resolution=$((nonempty_resolution + 1))
+    done
+    if [ "$nonempty_resolution" = 0 ]; then
+      printf '%s  warning%s --auto-images: all canonical rows resolved empty;\n' \
+        "$C_DIM" "$C_RESET" >&2
+      printf '%s           dropping into the prompt loop instead%s\n' \
+        "$C_DIM" "$C_RESET" >&2
+      effective_auto_images=0
+    fi
+  fi
+
+  if [ "$effective_auto_images" = 1 ]; then
+    # Print a one-line summary header showing where each row's ref
+    # came from, then skip the prompts entirely. Operators who want
+    # to inspect or override what landed re-run with
+    # `--no-auto-images`.
+    declare -A _prov_count=([seed]=0 [bundle]=0 [section-A]=0 [empty]=0)
+    for i in "${!img_provenance[@]}"; do
+      p="${img_provenance[$i]}"
+      [ -z "$p" ] && p="empty"
+      _prov_count[$p]=$((${_prov_count[$p]:-0} + 1))
+    done
+    total_rows=${#img_containers[@]}
+    summary_parts=()
+    [ "${_prov_count[bundle]:-0}" -gt 0 ] && summary_parts+=("${_prov_count[bundle]} from bundle${BUNDLE_BUILDER_VERSION:+ $BUNDLE_BUILDER_VERSION}")
+    [ "${_prov_count[seed]:-0}" -gt 0 ] && summary_parts+=("${_prov_count[seed]} from seed")
+    [ "${_prov_count[section-A]:-0}" -gt 0 ] && summary_parts+=("${_prov_count[section-A]} from section-A")
+    [ "${_prov_count[empty]:-0}" -gt 0 ] && summary_parts+=("${_prov_count[empty]} empty")
+    summary_str=""
+    for s in "${summary_parts[@]}"; do
+      if [ -z "$summary_str" ]; then summary_str="$s"
+      else summary_str="$summary_str, $s"
+      fi
+    done
+    echo
+    info "auto-images: $total_rows rows ($summary_str)"
+    info "(use --no-auto-images to interactively review/override these refs)"
+    for i in "${!img_containers[@]}"; do
+      prov="${img_provenance[$i]:-empty}"
+      ref_display="${img_refs[$i]}"
+      [ -z "$ref_display" ] && ref_display="<no override; manifest default applies>"
+      printf '%s    %-22s %-12s %s%s\n' \
+        "$C_DIM" "${img_containers[$i]}" "[$prov]" "$ref_display" "$C_RESET" >&2
+    done
+  else
+    echo
+    if [ "$bundle_seen_count" -gt 0 ]; then
+      hint "Bundle manifest contributed ${bundle_seen_count} ref(s); each prompt is"
+      hint "pre-filled with the resolved seed -> bundle -> section-A default."
+    fi
+    hint "Press enter to keep the shown default; an empty default means"
+    hint "no override (the manifest's in-tree image:tag will apply)."
+    hint "Swapping repos is fine — bootstrap renames+retags in one step."
+    example "localhost:5443/positronic-control:0.2.44-production-cu130"
+    example "foundationbot/phantom-cuda:0.2.46-dev.1-production-cu130 (swap repo)"
+    example "localhost:5443/phantom-models:2026-04-30                  (date-stamped)"
+    example "foundationbot/argus.operator-ui:<git-sha>"
+    example "foundationbot/dma-ethercat:main-latest-aarch64            (arm64)"
+    example "foundationbot/dma-ethercat:main-latest-amd64              (x86)"
+    for i in "${!img_containers[@]}"; do
+      new_ref="$(ask "${img_containers[$i]} image" "${img_refs[$i]}" "Full image ref (repo:tag). Empty to skip this container.")"
+      img_refs[$i]="$new_ref"
+    done
+  fi
 fi
 
 # --- deployments: positronic-control mounts ---------------------------
