@@ -3627,6 +3627,70 @@ APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_templa
 RENDERED_APP_DIR="${RENDERED_APP_DIR:-/etc/phantomos}"
 DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
 DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
+LOCAL_GIT_TREE="${LOCAL_GIT_TREE:-/opt/Phantom-OS-KubernetesOptions}"
+
+# Resolve the (repoURL, targetRevision) pair the per-stack Applications
+# should point at. host-config's gitSource: field decides which mode:
+#
+#   gitSource: local  (RFC 0006 default) — repoURL=file:///opt/.../,
+#     targetRevision pinned to the SHA of HEAD inside that working tree
+#     so each `dpkg -i` of a new .deb yields a stable, reproducible
+#     revision string in `kubectl get application -o yaml`. Pinning
+#     beats `HEAD` because HEAD moves on every install; the SHA freezes
+#     Argo to exactly the .deb's snapshot.
+#
+#   gitSource: remote — repoURL stays at $DEFAULT_REPO_URL (GitHub),
+#     targetRevision comes from host-config's targetRevision: field
+#     (default 'main'). This is the pre-RFC-0006 behavior, retained for
+#     fleet ops who push hot-fixes via GitHub or CI test machines that
+#     run against a feature branch.
+#
+# Echoes "<repo_url>\t<target_revision>" on stdout. If gitSource=local
+# but the local tree isn't a git repo (older .deb without Phase 1 of
+# RFC 0006), falls back to remote and prints a warning so operators
+# notice. An unknown gitSource value is a hard error — host-config.py
+# is supposed to validate; if it didn't, fail loud rather than guess.
+_resolve_git_source() {
+  local hc="$1"
+  local git_source repo_url target_rev
+  if [ -r "$hc" ]; then
+    git_source="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-git-source 2>/dev/null \
+                  || printf 'local')"
+  else
+    git_source="local"
+  fi
+  case "$git_source" in
+    local)
+      repo_url="file://${LOCAL_GIT_TREE}"
+      if [ -d "${LOCAL_GIT_TREE}/.git" ]; then
+        target_rev="$(git -C "${LOCAL_GIT_TREE}" rev-parse HEAD 2>/dev/null \
+                       || printf 'main')"
+      else
+        # Warnings go to stderr — _resolve_git_source's stdout is the
+        # captured "<repo>\t<rev>" payload, must not be polluted.
+        info "warning: ${LOCAL_GIT_TREE}/.git missing — gitSource=local needs a git-initialized .deb" >&2
+        info "warning: falling back to repoURL=$DEFAULT_REPO_URL targetRevision=main" >&2
+        repo_url="$DEFAULT_REPO_URL"
+        target_rev="main"
+      fi
+      ;;
+    remote)
+      repo_url="$DEFAULT_REPO_URL"
+      if [ -r "$hc" ]; then
+        target_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null \
+                       || printf '%s' "$DEFAULT_TARGET_REVISION")"
+      else
+        target_rev="$DEFAULT_TARGET_REVISION"
+      fi
+      [ -z "$target_rev" ] && target_rev="$DEFAULT_TARGET_REVISION"
+      ;;
+    *)
+      fail "unknown gitSource=$git_source — expected 'local' or 'remote'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\t%s' "$repo_url" "$target_rev"
+}
 
 _rendered_app_path() {
   local stack="${1:?stack required}"
@@ -3749,18 +3813,24 @@ gitops() {
     fail "$kc not readable — phase 3 (cluster) should have written it"; return
   fi
 
-  # Resolve targetRevision: --host-config wins, then explicit override
-  # via DEFAULT_TARGET_REVISION env, then 'main'.
+  # Resolve (repoURL, targetRevision) once for this gitops run via
+  # _resolve_git_source — driven by host-config's gitSource: field
+  # (RFC 0006). The same pair is reused across every enabled stack.
   local hc="$HOST_CONFIG_FILE"
   if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
     hc="$HOST_CONFIG_INPUT"
   fi
-  local target_rev="$DEFAULT_TARGET_REVISION"
-  if [ -r "$hc" ]; then
-    if hc_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null)"; then
-      target_rev="$hc_rev"
-    fi
+  local git_pair repo_url target_rev
+  if ! git_pair="$(_resolve_git_source "$hc")"; then
+    return
   fi
+  repo_url="$(printf '%s' "$git_pair" | cut -f1)"
+  target_rev="$(printf '%s' "$git_pair" | cut -f2)"
+  if [ -z "$repo_url" ] || [ -z "$target_rev" ]; then
+    fail "could not resolve repoURL/targetRevision from host-config (gitSource)"
+    return
+  fi
+  info "gitops source: repoURL=$repo_url  targetRevision=$target_rev"
 
   # Enabled stacks (one per line); per-stack selfHeal (resolved against
   # production: + --production override).
@@ -3810,8 +3880,9 @@ PY
       [ -z "$stack" ] && continue
       local sh
       sh="$(_resolve_selfheal_for_stack "$stack")"
-      info "DRY-RUN    render template for stack=$stack  selfHeal=$sh"
+      info "DRY-RUN    render template for stack=$stack  repoURL=$repo_url  targetRevision=$target_rev  selfHeal=$sh"
       info "DRY-RUN    kubectl apply -f $(_rendered_app_path "$stack")"
+      info "DRY-RUN    kubectl -n argocd annotate application/phantomos-$ROBOT-$stack argocd.argoproj.io/refresh=hard --overwrite"
     done <<< "$enabled_stacks"
     info "DRY-RUN  wait for each phantomos-$ROBOT-<stack> Synced + Healthy"
     return
@@ -3897,20 +3968,33 @@ PY
     [ -z "$stack" ] && continue
     local sh
     sh="$(_resolve_selfheal_for_stack "$stack")"
-    if ! _gitops_render_app "$stack" "$DEFAULT_REPO_URL" "$target_rev" "$sh"; then
+    if ! _gitops_render_app "$stack" "$repo_url" "$target_rev" "$sh"; then
       return
     fi
-    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  branch=$target_rev  selfHeal=$sh"
+    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  revision=$target_rev  selfHeal=$sh"
 
     if ! "${KUBECTL[@]}" apply -f "$(_rendered_app_path "$stack")" >/dev/null; then
       fail "kubectl apply -f $(_rendered_app_path "$stack")"
       return
     fi
     pass "phantomos-$ROBOT-$stack applied"
-    # Force ArgoCD to reconcile immediately instead of waiting for the
-    # next 3-min refresh tick.
-    "${KUBECTL[@]}" -n argocd annotate app "phantomos-$ROBOT-$stack" \
-      argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+  done <<< "$enabled_stacks"
+
+  # Post-render Argo refresh — best-effort. Forces argocd-application-
+  # controller to re-clone the repoURL and re-render manifests RIGHT NOW
+  # instead of waiting up to 3 minutes for its next poll. Especially
+  # important after a `dpkg -i` advances /opt/.../HEAD: without this,
+  # operators see "I just installed a new .deb but the cluster is still
+  # on the old manifests" for several minutes. Failures here are not
+  # fatal — Argo will eventually re-evaluate on its own.
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local app="phantomos-${ROBOT}-${stack}"
+    if "${KUBECTL[@]}" -n argocd get application "$app" >/dev/null 2>&1; then
+      "${KUBECTL[@]}" -n argocd annotate "application/$app" \
+        argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+      info "triggered hard refresh on $app"
+    fi
   done <<< "$enabled_stacks"
 
   # No Synced wait — phases 10 (image-overrides) and 11 (deployments)

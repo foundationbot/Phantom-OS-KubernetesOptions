@@ -372,6 +372,9 @@ declare -a seed_api_mount_containers=()
 seed_core_selfheal=""
 seed_operator_enabled=""
 seed_operator_selfheal=""
+# RFC 0006 — gitSource toggle ("local" or "remote"). Empty = not in seed,
+# wizard defaults to "local" on a fresh run.
+seed_git_source=""
 
 if [ -n "$seed_path" ]; then
   seed_robot="$(python3 "$HELPER" "$seed_path" get robot 2>/dev/null || true)"
@@ -380,11 +383,18 @@ if [ -n "$seed_path" ]; then
   seed_production="$(python3 "$HELPER" "$seed_path" get production 2>/dev/null || true)"
 
   # Per-stack seed values (any of these may be empty).
+  # Also harvests top-level RFC 0006 `gitSource` via a synthetic
+  # `top\tgitSource\t\t<value>` row. Synthetic rows use kind=top so
+  # they share the same TSV stream without colliding with stack rows.
+  # Note: bash read with IFS=$'\t' collapses runs of tabs, so the
+  # `field` slot is intentionally a single non-empty token (`_`)
+  # rather than empty — otherwise read would shift `val` into `field`.
   while IFS=$'\t' read -r kind name field val; do
     case "$kind:$name:$field" in
       stack:core:selfHeal)         seed_core_selfheal="$val" ;;
       stack:operator:enabled)      seed_operator_enabled="$val" ;;
       stack:operator:selfHeal)     seed_operator_selfheal="$val" ;;
+      top:gitSource:_)             seed_git_source="$val" ;;
     esac
   done < <(python3 - "$seed_path" <<'PY' 2>/dev/null
 import sys, yaml
@@ -401,6 +411,11 @@ for name in ("core", "operator"):
         print(f"stack\t{name}\tenabled\t{'true' if spec['enabled'] else 'false'}")
     if "selfHeal" in spec:
         print(f"stack\t{name}\tselfHeal\t{'true' if spec['selfHeal'] else 'false'}")
+git_source = cfg.get("gitSource") if isinstance(cfg, dict) else None
+if git_source:
+    # `_` placeholder in the field slot — bash read collapses empty
+    # tab-separated columns, so a non-empty token is required here.
+    print(f"top\tgitSource\t_\t{git_source}")
 PY
 )
   # Pull the images: block. The schema is now container-keyed
@@ -512,6 +527,13 @@ validate_url() {
   esac
 }
 
+validate_git_source() {
+  case "$1" in
+    local|remote) return 0 ;;
+    *) err "must be 'local' or 'remote' (got: $1)"; return 1 ;;
+  esac
+}
+
 validate_abs_path() {
   local v="$1"
   if [ -z "$v" ]; then err "path required"; return 1; fi
@@ -604,15 +626,39 @@ if [ -z "$ai_pc_url" ]; then
   ok "aiPcUrl = $ai_pc_url"
 fi
 
+# --- gitSource (RFC 0006) ---
+heading "Argo source of truth"
+hint "Track manifests from the local /opt/Phantom-OS-KubernetesOptions tree"
+hint "(default — packaged with the .deb, atomic + offline-friendly), or"
+hint "from a remote git URL like GitHub (legacy behavior, useful for fleet"
+hint "ops who push hot-fixes by git push instead of rebuilding the .deb)."
+hint "Legacy host-configs without a gitSource: field are treated as 'local'"
+hint "on this run; type 'remote' explicitly to keep tracking GitHub."
+example "local                  # default; tracks /opt/.../.git/ via file://"
+example "remote                 # tracks https://github.com/... via Argo's repo-server"
+
+# Default to local on a fresh wizard run; preserve seed value on re-run.
+git_source_default="${seed_git_source:-local}"
+git_source="$(ask "gitSource" "$git_source_default" "Either 'local' or 'remote'." validate_git_source)"
+ok "gitSource = $git_source"
+
 # --- targetRevision ---
-heading "ArgoCD target revision"
-hint "Branch / tag / SHA the per-host ArgoCD Application should track."
-hint "'main' is the default for production robots; use a feature branch when"
-hint "testing changes before merge."
-example "main, feat/mk09-positronic-0.2.44-production"
-target_default="${seed_target_rev:-main}"
-target_revision="$(ask "targetRevision" "$target_default" "Any valid git ref reachable from the configured repo URL.")"
-ok "targetRevision = $target_revision"
+# Only relevant when gitSource=remote. With local-git, bootstrap derives
+# the revision from `git -C /opt/... rev-parse HEAD`, so prompting here
+# would only let the operator pick a revision the local repo doesn't have.
+if [ "$git_source" = "remote" ]; then
+  heading "ArgoCD target revision"
+  hint "Branch / tag / SHA the per-host ArgoCD Application should track."
+  hint "'main' is the default for production robots; use a feature branch when"
+  hint "testing changes before merge."
+  example "main, feat/mk09-positronic-0.2.44-production"
+  target_default="${seed_target_rev:-main}"
+  target_revision="$(ask "targetRevision" "$target_default" "Any valid git ref reachable from the configured repo URL.")"
+  ok "targetRevision = $target_revision"
+else
+  hint "(targetRevision skipped — gitSource=local; bootstrap will pin to /opt/.../.git/ HEAD)"
+  target_revision=""
+fi
 
 # --- production / selfHeal ---
 heading "production mode (ArgoCD selfHeal)"
@@ -1264,7 +1310,10 @@ tmp="$(mktemp)"
   printf '# bootstrap-robot.sh to apply.\n'
   printf 'robot: %s\n' "$robot"
   printf 'aiPcUrl: %s\n' "$ai_pc_url"
-  printf 'targetRevision: %s\n' "$target_revision"
+  printf 'gitSource: %s\n' "$git_source"
+  if [ "$git_source" = "remote" ] && [ -n "$target_revision" ]; then
+    printf 'targetRevision: %s\n' "$target_revision"
+  fi
   printf 'production: %s\n' "$production"
 
   # Stacks block — emit only fields the operator explicitly set, so

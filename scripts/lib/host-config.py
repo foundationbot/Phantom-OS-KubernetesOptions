@@ -23,6 +23,7 @@ Usage:
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
+  host-config.py <path> get-git-source                # 'local' | 'remote' (default 'local')
   host-config.py <path> inject-kustomize-block <app-yaml> <stack> <stacks-dir>
   host-config.py <path> validate
 
@@ -169,6 +170,16 @@ def cmd_get_dma_ethercat_config_path(cfg: dict) -> int:
     value = block.get("configPath")
     if not value:
         return 1
+    print(value)
+    return 0
+
+
+def cmd_get_git_source(cfg: dict) -> int:
+    """Print the gitSource field. Defaults to 'local' when absent.
+    Always exits 0 — gitSource has a real default, unlike most other
+    optional fields where 'unset' is meaningful to the caller.
+    """
+    value = cfg.get("gitSource") or "local"
     print(value)
     return 0
 
@@ -958,6 +969,18 @@ def cmd_validate(cfg: dict) -> int:
             f"'production' must be true or false (got: {cfg['production']!r})"
         )
 
+    # gitSource: optional top-level enum. RFC 0006 — selects between
+    # local cluster-side git server and remote GitHub origin as the Argo
+    # CD source. Defaults to 'local' when absent (set by cmd_get_git_source).
+    git_source = cfg.get("gitSource")
+    if git_source is not None:
+        if not isinstance(git_source, str):
+            errors.append("'gitSource' must be a string")
+        elif git_source not in ("local", "remote"):
+            errors.append(
+                f"gitSource={git_source!r}: must be 'local' or 'remote'"
+            )
+
     # stacks: must be a mapping; only known stack names; required
     # stacks cannot be disabled; per-stack fields type-checked.
     stacks = cfg.get("stacks")
@@ -1597,6 +1620,8 @@ def main() -> int:
             print("usage: host-config.py <path> get-stack-selfheal <stack>", file=sys.stderr)
             return 2
         return cmd_get_stack_selfheal(cfg, sys.argv[3])
+    if cmd == "get-git-source":
+        return cmd_get_git_source(cfg)
     if cmd == "inject-kustomize-block":
         if len(sys.argv) != 6:
             print(
