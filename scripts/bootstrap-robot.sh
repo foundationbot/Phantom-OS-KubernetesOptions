@@ -42,13 +42,13 @@
 #                        rules. Driven by cpuIsolation.nic.selector
 #                        (mac/pci/driver+index); falls back to the
 #                        vendored interactive picker on a TTY.
-#                        See docs/cpu-isolation.md.
+#                        See docs/internal/cpu-isolation.md.
 #   --cpu-isolation      activate cpuset partitions, install cpusets.service,
 #                        write systemd CPUAffinity drop-in, optionally pin
 #                        EtherCAT NIC IRQs and migrate kernel cmdline. Reads
 #                        host-config.yaml's cpuIsolation: block; no-op when
 #                        cpuIsolation.enabled is unset/false.
-#                        See docs/cpu-isolation.md.
+#                        See docs/internal/cpu-isolation.md.
 #   --log-management     install journald + logrotate drop-ins from
 #                        host-config.yaml's logManagement: block. Caps
 #                        journald disk usage and forces rsyslog logrotate
@@ -198,7 +198,7 @@
 #                    host-config.yaml; falls back to the vendored
 #                    interactive picker on a TTY. Idempotent — fast-paths
 #                    when `ip link show <iface>` already succeeds.
-#                    See docs/cpu-isolation.md.
+#                    See docs/internal/cpu-isolation.md.
 #    8. cpu-isolation (gates phase 9)
 #                    activate cgroup v2 cpuset partitions; install
 #                    cpusets.service so they reactivate at boot
@@ -208,7 +208,7 @@
 #                    optionally migrate kernel cmdline (--migrateCmdline).
 #                    Default-on: missing cpuIsolation: block prompts on
 #                    a TTY and persists answers. enabled: false skips.
-#                    See docs/cpu-isolation.md.
+#                    See docs/internal/cpu-isolation.md.
 #    9. install dma-ethercat (gates phase 10)
 #                    Default-on. Pass --skip-ethercat-install to bypass.
 #                    Renders the bootstrap-managed installer Job from
@@ -1144,18 +1144,44 @@ deps() {
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  apt-get install -y ${to_install[*]}"
     else
+      # apt-get install -y's exit code conflates two failure modes:
+      #   (a) the package we want couldn't be installed
+      #   (b) some unrelated package in the same dpkg transaction had a
+      #       postinst failure
+      # Common (b) case: a fresh apt run also pulls in linux-headers
+      # updates, whose postinst triggers a DKMS rebuild of the NVIDIA
+      # module, which refuses because the module is already installed.
+      # apt-get exits non-zero, but the package we asked for is installed
+      # fine — bootstrap shouldn't halt on that. So we ignore apt's exit
+      # code and check each requested package's actual installed state
+      # via dpkg-query. Pass for what landed; fail only for what didn't.
       apt_log=$(mktemp)
-      if apt-get update -qq && apt-get install -y "${to_install[@]}" >"$apt_log" 2>&1; then
-        for p in "${to_install[@]}"; do pass "$p installed"; done
-        rm -f "$apt_log"
-      else
-        fail "apt install failed for: ${to_install[*]}"
-        # Surface the resolver's reasoning instead of swallowing it —
-        # held packages and conflicts are otherwise invisible in the
-        # run log.
+      apt-get update -qq >>"$apt_log" 2>&1 || true
+      apt-get install -y "${to_install[@]}" >>"$apt_log" 2>&1
+      apt_rc=$?
+
+      really_failed=()
+      for p in "${to_install[@]}"; do
+        if dpkg-query -W -f='${Status}' "$p" 2>/dev/null \
+             | grep -q 'install ok installed'; then
+          pass "$p installed"
+        else
+          really_failed+=("$p")
+        fi
+      done
+
+      if [ "${#really_failed[@]}" -gt 0 ]; then
+        fail "apt install failed for: ${really_failed[*]}"
         sed 's/^/    apt: /' "$apt_log" >&2
-        rm -f "$apt_log"
+      elif [ "$apt_rc" != 0 ]; then
+        # apt-get returned non-zero but every requested package is in
+        # 'install ok installed' state. Surface as informational, not a
+        # hard failure — almost always an unrelated postinst issue
+        # (e.g. nvidia DKMS conflict during a linux-headers upgrade).
+        info "apt-get exit=$apt_rc but all requested packages installed —"
+        info "  unrelated postinst issue, run 'sudo dpkg --audit' to inspect"
       fi
+      rm -f "$apt_log"
     fi
   fi
 
@@ -2079,6 +2105,43 @@ locomotion_config() {
   fi
 }
 
+# ---- pre-phase: cpu-isolation first-bringup prompt -------------------
+
+# On first bringup the cpuIsolation: block doesn't exist in
+# host-config.yaml yet. Phase 7 (below) reads cpuIsolation.nic.iface
+# to know what to name the NIC; phase 8 reads partitions/dmaRtCpu/etc.
+# Before this hoist, the prompt that populates the block lived inside
+# phase 8 — so phase 7 ran first, saw an empty block, skipped, then
+# phase 8 prompted, persisted, and immediately tried to pin IRQs on a
+# NIC that nothing had named. Operators had to re-run bootstrap to
+# unstick the loop.
+#
+# Run the same _cpu_isolation_prompt up front so both phases see a
+# populated block in the same run. Strictly a TTY-only convenience:
+# in dry-run, non-interactive shells, or when both downstream phases
+# are skipped, this is a no-op and the existing skip-with-actionable-
+# message paths in phases 7 and 8 still fire.
+ensure_cpu_isolation_block() {
+  # Cheap exits first.
+  if [ "$DRY_RUN" = 1 ]; then return; fi
+  if [ "$SKIP_ECAT_INTERFACE" = 1 ] && [ "$SKIP_CPU_ISOLATION" = 1 ]; then
+    return
+  fi
+  if [ ! -t 0 ] || [ ! -t 2 ]; then return; fi
+
+  local hc="$HOST_CONFIG_FILE"
+  if [ ! -r "$hc" ]; then return; fi
+
+  local ci_json
+  ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  if [ "$ci_json" != "{}" ]; then return; fi
+
+  phase "pre-phase: cpu-isolation first-bringup setup"
+  if ! _cpu_isolation_prompt "$hc"; then
+    info "operator declined; phases 7 and 8 will skip with their normal messages"
+  fi
+}
+
 # ---- phase 7: ecat-interface (gates phase 8) -------------------------
 
 # Resolve the EtherCAT NIC adapter and rename it to the requested
@@ -2123,8 +2186,8 @@ ecat_interface() {
   ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
   if [ -z "$ci_json" ] || [ "$ci_json" = "{}" ]; then
     phase "phase 7: ecat-interface  (skipped — no cpuIsolation block)"
-    info "phase 8 (cpu-isolation) will prompt for cpuIsolation.nic.iface;"
-    info "the ecat-interface phase becomes active once that block exists."
+    info "the pre-phase prompt populates this on a TTY; non-interactive"
+    info "runs must hand-edit $hc (see docs/internal/cpu-isolation.md) and re-run."
     return
   fi
   { read -r iface; } < <(cpusets_json_nic "$ci_json")
@@ -2259,10 +2322,12 @@ PY
 # starts unisolated.
 #
 # Host-config-driven. The cpuIsolation: block in host-config.yaml is
-# the source of truth. Default-on: if the cpuIsolation block is missing
-# entirely AND stdin is a TTY, bootstrap prompts the operator and
-# persists the answers back to host-config.yaml. Only an explicit
-# `enabled: false` skips the phase. See docs/cpu-isolation.md for the
+# the source of truth. The pre-phase prompt above (run before phase 7)
+# normally populates the block on first bringup; the prompt here is a
+# defensive fallback for runs that bypass the pre-phase (e.g., the
+# operator answered N at the pre-phase prompt, or someone hand-rolled
+# `--cpu-isolation` only without `--ecat-interface`). Only an explicit
+# `enabled: false` skips the phase. See docs/internal/cpu-isolation.md for the
 # schema and lifecycle.
 #
 # Idempotent: re-runs are safe. The vendored manage_cpusets.sh skips
@@ -2306,7 +2371,7 @@ cpu_isolation() {
     else
       phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
       info "first bringup needs an interactive shell to configure CPU isolation,"
-      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/cpu-isolation.md),"
+      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/internal/cpu-isolation.md),"
       info "OR set cpuIsolation.enabled=false to opt out persistently."
       return
     fi
@@ -3086,7 +3151,7 @@ _cpu_isolation_prompt() {
     printf '\n  CPU isolation carves cpuset partitions for the EtherCAT realtime\n'
     printf '  control loop. Required for production robots — answer the prompts\n'
     printf '  below to populate cpuIsolation: in %s.\n' "$hc"
-    printf '  See docs/cpu-isolation.md for the full schema.\n\n'
+    printf '  See docs/internal/cpu-isolation.md for the full schema.\n\n'
   } >&2
 
   local ans
@@ -3574,6 +3639,70 @@ APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_templa
 RENDERED_APP_DIR="${RENDERED_APP_DIR:-/etc/phantomos}"
 DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
 DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
+LOCAL_GIT_TREE="${LOCAL_GIT_TREE:-/opt/Phantom-OS-KubernetesOptions}"
+
+# Resolve the (repoURL, targetRevision) pair the per-stack Applications
+# should point at. host-config's gitSource: field decides which mode:
+#
+#   gitSource: local  (RFC 0006 default) — repoURL=file:///opt/.../,
+#     targetRevision pinned to the SHA of HEAD inside that working tree
+#     so each `dpkg -i` of a new .deb yields a stable, reproducible
+#     revision string in `kubectl get application -o yaml`. Pinning
+#     beats `HEAD` because HEAD moves on every install; the SHA freezes
+#     Argo to exactly the .deb's snapshot.
+#
+#   gitSource: remote — repoURL stays at $DEFAULT_REPO_URL (GitHub),
+#     targetRevision comes from host-config's targetRevision: field
+#     (default 'main'). This is the pre-RFC-0006 behavior, retained for
+#     fleet ops who push hot-fixes via GitHub or CI test machines that
+#     run against a feature branch.
+#
+# Echoes "<repo_url>\t<target_revision>" on stdout. If gitSource=local
+# but the local tree isn't a git repo (older .deb without Phase 1 of
+# RFC 0006), falls back to remote and prints a warning so operators
+# notice. An unknown gitSource value is a hard error — host-config.py
+# is supposed to validate; if it didn't, fail loud rather than guess.
+_resolve_git_source() {
+  local hc="$1"
+  local git_source repo_url target_rev
+  if [ -r "$hc" ]; then
+    git_source="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-git-source 2>/dev/null \
+                  || printf 'local')"
+  else
+    git_source="local"
+  fi
+  case "$git_source" in
+    local)
+      repo_url="file://${LOCAL_GIT_TREE}"
+      if [ -d "${LOCAL_GIT_TREE}/.git" ]; then
+        target_rev="$(git -C "${LOCAL_GIT_TREE}" rev-parse HEAD 2>/dev/null \
+                       || printf 'main')"
+      else
+        # Warnings go to stderr — _resolve_git_source's stdout is the
+        # captured "<repo>\t<rev>" payload, must not be polluted.
+        info "warning: ${LOCAL_GIT_TREE}/.git missing — gitSource=local needs a git-initialized .deb" >&2
+        info "warning: falling back to repoURL=$DEFAULT_REPO_URL targetRevision=main" >&2
+        repo_url="$DEFAULT_REPO_URL"
+        target_rev="main"
+      fi
+      ;;
+    remote)
+      repo_url="$DEFAULT_REPO_URL"
+      if [ -r "$hc" ]; then
+        target_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null \
+                       || printf '%s' "$DEFAULT_TARGET_REVISION")"
+      else
+        target_rev="$DEFAULT_TARGET_REVISION"
+      fi
+      [ -z "$target_rev" ] && target_rev="$DEFAULT_TARGET_REVISION"
+      ;;
+    *)
+      fail "unknown gitSource=$git_source — expected 'local' or 'remote'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\t%s' "$repo_url" "$target_rev"
+}
 
 _rendered_app_path() {
   local stack="${1:?stack required}"
@@ -3696,18 +3825,24 @@ gitops() {
     fail "$kc not readable — phase 3 (cluster) should have written it"; return
   fi
 
-  # Resolve targetRevision: --host-config wins, then explicit override
-  # via DEFAULT_TARGET_REVISION env, then 'main'.
+  # Resolve (repoURL, targetRevision) once for this gitops run via
+  # _resolve_git_source — driven by host-config's gitSource: field
+  # (RFC 0006). The same pair is reused across every enabled stack.
   local hc="$HOST_CONFIG_FILE"
   if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
     hc="$HOST_CONFIG_INPUT"
   fi
-  local target_rev="$DEFAULT_TARGET_REVISION"
-  if [ -r "$hc" ]; then
-    if hc_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null)"; then
-      target_rev="$hc_rev"
-    fi
+  local git_pair repo_url target_rev
+  if ! git_pair="$(_resolve_git_source "$hc")"; then
+    return
   fi
+  repo_url="$(printf '%s' "$git_pair" | cut -f1)"
+  target_rev="$(printf '%s' "$git_pair" | cut -f2)"
+  if [ -z "$repo_url" ] || [ -z "$target_rev" ]; then
+    fail "could not resolve repoURL/targetRevision from host-config (gitSource)"
+    return
+  fi
+  info "gitops source: repoURL=$repo_url  targetRevision=$target_rev"
 
   # Enabled stacks (one per line); per-stack selfHeal (resolved against
   # production: + --production override).
@@ -3757,8 +3892,9 @@ PY
       [ -z "$stack" ] && continue
       local sh
       sh="$(_resolve_selfheal_for_stack "$stack")"
-      info "DRY-RUN    render template for stack=$stack  selfHeal=$sh"
+      info "DRY-RUN    render template for stack=$stack  repoURL=$repo_url  targetRevision=$target_rev  selfHeal=$sh"
       info "DRY-RUN    kubectl apply -f $(_rendered_app_path "$stack")"
+      info "DRY-RUN    kubectl -n argocd annotate application/phantomos-$ROBOT-$stack argocd.argoproj.io/refresh=hard --overwrite"
     done <<< "$enabled_stacks"
     info "DRY-RUN  wait for each phantomos-$ROBOT-<stack> Synced + Healthy"
     return
@@ -3844,20 +3980,33 @@ PY
     [ -z "$stack" ] && continue
     local sh
     sh="$(_resolve_selfheal_for_stack "$stack")"
-    if ! _gitops_render_app "$stack" "$DEFAULT_REPO_URL" "$target_rev" "$sh"; then
+    if ! _gitops_render_app "$stack" "$repo_url" "$target_rev" "$sh"; then
       return
     fi
-    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  branch=$target_rev  selfHeal=$sh"
+    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  revision=$target_rev  selfHeal=$sh"
 
     if ! "${KUBECTL[@]}" apply -f "$(_rendered_app_path "$stack")" >/dev/null; then
       fail "kubectl apply -f $(_rendered_app_path "$stack")"
       return
     fi
     pass "phantomos-$ROBOT-$stack applied"
-    # Force ArgoCD to reconcile immediately instead of waiting for the
-    # next 3-min refresh tick.
-    "${KUBECTL[@]}" -n argocd annotate app "phantomos-$ROBOT-$stack" \
-      argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+  done <<< "$enabled_stacks"
+
+  # Post-render Argo refresh — best-effort. Forces argocd-application-
+  # controller to re-clone the repoURL and re-render manifests RIGHT NOW
+  # instead of waiting up to 3 minutes for its next poll. Especially
+  # important after a `dpkg -i` advances /opt/.../HEAD: without this,
+  # operators see "I just installed a new .deb but the cluster is still
+  # on the old manifests" for several minutes. Failures here are not
+  # fatal — Argo will eventually re-evaluate on its own.
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local app="phantomos-${ROBOT}-${stack}"
+    if "${KUBECTL[@]}" -n argocd get application "$app" >/dev/null 2>&1; then
+      "${KUBECTL[@]}" -n argocd annotate "application/$app" \
+        argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+      info "triggered hard refresh on $app"
+    fi
   done <<< "$enabled_stacks"
 
   # No Synced wait — phases 10 (image-overrides) and 11 (deployments)
@@ -4618,6 +4767,7 @@ host_config        ; guard
 seed_pull_secrets  ; guard
 operator_ui_config ; guard
 locomotion_config  ; guard
+ensure_cpu_isolation_block ; guard
 ecat_interface     ; guard
 cpu_isolation      ; guard
 log_management     ; guard

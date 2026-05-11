@@ -100,8 +100,8 @@ rsync -a \
   --exclude='.gitignore' \
   --exclude='dist/' \
   --exclude='packaging/' \
-  --exclude='docs/plans/' \
-  --exclude='docs/research/' \
+  --exclude='/docs/internal/' \
+  --exclude='/fix*.sh' \
   --exclude='.claude/' \
   --exclude='.obsidian/' \
   --exclude='__pycache__/' \
@@ -120,6 +120,22 @@ find "$STAGE_DIR$INSTALL_PREFIX/scripts" \
 # the working tree's 775 group-writable dir mode.
 find "$STAGE_DIR$INSTALL_PREFIX" -type d -exec chmod 0755 {} +
 find "$STAGE_DIR$INSTALL_PREFIX" -type f ! -perm -u+x -exec chmod 0644 {} +
+
+# ---- embed git repo inside staged tree ---------------------------------
+# RFC 0006: the installed tree at /opt/Phantom-OS-KubernetesOptions is a
+# real git repo so ArgoCD can clone it via file:///opt/... . Init must
+# run AFTER all rsync/install/permission steps so the single commit
+# captures the final tree exactly as it'll land on the robot.
+echo "==> initializing git repo inside staged tree"
+INSTALL_TREE="$STAGE_DIR$INSTALL_PREFIX"
+git -C "$INSTALL_TREE" init -q -b main
+git -C "$INSTALL_TREE" config user.email "phantomos@foundation.bot"
+git -C "$INSTALL_TREE" config user.name "phantomos build"
+git -C "$INSTALL_TREE" add -A
+git -C "$INSTALL_TREE" commit -q -m "phantomos-k0s ${VERSION}"
+git -C "$INSTALL_TREE" gc --aggressive --prune=now -q
+PACKED_GIT_SIZE=$(du -sh "$INSTALL_TREE/.git" | awk '{print $1}')
+echo "    .git/ size after gc: $PACKED_GIT_SIZE"
 
 # ---- control + maintainer scripts --------------------------------------
 

@@ -66,7 +66,7 @@ uninstall behavior).
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — the design doc.
+- [`docs/internal/architecture.md`](docs/internal/architecture.md) — the design doc.
   Three-layer model (repo / host / cluster), `host-config.yaml` schema,
   bootstrap phases, per-stack Application model, render flow, per-host
   injection mechanics, migration history, how to extend.
@@ -75,7 +75,7 @@ uninstall behavior).
   troubleshooting by symptom.
 - [`docs/rfcs/0001-fleet-control-plane.md`](docs/rfcs/0001-fleet-control-plane.md) —
   long-term direction: control-plane API queried by hardware serial.
-- [`docs/positronic-design.md`](docs/positronic-design.md) — positronic-control
+- [`docs/internal/positronic-design.md`](docs/internal/positronic-design.md) — positronic-control
   pod-level design (GPU runtime, hostNetwork, image flow).
 
 ## Topology in one diagram
@@ -170,4 +170,4 @@ docs/                     this directory
 
 For everything else — bringing up a robot, day-2 ops, troubleshooting —
 see [`docs/operations.md`](docs/operations.md). For the design — see
-[`docs/architecture.md`](docs/architecture.md).
+[`docs/internal/architecture.md`](docs/internal/architecture.md).

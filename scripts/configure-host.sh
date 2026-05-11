@@ -372,6 +372,9 @@ declare -a seed_api_mount_containers=()
 seed_core_selfheal=""
 seed_operator_enabled=""
 seed_operator_selfheal=""
+# RFC 0006 — gitSource toggle ("local" or "remote"). Empty = not in seed,
+# wizard defaults to "local" on a fresh run.
+seed_git_source=""
 
 if [ -n "$seed_path" ]; then
   seed_robot="$(python3 "$HELPER" "$seed_path" get robot 2>/dev/null || true)"
@@ -380,11 +383,18 @@ if [ -n "$seed_path" ]; then
   seed_production="$(python3 "$HELPER" "$seed_path" get production 2>/dev/null || true)"
 
   # Per-stack seed values (any of these may be empty).
+  # Also harvests top-level RFC 0006 `gitSource` via a synthetic
+  # `top\tgitSource\t\t<value>` row. Synthetic rows use kind=top so
+  # they share the same TSV stream without colliding with stack rows.
+  # Note: bash read with IFS=$'\t' collapses runs of tabs, so the
+  # `field` slot is intentionally a single non-empty token (`_`)
+  # rather than empty — otherwise read would shift `val` into `field`.
   while IFS=$'\t' read -r kind name field val; do
     case "$kind:$name:$field" in
       stack:core:selfHeal)         seed_core_selfheal="$val" ;;
       stack:operator:enabled)      seed_operator_enabled="$val" ;;
       stack:operator:selfHeal)     seed_operator_selfheal="$val" ;;
+      top:gitSource:_)             seed_git_source="$val" ;;
     esac
   done < <(python3 - "$seed_path" <<'PY' 2>/dev/null
 import sys, yaml
@@ -401,6 +411,11 @@ for name in ("core", "operator"):
         print(f"stack\t{name}\tenabled\t{'true' if spec['enabled'] else 'false'}")
     if "selfHeal" in spec:
         print(f"stack\t{name}\tselfHeal\t{'true' if spec['selfHeal'] else 'false'}")
+git_source = cfg.get("gitSource") if isinstance(cfg, dict) else None
+if git_source:
+    # `_` placeholder in the field slot — bash read collapses empty
+    # tab-separated columns, so a non-empty token is required here.
+    print(f"top\tgitSource\t_\t{git_source}")
 PY
 )
   # Pull the images: block. The schema is now container-keyed
@@ -512,6 +527,13 @@ validate_url() {
   esac
 }
 
+validate_git_source() {
+  case "$1" in
+    local|remote) return 0 ;;
+    *) err "must be 'local' or 'remote' (got: $1)"; return 1 ;;
+  esac
+}
+
 validate_abs_path() {
   local v="$1"
   if [ -z "$v" ]; then err "path required"; return 1; fi
@@ -604,15 +626,39 @@ if [ -z "$ai_pc_url" ]; then
   ok "aiPcUrl = $ai_pc_url"
 fi
 
+# --- gitSource (RFC 0006) ---
+heading "Argo source of truth"
+hint "Track manifests from the local /opt/Phantom-OS-KubernetesOptions tree"
+hint "(default — packaged with the .deb, atomic + offline-friendly), or"
+hint "from a remote git URL like GitHub (legacy behavior, useful for fleet"
+hint "ops who push hot-fixes by git push instead of rebuilding the .deb)."
+hint "Legacy host-configs without a gitSource: field are treated as 'local'"
+hint "on this run; type 'remote' explicitly to keep tracking GitHub."
+example "local                  # default; tracks /opt/.../.git/ via file://"
+example "remote                 # tracks https://github.com/... via Argo's repo-server"
+
+# Default to local on a fresh wizard run; preserve seed value on re-run.
+git_source_default="${seed_git_source:-local}"
+git_source="$(ask "gitSource" "$git_source_default" "Either 'local' or 'remote'." validate_git_source)"
+ok "gitSource = $git_source"
+
 # --- targetRevision ---
-heading "ArgoCD target revision"
-hint "Branch / tag / SHA the per-host ArgoCD Application should track."
-hint "'main' is the default for production robots; use a feature branch when"
-hint "testing changes before merge."
-example "main, feat/mk09-positronic-0.2.44-production"
-target_default="${seed_target_rev:-main}"
-target_revision="$(ask "targetRevision" "$target_default" "Any valid git ref reachable from the configured repo URL.")"
-ok "targetRevision = $target_revision"
+# Only relevant when gitSource=remote. With local-git, bootstrap derives
+# the revision from `git -C /opt/... rev-parse HEAD`, so prompting here
+# would only let the operator pick a revision the local repo doesn't have.
+if [ "$git_source" = "remote" ]; then
+  heading "ArgoCD target revision"
+  hint "Branch / tag / SHA the per-host ArgoCD Application should track."
+  hint "'main' is the default for production robots; use a feature branch when"
+  hint "testing changes before merge."
+  example "main, feat/mk09-positronic-0.2.44-production"
+  target_default="${seed_target_rev:-main}"
+  target_revision="$(ask "targetRevision" "$target_default" "Any valid git ref reachable from the configured repo URL.")"
+  ok "targetRevision = $target_revision"
+else
+  hint "(targetRevision skipped — gitSource=local; bootstrap will pin to /opt/.../.git/ HEAD)"
+  target_revision=""
+fi
 
 # --- production / selfHeal ---
 heading "production mode (ArgoCD selfHeal)"
@@ -705,27 +751,72 @@ hint "supplies the full image ref (repo:tag) it should run on this robot."
 hint "Skip this section to leave manifest defaults in effect."
 
 inject_images=1
+
+# Peek at the bundle manifest so the seed preview can show what the
+# bundle would fill in for each canonical row. host_deb_arch isn't
+# computed yet at this point in the wizard (it's resolved later when
+# building canonical defaults), so derive it locally from dpkg here.
+# Falls back to empty/no-op when the bundle isn't installed.
+_bundle_peek_tsv=""
+if command -v dpkg >/dev/null 2>&1; then
+  _peek_arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  if [ -n "$_peek_arch" ]; then
+    _bundle_peek_tsv="$(_read_bundle_manifest "$BUNDLE_MANIFEST_PATH" "$_peek_arch" 2>/dev/null \
+                         | grep -v '^__BUILDER_VERSION__' || true)"
+  fi
+fi
+
+# bundle_ref_for <container-name> — echoes the bundle's ref (or empty).
+bundle_ref_for() {
+  local target="$1" line cname ref
+  while IFS=$'\t' read -r cname ref; do
+    [ "$cname" = "$target" ] && { printf '%s' "$ref"; return; }
+  done <<< "$_bundle_peek_tsv"
+}
+
 if [ -z "$seed_images_yaml" ]; then
+  # No seed — show bundle defaults if present so the operator sees
+  # what's about to land before answering.
+  if [ -n "$_bundle_peek_tsv" ]; then
+    hint "Defaults from bundle (auto-images will use these):"
+    while IFS=$'\t' read -r cname ref; do
+      [ -z "$cname" ] && continue
+      printf '%s    %s -> %s%s\n' "$C_DIM" "$cname" "$ref" "$C_RESET" >&2
+    done <<< "$_bundle_peek_tsv"
+  fi
   if ! confirm "Add image overrides? (recommended for production robots)" "y"; then
     inject_images=0
   fi
 else
   # Pre-filter the seed display: any row whose tag is a wizard
-  # placeholder (REPLACE-WITH-*) is rendered as `<cleared placeholder>`
-  # in the display so the operator isn't told the wizard will offer
-  # a default that won't actually appear at the prompt. The actual
-  # img_refs[] cleanup happens further down (single source of truth);
-  # this is purely a display patch.
-  hint "Defaults from seed:"
+  # placeholder (REPLACE-WITH-*) is rendered with what the bundle
+  # would fill in. The actual img_refs[] cleanup + bundle resolution
+  # happens further down (single source of truth); this is the
+  # operator preview.
+  hint "Defaults from seed (and what the bundle would override):"
   while IFS=$'\t' read -r cname img; do
     [ -z "$cname" ] && continue
     case "${img##*:}" in
       REPLACE-WITH-*)
-        printf '%s    %s -> <cleared placeholder, will re-prompt>%s\n' \
-          "$C_DIM" "$cname" "$C_RESET" >&2
+        _bref="$(bundle_ref_for "$cname")"
+        if [ -n "$_bref" ]; then
+          printf '%s    %s -> %s (bundle override; seed placeholder cleared)%s\n' \
+            "$C_DIM" "$cname" "$_bref" "$C_RESET" >&2
+        else
+          printf '%s    %s -> <cleared placeholder; no bundle entry, will re-prompt>%s\n' \
+            "$C_DIM" "$cname" "$C_RESET" >&2
+        fi
         ;;
       *)
-        printf '%s    %s -> %s%s\n' "$C_DIM" "$cname" "$img" "$C_RESET" >&2
+        # Seed has a real value — it wins. Show what bundle has too if
+        # different, so the operator knows there's a divergence.
+        _bref="$(bundle_ref_for "$cname")"
+        if [ -n "$_bref" ] && [ "$_bref" != "$img" ]; then
+          printf '%s    %s -> %s  (seed wins; bundle has %s)%s\n' \
+            "$C_DIM" "$cname" "$img" "$_bref" "$C_RESET" >&2
+        else
+          printf '%s    %s -> %s%s\n' "$C_DIM" "$cname" "$img" "$C_RESET" >&2
+        fi
         ;;
     esac
   done <<< "$seed_images_yaml"
@@ -1264,7 +1355,10 @@ tmp="$(mktemp)"
   printf '# bootstrap-robot.sh to apply.\n'
   printf 'robot: %s\n' "$robot"
   printf 'aiPcUrl: %s\n' "$ai_pc_url"
-  printf 'targetRevision: %s\n' "$target_revision"
+  printf 'gitSource: %s\n' "$git_source"
+  if [ "$git_source" = "remote" ] && [ -n "$target_revision" ]; then
+    printf 'targetRevision: %s\n' "$target_revision"
+  fi
   printf 'production: %s\n' "$production"
 
   # Stacks block — emit only fields the operator explicitly set, so
