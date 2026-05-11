@@ -218,6 +218,182 @@ ArgoCD picks up the new commit SHA within seconds.
 
 ---
 
+## About the dma-ethercat realtime service
+
+Bootstrap's phase 9 installs **dma-ethercat**, the realtime motor
+control service the robot needs to talk to its EtherCAT slaves (motor
+drives, IMUs, sensors). Skip this section if you set
+`cpuIsolation.enabled: false` in host-config — the whole subsystem is
+opt-out for dev hosts without EtherCAT hardware.
+
+### What it is
+
+A native binary + systemd service that runs on the host (not inside a
+Kubernetes pod). Uses the SOEM EtherCAT master library to drive the
+EtherCAT bus from userspace at hard-realtime priority. Reads a JSON
+configuration file describing the slave topology and motor parameters
+for the specific robot hardware (e.g. `phantom-0009.json` for the
+mk09 hardware revision).
+
+Lives at:
+
+- `/usr/sbin/dma_main` — the binary.
+- `dma-ethercat.service` — the systemd unit (enabled + active when healthy).
+- `/etc/dma/` — config tree (JSON files describing the EtherCAT bus topology).
+- `/etc/dma/dma-ethercat.env` — runtime env file (`DMA_CONFIG`, `INTERFACE`, `DMA_CPU_AFFINITY`, `DMA_RT_CPU`).
+- `/usr/local/share/dma/` — vendored binaries + the source `.deb`.
+
+Bootstrap runs it on the host (not in a pod) because the EtherCAT
+master needs:
+- Direct raw-socket access to the NIC.
+- Hard-realtime kernel scheduling (the `isolcpus=` cores from
+  phase 8's CPU isolation).
+- IRQ pinning on the NIC's interrupt to a specific core.
+
+Kubernetes pods running with `runtimeClassName: nvidia` or even
+privileged would still suffer from CFS scheduler latency that's
+incompatible with EtherCAT's microsecond-scale timing budget.
+
+### How bootstrap installs it (phase 9)
+
+The install is a two-stage dance — a one-shot Kubernetes Job extracts
+a `.deb` onto the host, then the bootstrap script `dpkg -i`s it. This
+keeps the build artifact (the `.deb`) inside a container image
+(easy to ship + version-pin via host-config's `images.dma-ethercat`)
+without requiring all the host-side install steps to run inside a
+container.
+
+```
+host-config.yaml
+  images.dma-ethercat: foundationbot/dma-ethercat:main-latest
+       │
+       ▼
+manifests/installers/dma-ethercat/base/job.yaml
+  Job in phantom ns:
+    image: foundationbot/dma-ethercat:<tag>   ← sed-substituted by bootstrap
+    container's only job: cp /usr/local/share/dma/deb/dma-ethercat-*.deb
+                          → hostPath /var/lib/dma-ethercat-installer/
+                          touch .ready sentinel
+                          exit 0
+       │ (Job reaches Complete, pod reaps in 30s via TTL controller)
+       ▼
+bootstrap-robot.sh phase 9 (host side, as root):
+  1. wait for .ready
+  2. dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb
+  3. write /etc/dma/dma-ethercat.env from host-config:
+       DMA_CONFIG=<dmaEthercat.configPath, resolved against /etc/dma/>
+       INTERFACE=<cpuIsolation.nic.iface>           (e.g. ecat1)
+       DMA_CPU_AFFINITY=<isolcpus partition>        (e.g. 13-15)
+       DMA_RT_CPU=<cpuIsolation.dmaRtCpu>           (e.g. 13)
+  4. systemctl enable --now dma-ethercat.service
+```
+
+Bootstrap is intentionally strict here — phase 9 is `gates phase 10`,
+meaning if the realtime service can't come up the GitOps phase doesn't
+run either. The robot is non-functional without working motor
+control; deploying ArgoCD on top of a broken realtime stack just
+hides the failure.
+
+Pass `--skip-ethercat-install` to bypass phase 9 on a re-run. The
+flag preserves the previously-installed service if any.
+
+### Configuration
+
+Three host-config fields drive the install:
+
+```yaml
+cpuIsolation:
+  nic:
+    iface: ecat1                   # the NIC after phase 7 renames it
+  dmaRtCpu: 13                     # CPU pinned to the SOEM cyclic loop
+  partitions:
+    - name: ecat
+      cpus: 13-15                  # isolcpus= range; DMA_CPU_AFFINITY
+
+images:
+  dma-ethercat:
+    image: foundationbot/dma-ethercat:main-latest          # amd64
+    # foundationbot/dma-ethercat:main-latest-aarch64       # arm64
+
+dmaEthercat:
+  configPath: phantom-0009.json    # the JSON describing slave topology
+```
+
+`dmaEthercat.configPath` is resolved against the .deb's vendored
+`/etc/dma/` tree (or `/usr/share/dma-ethercat/config/` depending on
+the .deb version) — the wizard's CPU-isolation prompt picks a JSON
+filename from there interactively.
+
+### Day-2 operations
+
+**Check status:**
+
+```bash
+sudo systemctl status dma-ethercat.service
+sudo journalctl -u dma-ethercat.service -f          # follow logs
+```
+
+**Restart after editing a JSON config under `/etc/dma/`:**
+
+```bash
+sudo systemctl restart dma-ethercat.service
+```
+
+The service reads `/etc/dma/dma-ethercat.env` for the env vars and
+then loads the JSON named in `DMA_CONFIG`. Re-reads on restart.
+
+**Re-run the installer (e.g. after a `.deb` update on DockerHub):**
+
+```bash
+# Update the tag in host-config
+sudo vim /etc/phantomos/host-config.yaml      # bump images.dma-ethercat.image
+
+# Re-run phase 9 only
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
+  --install-dma-ethercat
+```
+
+The re-install path defaults to also running the **uninstall** pre-phase
+first, which WIPES `/etc/dma/` and re-creates it from the new `.deb`.
+If you have hand-edited JSON configs you want to preserve, pass
+`--skip-ethercat-uninstall` to skip the wipe.
+
+**Switch to a different robot hardware config:**
+
+```bash
+sudo vim /etc/phantomos/host-config.yaml      # change dmaEthercat.configPath
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
+  --install-dma-ethercat --skip-ethercat-uninstall
+# the env file gets rewritten with the new DMA_CONFIG; service restarts
+```
+
+### Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| Phase 9 Job pod `Pending` for 5+ min (`untolerated taint`) | Node has `disk-pressure` taint. Run `post-install-cleanup.sh` to free 15-18 GB. |
+| Phase 9 Job pod `ImagePullBackOff` | Bundle has wrong-arch tag, OR containerd doesn't have the image. Check `k0s ctr -n k8s.io images list \| grep dma-ethercat` matches host-config's `images.dma-ethercat.image`. |
+| Phase 9 succeeds but `systemctl status dma-ethercat` shows failed | NIC rename didn't happen (phase 7) — `INTERFACE=ecat1` in the env file but no such interface. Run `bootstrap-robot.sh --ecat-interface`. |
+| `dma_main: bus error / no slaves found` in journal | EtherCAT bus is unplugged, slaves are unpowered, or the wrong NIC was picked. Verify with `sudo dma_main --scan -i ecat1` (lists discovered slaves). |
+| Phase 8 says `Interface ecat1 not found` | Phase 7 didn't run or didn't pick a NIC. Re-run wizard's cpu-isolation prompt to set `nic.selector`, OR (dev host) set `cpuIsolation.enabled: false`. |
+| Bootstrap halts at phase 9 — "ANY failure halts bootstrap" | Intentional — realtime stack must be healthy before GitOps. Resolve the underlying issue (one of the above), then re-run bootstrap. Pass `--skip-ethercat-install` only if you intentionally want a no-realtime cluster. |
+
+### When to disable
+
+On a dev host without EtherCAT hardware (e.g. a laptop running the
+stack for UI/training-data work), set in host-config:
+
+```yaml
+cpuIsolation:
+  enabled: false
+```
+
+Phases 7, 8, and 9 all skip cleanly. ArgoCD + all the cluster
+workloads come up normally. dma-ethercat.service is never installed
+and never tries to start.
+
+---
+
 ## Re-running bootstrap
 
 `bootstrap-robot.sh` is idempotent — phases that already completed will
