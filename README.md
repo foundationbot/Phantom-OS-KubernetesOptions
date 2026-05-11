@@ -8,20 +8,65 @@ under `/etc/phantomos/`; the repo itself carries no per-robot data.
 
 ## Quick start
 
-On the robot:
+On the robot, drop the repo at `/opt/Phantom-OS-KubernetesOptions` —
+either by cloning or by installing the prebuilt `.deb` — then run the
+two scripts:
 
 ```bash
+# option A: git clone (needs network access to github)
 git clone https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git \
   /opt/Phantom-OS-KubernetesOptions
-cd /opt/Phantom-OS-KubernetesOptions
 
+# option B: deb package (built from this repo, see "Building the deb" below)
+sudo apt install ./phantomos-k0s_<ver>_all.deb
+
+cd /opt/Phantom-OS-KubernetesOptions
 sudo bash scripts/configure-host.sh    # interactive wizard, writes /etc/phantomos/host-config.yaml
 sudo bash scripts/bootstrap-robot.sh   # cluster bringup + ArgoCD + apply config
 ```
 
+## Building the deb
+
+The repo ships a `.deb` builder so a freshly imaged robot can be
+provisioned without first cloning the repo over the network. It only
+packages the repo tree under `/opt/Phantom-OS-KubernetesOptions`; k0s,
+kubectl, helm and terraform are still downloaded by
+`bootstrap-robot.sh` at run time.
+
+From the repo root, on a Debian/Ubuntu build host:
+
+```bash
+sudo apt install dpkg rsync                 # build prerequisites
+scripts/build-deb.sh                         # writes dist/phantomos-k0s_<ver>_all.deb
+```
+
+Override the version or maintainer if needed:
+
+```bash
+VERSION=0.2.0 DEB_MAINTAINER="Ops <ops@foundation.bot>" scripts/build-deb.sh
+```
+
+When `VERSION` is unset, it is derived from `version.txt` at the repo
+root: base version (e.g. `0.1.0`) plus `+<utcdate>.g<sha>` for
+traceability when built from a git checkout, plus `+dirty` if the
+working tree has uncommitted changes. For a clean release build, pass
+`VERSION=$(cat version.txt)` to suppress the suffix.
+
+Inspect or install the produced package:
+
+```bash
+dpkg -I dist/phantomos-k0s_<ver>_all.deb     # control metadata
+dpkg -c dist/phantomos-k0s_<ver>_all.deb     # file listing
+sudo apt install ./dist/phantomos-k0s_<ver>_all.deb
+```
+
+See [`packaging/deb/README.md`](packaging/deb/README.md) for the full
+packaging notes (what's bundled vs. fetched at runtime, depends list,
+uninstall behavior).
+
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — the design doc.
+- [`docs/internal/architecture.md`](docs/internal/architecture.md) — the design doc.
   Three-layer model (repo / host / cluster), `host-config.yaml` schema,
   bootstrap phases, per-stack Application model, render flow, per-host
   injection mechanics, migration history, how to extend.
@@ -30,7 +75,7 @@ sudo bash scripts/bootstrap-robot.sh   # cluster bringup + ArgoCD + apply config
   troubleshooting by symptom.
 - [`docs/rfcs/0001-fleet-control-plane.md`](docs/rfcs/0001-fleet-control-plane.md) —
   long-term direction: control-plane API queried by hardware serial.
-- [`docs/positronic-design.md`](docs/positronic-design.md) — positronic-control
+- [`docs/internal/positronic-design.md`](docs/internal/positronic-design.md) — positronic-control
   pod-level design (GPU runtime, hostNetwork, image flow).
 
 ## Topology in one diagram
@@ -125,4 +170,4 @@ docs/                     this directory
 
 For everything else — bringing up a robot, day-2 ops, troubleshooting —
 see [`docs/operations.md`](docs/operations.md). For the design — see
-[`docs/architecture.md`](docs/architecture.md).
+[`docs/internal/architecture.md`](docs/internal/architecture.md).

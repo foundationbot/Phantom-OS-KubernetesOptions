@@ -1,0 +1,36 @@
+# Extra image refs to bundle into phantomos-k0s-images*.deb beyond
+# what build-images-deb.sh's manifests/ scan picks up. One ref per
+# line; blank lines and `#` comments are OK.
+#
+# Two ways to vary by architecture:
+#
+#   1. {ARCH} / {KERNEL_ARCH} template substitution
+#      {ARCH}        -> debian arch:    amd64 / arm64
+#      {KERNEL_ARCH} -> uname -m form:  amd64 / aarch64
+#      Use this when one tag template covers every arch your CI
+#      publishes for the same image.
+#        foundationbot/some-image:main-latest-{KERNEL_ARCH}
+#
+#   2. `# arch:<csv>` per-line filter
+#      Use this when each arch has a DIFFERENT tag (e.g. CI doesn't
+#      publish a -amd64 build under the same naming convention).
+#        foundationbot/foo:tag-arm64-only      # arch:arm64
+#        foundationbot/foo:tag-amd64-only      # arch:amd64
+#        foundationbot/foo:tag-shared          # arch:arm64,amd64
+#
+# Lines without `# arch:` apply to ALL arches.
+
+# dma-ethercat installer image. The installer Job manifest at
+# manifests/installers/dma-ethercat/base/job.yaml carries
+# `foundationbot/dma-ethercat:PLACEHOLDER`; the real tag is operator-
+# supplied via host-config.yaml's `images.dma-ethercat.image`.
+# Bundling it here means phase 9 of bootstrap-robot.sh's installer
+# Job pulls from local containerd (already imported by k0s) instead
+# of DockerHub — works on robots without dockerhub-creds.
+#
+# Per-arch lines because arm64 publishes as `-aarch64` (uname-m form)
+# but amd64 publishes as `-amd64` (debian-arch form), and CI may
+# publish them under entirely different tags. Edit the amd64 line
+# below if your fleet's CI uses a different tag for x86 robots.
+foundationbot/dma-ethercat:main-latest-aarch64    # arch:arm64
+foundationbot/dma-ethercat:main-latest            # arch:amd64

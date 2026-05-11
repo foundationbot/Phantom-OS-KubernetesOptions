@@ -2,7 +2,7 @@
 
 `manage_cpusets.sh`, the `lib/` shell modules, and `CPUSETS.md` in this
 directory are a fork of upstream DMA.ethercat. The runbook at
-[../../docs/cpu-isolation.md](../../docs/cpu-isolation.md) is a fork of
+[../../docs/internal/cpu-isolation.md](../../docs/internal/cpu-isolation.md) is a fork of
 upstream `docs/CPUSETS_SETUP.md`.
 
 | | |

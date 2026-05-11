@@ -21,7 +21,7 @@ spec:
       containers:
         - name: viewer
           image: foundationbot/dma-video:main
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["python3", "src/video_viewer.py"]
           args: ["--cameras", "0,1,2,3,4,5", "--port", "9299"]
           volumeMounts:

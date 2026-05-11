@@ -18,7 +18,7 @@ spec:
       containers:
         - name: eg-server
           image: foundationbot/nimbus.s3_dynamo_athena:main
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
           env:

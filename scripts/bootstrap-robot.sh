@@ -42,13 +42,13 @@
 #                        rules. Driven by cpuIsolation.nic.selector
 #                        (mac/pci/driver+index); falls back to the
 #                        vendored interactive picker on a TTY.
-#                        See docs/cpu-isolation.md.
+#                        See docs/internal/cpu-isolation.md.
 #   --cpu-isolation      activate cpuset partitions, install cpusets.service,
 #                        write systemd CPUAffinity drop-in, optionally pin
 #                        EtherCAT NIC IRQs and migrate kernel cmdline. Reads
 #                        host-config.yaml's cpuIsolation: block; no-op when
 #                        cpuIsolation.enabled is unset/false.
-#                        See docs/cpu-isolation.md.
+#                        See docs/internal/cpu-isolation.md.
 #   --log-management     install journald + logrotate drop-ins from
 #                        host-config.yaml's logManagement: block. Caps
 #                        journald disk usage and forces rsyslog logrotate
@@ -150,15 +150,14 @@
 #     purge workload pods        (--skip-purge-pods)
 #     stop docker containers     (--skip-docker-stop)
 #     stop system services       (--skip-stop-services)
-#   pre-phases (default OFF, opt in):
-#     uninstall dma-ethercat     (--uninstall-ethercat)
-#                                Wipes /etc/dma/ via the .deb's
-#                                dma-ethercat-uninstall script. Operator
+#     uninstall dma-ethercat     (--skip-ethercat-uninstall)
+#                                Tears down dma-ethercat.service and
+#                                runs the .deb's dma-ethercat-uninstall
+#                                script, which WIPES /etc/dma/ — operator
 #                                files placed under /etc/dma/ (e.g. a
 #                                customized JSON config) are removed.
-#                                Use only when you intend a clean
-#                                reinstall. Routine re-bootstraps now
-#                                preserve /etc/dma/ contents.
+#                                Pass --skip-ethercat-uninstall to keep
+#                                the existing /etc/dma/ tree.
 #
 #    1. preflight    OS / arch / kernel / disk / sudo / port collisions
 #    2. deps         apt: docker.io, skopeo, python3, curl, jq, git,
@@ -199,7 +198,7 @@
 #                    host-config.yaml; falls back to the vendored
 #                    interactive picker on a TTY. Idempotent — fast-paths
 #                    when `ip link show <iface>` already succeeds.
-#                    See docs/cpu-isolation.md.
+#                    See docs/internal/cpu-isolation.md.
 #    8. cpu-isolation (gates phase 9)
 #                    activate cgroup v2 cpuset partitions; install
 #                    cpusets.service so they reactivate at boot
@@ -209,16 +208,17 @@
 #                    optionally migrate kernel cmdline (--migrateCmdline).
 #                    Default-on: missing cpuIsolation: block prompts on
 #                    a TTY and persists answers. enabled: false skips.
-#                    See docs/cpu-isolation.md.
+#                    See docs/internal/cpu-isolation.md.
 #    9. install dma-ethercat (gates phase 10)
-#                    render the bootstrap-managed installer Job from the
-#                    foundationbot/dma-ethercat tag in host-config images:,
-#                    apply, dpkg-i the .deb extracted to the host, then
-#                    write DMA_CONFIG / INTERFACE / DMA_CPU_AFFINITY /
-#                    DMA_RT_CPU into /etc/dma/dma-ethercat.env (preserving
-#                    operator edits) and `systemctl enable --now
-#                    dma-ethercat.service`. ANY failure halts bootstrap;
-#                    --skip-ethercat-install bypasses.
+#                    Default-on. Pass --skip-ethercat-install to bypass.
+#                    Renders the bootstrap-managed installer Job from
+#                    the foundationbot/dma-ethercat tag in host-config
+#                    images:, applies, dpkg-i the .deb extracted to the
+#                    host, then writes DMA_CONFIG / INTERFACE /
+#                    DMA_CPU_AFFINITY / DMA_RT_CPU into
+#                    /etc/dma/dma-ethercat.env (preserving operator
+#                    edits) and `systemctl enable --now
+#                    dma-ethercat.service`. ANY failure halts bootstrap.
 #   10. gitops       cd terraform && terraform init && terraform apply
 #                    (installs ArgoCD via the official Helm chart). Then
 #                    render per-host Application CRs (one per enabled
@@ -265,7 +265,7 @@ DRY_RUN=0
 KEEP_GOING=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=1
+SKIP_ETHERCAT_UNINSTALL=0
 SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
@@ -300,10 +300,15 @@ SKIP_NVIDIA=0
 SKIP_PURGE_PODS=0
 SKIP_DOCKER_STOP=0
 SKIP_STOP_SERVICES=0
-SKIP_ETHERCAT_UNINSTALL=1
+SKIP_ETHERCAT_UNINSTALL=0
 SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
+# dma-ethercat install runs by default. Combined with the default-on
+# uninstall pre-phase, a routine bootstrap re-run gives you a clean
+# reinstall of the realtime stack. Pass --skip-ethercat-install to
+# bypass (e.g. when iterating on a non-ethercat phase and you want to
+# preserve the running realtime stack).
 SKIP_INSTALL_DMA_ETHERCAT=0
 SELECTED_PHASES=()
 
@@ -360,7 +365,7 @@ while [ $# -gt 0 ]; do
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
                          # Back-compat: now a no-op; uninstall is opt-in.
-                         SKIP_ETHERCAT_UNINSTALL=1; shift ;;
+                         SKIP_ETHERCAT_UNINSTALL=0; shift ;;
     --uninstall-ethercat)
                          # Explicitly run the dma-ethercat uninstaller. Wipes
                          # /etc/dma/ — operator-placed config files there
@@ -375,6 +380,12 @@ while [ $# -gt 0 ]; do
                          SKIP_LOG_MANAGEMENT=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
+    --with-ethercat-install|--enable-ethercat-install)
+                         # Opt into ethercat install in a full bootstrap
+                         # without entering selected-phases mode (which
+                         # --install-dma-ethercat does). Companion to the
+                         # default-off SKIP_INSTALL_DMA_ETHERCAT.
+                         SKIP_INSTALL_DMA_ETHERCAT=0; shift ;;
 
     # Inputs.
     --robot)             ROBOT="${2:-}"; shift 2 ;;
@@ -794,7 +805,7 @@ stop_existing_services() {
   done <<< "$matches"
 }
 
-# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT ON; --skip-ethercat-uninstall) -
 
 # Tear down the dma-ethercat realtime control service so phase 9's
 # install lands on a clean slate.
@@ -804,7 +815,7 @@ stop_existing_services() {
 # Each step is a no-op when already in the desired state.
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -955,18 +966,20 @@ EOF
   KUBECTL=()
 }
 
-# ---- pre-phase: uninstall dma-ethercat (DEFAULT OFF; --uninstall-ethercat) -
+# ---- pre-phase: uninstall dma-ethercat (DEFAULT ON; --skip-ethercat-uninstall) -
 
-# Tear down the dma-ethercat realtime control service. DEFAULT OFF — the
-# .deb's dma-ethercat-uninstall script wipes /etc/dma/, removing operator-
-# placed config JSONs. Routine bootstrap re-runs leave the realtime stack
-# (and /etc/dma/ contents) untouched; phase 9 just refreshes the env file
-# to point DMA_CONFIG at whatever host-config dmaEthercat.configPath
-# specifies. Pass --uninstall-ethercat when you actually want a clean
-# reinstall. Designed to run AFTER purge_docker and reset_cluster so the
-# pods that talk to ethercat are already gone — stopping the service
-# while pods are still pinging its socket can leave the kernel module in
-# a wedged state.
+# Tear down the dma-ethercat realtime control service. DEFAULT ON —
+# routine bootstrap re-runs tear down the realtime stack so a fresh
+# phase 9 install (when --with-ethercat-install is passed) lands on a
+# clean slate. WARNING: the .deb's dma-ethercat-uninstall script wipes
+# /etc/dma/, removing operator-placed config JSONs. If your robot has
+# hand-edited config you don't want to lose, pass --skip-ethercat-uninstall
+# to keep the existing /etc/dma/ tree untouched (phase 9 still refreshes
+# the env file to point DMA_CONFIG at whatever host-config
+# dmaEthercat.configPath specifies). Designed to run AFTER purge_docker
+# and reset_cluster so the pods that talk to ethercat are already gone
+# — stopping the service while pods are still pinging its socket can
+# leave the kernel module in a wedged state.
 #
 # Sequence (each step independent + idempotent):
 #   1. if no unit file installed                  -> skip whole phase
@@ -980,7 +993,7 @@ EOF
 #   5. if /usr/sbin/dma-ethercat-uninstall exists -> run it
 uninstall_ethercat() {
   if [ "$SKIP_ETHERCAT_UNINSTALL" = 1 ]; then
-    phase "pre-phase: uninstall dma-ethercat  (skipped — pass --uninstall-ethercat to opt in)"
+    phase "pre-phase: uninstall dma-ethercat  (skipped — --skip-ethercat-uninstall)"
     return
   fi
   phase "pre-phase: uninstall dma-ethercat"
@@ -1042,9 +1055,12 @@ uninstall_ethercat() {
     skip "disable  $svc  (state=${enabled:-unknown})"
   fi
 
-  # 3. run the uninstaller
+  # 3. run the uninstaller (optional — older installs may not ship one)
+  # If it's missing, stop+disable above is enough to neutralize the
+  # service for the duration of this bootstrap; the unit file stays on
+  # disk but is inert until something re-enables it.
   if [ ! -e "$uninstaller" ]; then
-    fail "$uninstaller not found — cannot complete uninstall"
+    skip "$uninstaller not present — relying on stop+disable above"
     return
   fi
   if [ ! -x "$uninstaller" ]; then
@@ -1108,7 +1124,20 @@ deps() {
   if [ "$SKIP_DEPS" = 1 ]; then phase "phase 2: deps  (skipped)"; return; fi
   phase "phase 2: deps"
 
-  apt_pkgs=(docker.io skopeo python3 curl jq git pciutils unzip)
+  apt_pkgs=(skopeo python3 curl jq git pciutils unzip)
+
+  # docker.io vs docker-ce: Ubuntu's `docker.io` and Docker Inc.'s
+  # `docker-ce` (which pulls `containerd.io`) are mutually exclusive —
+  # apt refuses to coinstall them because their containerd packages
+  # conflict. The bootstrap only needs the `docker` binary (for
+  # prime-registry-cache.sh's pull/tag/push), and either provider
+  # gives us that. So: detect docker by binary, not package name.
+  if command -v docker >/dev/null 2>&1; then
+    skip "docker already installed ($(command -v docker)) — not adding docker.io"
+  else
+    apt_pkgs+=(docker.io)
+  fi
+
   to_install=()
   for pkg in "${apt_pkgs[@]}"; do
     if dpkg -l "$pkg" 2>/dev/null | awk 'BEGIN{ok=1} /^ii/ {ok=0} END {exit ok}'; then
@@ -1121,10 +1150,45 @@ deps() {
   if [ "${#to_install[@]}" -gt 0 ]; then
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  apt-get install -y ${to_install[*]}"
-    elif apt-get update -qq && apt-get install -y "${to_install[@]}" >/dev/null; then
-      for p in "${to_install[@]}"; do pass "$p installed"; done
     else
-      fail "apt install failed for: ${to_install[*]}"
+      # apt-get install -y's exit code conflates two failure modes:
+      #   (a) the package we want couldn't be installed
+      #   (b) some unrelated package in the same dpkg transaction had a
+      #       postinst failure
+      # Common (b) case: a fresh apt run also pulls in linux-headers
+      # updates, whose postinst triggers a DKMS rebuild of the NVIDIA
+      # module, which refuses because the module is already installed.
+      # apt-get exits non-zero, but the package we asked for is installed
+      # fine — bootstrap shouldn't halt on that. So we ignore apt's exit
+      # code and check each requested package's actual installed state
+      # via dpkg-query. Pass for what landed; fail only for what didn't.
+      apt_log=$(mktemp)
+      apt-get update -qq >>"$apt_log" 2>&1 || true
+      apt-get install -y "${to_install[@]}" >>"$apt_log" 2>&1
+      apt_rc=$?
+
+      really_failed=()
+      for p in "${to_install[@]}"; do
+        if dpkg-query -W -f='${Status}' "$p" 2>/dev/null \
+             | grep -q 'install ok installed'; then
+          pass "$p installed"
+        else
+          really_failed+=("$p")
+        fi
+      done
+
+      if [ "${#really_failed[@]}" -gt 0 ]; then
+        fail "apt install failed for: ${really_failed[*]}"
+        sed 's/^/    apt: /' "$apt_log" >&2
+      elif [ "$apt_rc" != 0 ]; then
+        # apt-get returned non-zero but every requested package is in
+        # 'install ok installed' state. Surface as informational, not a
+        # hard failure — almost always an unrelated postinst issue
+        # (e.g. nvidia DKMS conflict during a linux-headers upgrade).
+        info "apt-get exit=$apt_rc but all requested packages installed —"
+        info "  unrelated postinst issue, run 'sudo dpkg --audit' to inspect"
+      fi
+      rm -f "$apt_log"
     fi
   fi
 
@@ -1239,38 +1303,78 @@ host_config() {
 
 # ---- phase 3: cluster ---------------------------------------------------
 
-# Tailscale is a hard requirement for the cluster phase: spec.api.address
-# is pinned to the Tailscale IP, and operator tooling reaches the AI PC
-# over the Tailscale mesh. Returns 0 if a Tailscale IPv4 address is
-# resolvable RIGHT NOW; emits a fail() and returns 1 otherwise.
+# Tailscale used to be a hard requirement for the cluster phase. It now
+# softly informs whether Tailscale is present + ready; resolution and
+# fallback are handled by _resolve_api_address. Always returns 0 so the
+# caller can proceed regardless. The info messages still surface the
+# tailscale state so an operator who EXPECTED Tailscale to be up sees
+# the diagnostic.
 _require_tailscale() {
   if ! command -v tailscale >/dev/null 2>&1; then
-    fail "tailscale CLI not installed. Install with: curl -fsSL https://tailscale.com/install.sh | sh"
-    return 1
+    info "tailscale not installed; cluster API will bind to default-gateway IP"
+    return 0
   fi
   local state
   state=$(tailscale status --json 2>/dev/null | python3 -c \
     'import json,sys; print(json.load(sys.stdin).get("BackendState","Unknown"))' 2>/dev/null || echo Unknown)
   if [ "$state" != "Running" ]; then
-    fail "tailscale not running (BackendState=$state). Run: tailscale up"
-    return 1
+    info "tailscale present but not running (BackendState=$state); will fall back to default-gateway IP"
+    return 0
   fi
   local ip
   ip=$(tailscale ip -4 2>/dev/null | head -1)
   if [ -z "$ip" ]; then
-    fail "tailscale running but no IPv4 address advertised. Re-auth: tailscale up"
-    return 1
+    info "tailscale running but no IPv4 yet; will poll briefly then fall back to default-gateway IP"
+    return 0
   fi
+  info "tailscale up (IPv4=$ip); cluster API will bind to it"
   return 0
 }
 
-# Resolve the Tailscale IPv4 address for spec.api.address. Polls for up
-# to API_ADDRESS_WAIT_SECS so the cluster phase can run during a cold
-# boot before tailscaled has finished associating. Echoes the IP, or
-# returns 1 if Tailscale never produces one.
+# LAN fallback when Tailscale isn't available. Picks the IPv4 address
+# of the interface that owns the default route — same logic the
+# configure-host wizard uses for the AI PC URL. Echoes the IP, or
+# returns 1 if no default route / no IPv4 (which would also break
+# everything else, so the caller can fail loudly there).
+_resolve_default_gateway_ip() {
+  command -v ip >/dev/null 2>&1 || return 1
+  local iface ip4
+  iface=$(ip -4 route show default 2>/dev/null \
+            | awk '/^default/ {for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+  [ -n "$iface" ] || return 1
+  ip4=$(ip -4 -o addr show dev "$iface" 2>/dev/null \
+          | awk '{print $4}' | cut -d/ -f1 | head -1)
+  [ -n "$ip4" ] || return 1
+  printf '%s\n' "$ip4"
+}
+
+# Resolve a stable IPv4 for spec.api.address. Tailscale-first (so the
+# Tailscale mesh stays the canonical address when it's available),
+# default-gateway IP as fallback (so robots on plain LAN/static-IP
+# setups bootstrap fine without Tailscale). Polls for up to
+# API_ADDRESS_WAIT_SECS so the cluster phase can run during a cold
+# boot before tailscaled has finished associating; falls back if the
+# wait expires.
 _resolve_api_address() {
   local wait_secs=${API_ADDRESS_WAIT_SECS:-60}
   local elapsed=0
+
+  # No tailscale CLI at all — go straight to LAN fallback.
+  if ! command -v tailscale >/dev/null 2>&1; then
+    _resolve_default_gateway_ip || return 1
+    return 0
+  fi
+
+  # Tailscale installed but not Running — don't waste 60s polling.
+  local state
+  state=$(tailscale status --json 2>/dev/null | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("BackendState","Unknown"))' 2>/dev/null || echo Unknown)
+  if [ "$state" != "Running" ]; then
+    _resolve_default_gateway_ip || return 1
+    return 0
+  fi
+
+  # Tailscale Running; poll for an IPv4 to surface.
   while [ "$elapsed" -lt "$wait_secs" ]; do
     local ts_ip
     ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
@@ -1281,7 +1385,11 @@ _resolve_api_address() {
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  return 1
+
+  # Backend was Running but no IP ever came up. Fall back rather than
+  # block the bootstrap on a partly-broken Tailscale install.
+  _resolve_default_gateway_ip || return 1
+  return 0
 }
 
 # Detect the install-time race: kube-apiserver running with the '1.1.1.1'
@@ -1298,7 +1406,7 @@ _apiserver_advertises_sentinel() {
 _repair_advertise_address() {
   local api_ip
   if ! api_ip=$(_resolve_api_address); then
-    fail "could not resolve a Tailscale IP after ${API_ADDRESS_WAIT_SECS:-60}s — repair aborted"
+    fail "could not resolve any IPv4 (Tailscale or default-gateway) — repair aborted"
     return 1
   fi
   note "repairing advertise-address: 1.1.1.1 -> $api_ip"
@@ -1347,6 +1455,90 @@ EOF
   done
   fail "k0scontroller restarted but API didn't come back within 60s"
   return 1
+}
+
+# Detect a hostname change after k0s install: the kubelet client cert
+# is signed with CN=system:node:<old-hostname> but `hostname` now
+# returns something different. Symptom in journalctl is endless
+# "nodes \"<new>\" not found" + "leases ... cannot get resource"
+# because kubelet identifies as the old name and can't claim the new
+# node's lease. Cluster never goes Ready -> phase 9's `kubectl wait`
+# times out -> bootstrap halts with a misleading dma-ethercat banner.
+#
+# Returns 0 if a mismatch is detected, 1 otherwise (cert missing,
+# unreadable, or matches). Quiet on success/no-cert; the caller
+# decides whether to surface and what to do.
+KUBELET_CLIENT_CERT="${KUBELET_CLIENT_CERT:-/var/lib/k0s/kubelet/pki/kubelet-client-current.pem}"
+_kubelet_cert_hostname_mismatch() {
+  [ -r "$KUBELET_CLIENT_CERT" ] || return 1
+  local cert_cn current_host
+  cert_cn=$(openssl x509 -in "$KUBELET_CLIENT_CERT" -noout -subject 2>/dev/null \
+    | sed -nE 's|.*CN[[:space:]]*=[[:space:]]*system:node:([^,/[:space:]]+).*|\1|p')
+  [ -n "$cert_cn" ] || return 1
+  current_host=$(hostname)
+  [ -n "$current_host" ] || return 1
+  [ "$cert_cn" != "$current_host" ]
+}
+
+# Heal a cluster whose kubelet identity no longer matches the host's
+# hostname. The only reliable fix is `k0s reset` + reinstall: certs,
+# kine DB, and registered node identity are all baked in at install
+# time. Image bundles under /var/lib/k0s/images/ are preserved across
+# the reset (k0s reset wipes the whole data dir, but our
+# phantomos-k0s-images .deb owns those files — we stash and restore
+# them so the operator doesn't have to reinstall the .deb).
+#
+# After this returns 0, the caller falls through to the normal install
+# path (which will see /etc/k0s/k0s.yaml gone and re-run `k0s install`).
+_reset_for_hostname_change() {
+  local cert_cn current_host
+  cert_cn=$(openssl x509 -in "$KUBELET_CLIENT_CERT" -noout -subject 2>/dev/null \
+    | sed -nE 's|.*CN[[:space:]]*=[[:space:]]*system:node:([^,/[:space:]]+).*|\1|p')
+  current_host=$(hostname)
+  note "hostname change detected: kubelet cert CN=$cert_cn, hostname=$current_host"
+  note "k0s identity is baked in at install time; running 'k0s reset' to rebuild"
+
+  # Stash image bundles before reset wipes /var/lib/k0s. Restored after
+  # so phase 3's import check doesn't come up empty.
+  local img_save=""
+  if [ -d /var/lib/k0s/images ] \
+     && find /var/lib/k0s/images -maxdepth 1 -name '*.tar' -type f 2>/dev/null \
+        | grep -q .; then
+    img_save=$(mktemp -d -t k0s-images-save-XXXXXX)
+    if mv /var/lib/k0s/images/*.tar "$img_save/" 2>/dev/null; then
+      info "stashed image bundles under $img_save"
+    else
+      img_save=""
+      info "could not stash image bundles; reset will wipe them — reinstall phantomos-k0s-images afterward"
+    fi
+  fi
+
+  systemctl stop k0scontroller k0sworker 2>/dev/null || true
+  if ! k0s reset 2>&1 | sed 's/^/    /' ; then
+    fail "k0s reset failed"
+    [ -n "$img_save" ] && rm -rf "$img_save"
+    return 1
+  fi
+  pass "k0s reset (data dir wiped, systemd unit removed)"
+
+  # Drop our generated config so the install path runs fresh and writes
+  # a new one against the current hostname / API IP. Operator-edited
+  # k0s.yaml would also be replaced — the prior file is unrecoverable
+  # at this point anyway since kine is gone.
+  rm -f /etc/k0s/k0s.yaml
+
+  # Restore image bundles into the (recreated) data dir.
+  if [ -n "$img_save" ]; then
+    mkdir -p /var/lib/k0s/images
+    if mv "$img_save"/*.tar /var/lib/k0s/images/ 2>/dev/null; then
+      pass "restored $(find /var/lib/k0s/images -maxdepth 1 -name '*.tar' -type f | wc -l) image bundle(s)"
+    else
+      info "could not restore image bundles from $img_save (left in place for manual recovery)"
+    fi
+    rmdir "$img_save" 2>/dev/null || true
+  fi
+
+  return 0
 }
 
 # Reconcile foundation.bot/* labels on $1 (node name) against the
@@ -1429,9 +1621,42 @@ cluster() {
   if [ "$SKIP_CLUSTER" = 1 ]; then phase "phase 3: cluster  (skipped)"; return; fi
   phase "phase 3: cluster"
 
+  # Image-source visibility: k0s imports anything in <data-dir>/images/
+  # into containerd at worker startup, before kubelet runs. List what's
+  # staged so the operator can confirm the phantomos-k0s-images .deb
+  # actually delivered files (and that pulls won't quietly fall through
+  # to DockerHub for refs we expected to be local).
+  local _img_dir=/var/lib/k0s/images
+  if [ -d "$_img_dir" ]; then
+    local _bundle_count _bundle_total _tar
+    _bundle_count=$(find "$_img_dir" -maxdepth 1 -name '*.tar' -type f 2>/dev/null | wc -l)
+    if [ "$_bundle_count" -gt 0 ]; then
+      _bundle_total=$(du -ch "$_img_dir"/*.tar 2>/dev/null | tail -1 | awk '{print $1}')
+      info "image bundles in $_img_dir/ (${_bundle_count} files, ${_bundle_total} total):"
+      for _tar in "$_img_dir"/*.tar; do
+        info "  $(basename "$_tar") ($(du -h "$_tar" | awk '{print $1}'))"
+      done
+      info "k0s will import these into containerd at worker startup; matching image: refs will be satisfied locally (no DockerHub pull)"
+    else
+      info "image bundles in $_img_dir/: none — pulls will go to upstream registries"
+      info "  install dist/phantomos-k0s-images-*.deb to pre-stage images"
+    fi
+  else
+    info "image bundles dir $_img_dir/ does not exist yet (k0s will create it)"
+  fi
+
   # Tailscale is a hard prerequisite — spec.api.address pins to it.
   if [ "$DRY_RUN" = 0 ]; then
     _require_tailscale || return
+  fi
+
+  # Hostname-change self-heal: must happen BEFORE the already_running
+  # check, because a hostname-mismatch cluster IS technically "running"
+  # — k0scontroller is up, but kubelet can't register the renamed node.
+  # Reset rebuilds k0s with the current hostname; we then fall through
+  # into the normal install path.
+  if [ "$DRY_RUN" = 0 ] && _kubelet_cert_hostname_mismatch; then
+    _reset_for_hostname_change || return
   fi
 
   local already_running=0
@@ -1454,10 +1679,10 @@ cluster() {
     if [ ! -e /etc/k0s/k0s.yaml ]; then
       local api_ip
       if ! api_ip=$(_resolve_api_address); then
-        fail "could not resolve a Tailscale IP after ${API_ADDRESS_WAIT_SECS:-60}s. Bring tailscale up and re-run."
+        fail "could not resolve any IPv4 for cluster API. Either bring tailscale up, or ensure the host has a default IPv4 route (e.g. 'ip route show default')."
         return
       fi
-      info "API server address: $api_ip"
+      info "cluster API server will bind to: $api_ip"
       mkdir -p /etc/k0s
       cat >/etc/k0s/k0s.yaml <<EOF
 # Managed by scripts/bootstrap-robot.sh phase cluster.
@@ -1509,6 +1734,23 @@ EOF
       fi
       sleep 5
     done
+  fi
+
+  # Verify the bundles we listed above actually got imported into k0s's
+  # containerd. Worker startup imports happen before kubelet, so by the
+  # time the node is Ready the import is either done or failed silently.
+  # Surfacing this prevents the failure mode where pods quietly pull
+  # from DockerHub even though we shipped a local image bundle.
+  if [ "$DRY_RUN" = 0 ] && [ -d "$_img_dir" ] \
+     && find "$_img_dir" -maxdepth 1 -name '*.tar' -type f 2>/dev/null | grep -q .; then
+    local _ctr_count
+    _ctr_count=$(k0s ctr -n k8s.io images list -q 2>/dev/null | wc -l)
+    if [ "$_ctr_count" -gt 0 ]; then
+      pass "containerd has $_ctr_count image(s) loaded from $_img_dir/ bundles"
+    else
+      info "containerd image namespace is empty — bundles may have failed to import"
+      info "  diagnose: journalctl -u k0scontroller | grep -iE 'image|bundle|import'"
+    fi
   fi
 
   # Reconcile the foundation.bot/* node-label namespace from
@@ -1652,7 +1894,19 @@ seed_pull_secrets() {
       skip "$PULL_SECRET_NAME already present in: ${PULL_SECRET_NAMESPACES[*]}"
       return
     fi
-    fail "$PULL_SECRET_NAME missing in: ${missing[*]}; provide --dockerhub-secret-file <path>, run \`docker login\` so ~/.docker/config.json is populated, or pre-create the Secret in the phantom namespace"
+    # Soft-skip rather than hard-fail: a robot whose images are fully
+    # pre-staged via the phantomos-k0s-images .deb doesn't need
+    # DockerHub credentials at all (pods with imagePullPolicy:
+    # IfNotPresent reuse what k0s imported into containerd at worker
+    # startup). Halting bootstrap here would also halt phase 10 (gitops)
+    # and leave the cluster with no Applications. If any pod actually
+    # needs a DockerHub pull, it'll surface as ImagePullBackOff later —
+    # the right place for that signal, not the bootstrap.
+    skip "$PULL_SECRET_NAME unavailable in: ${missing[*]}"
+    info "  pods needing DockerHub pulls will ImagePullBackOff. OK if all"
+    info "  images are pre-staged via phantomos-k0s-images-*.deb."
+    info "  Otherwise re-run with --dockerhub-secret-file <path> or"
+    info "  'sudo docker login' to populate /root/.docker/config.json."
     return
   fi
 
@@ -1947,7 +2201,7 @@ ecat_interface() {
   if [ -z "$ci_json" ] || [ "$ci_json" = "{}" ]; then
     phase "phase 7: ecat-interface  (skipped — no cpuIsolation block)"
     info "the pre-phase prompt populates this on a TTY; non-interactive"
-    info "runs must hand-edit $hc (see docs/cpu-isolation.md) and re-run."
+    info "runs must hand-edit $hc (see docs/internal/cpu-isolation.md) and re-run."
     return
   fi
   { read -r iface; } < <(cpusets_json_nic "$ci_json")
@@ -2087,7 +2341,7 @@ PY
 # defensive fallback for runs that bypass the pre-phase (e.g., the
 # operator answered N at the pre-phase prompt, or someone hand-rolled
 # `--cpu-isolation` only without `--ecat-interface`). Only an explicit
-# `enabled: false` skips the phase. See docs/cpu-isolation.md for the
+# `enabled: false` skips the phase. See docs/internal/cpu-isolation.md for the
 # schema and lifecycle.
 #
 # Idempotent: re-runs are safe. The vendored manage_cpusets.sh skips
@@ -2131,7 +2385,7 @@ cpu_isolation() {
     else
       phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
       info "first bringup needs an interactive shell to configure CPU isolation,"
-      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/cpu-isolation.md),"
+      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/internal/cpu-isolation.md),"
       info "OR set cpuIsolation.enabled=false to opt out persistently."
       return
     fi
@@ -2581,15 +2835,35 @@ EOF
   fi
 
   # --- logrotate drop-in ---
+  # Conditional: only meaningful on hosts where rsyslog is actually
+  # writing /var/log/syslog. Ubuntu 24.04 minimal is often journald-
+  # only — no rsyslog package, no /var/log/syslog, no rsyslog-rotate
+  # script. Writing a logrotate stanza referencing those would just
+  # noise up `logrotate --debug`. Detect and skip cleanly.
   local lr_target="/etc/logrotate.d/phantomos-syslog"
-  local lr_tmp; lr_tmp=$(mktemp)
-  local compress_block
-  if [ "$rs_compress" = "true" ]; then
-    compress_block=$'    compress\n    delaycompress'
-  else
-    compress_block="    nocompress"
+  local rsyslog_present=0
+  if [ -f /usr/lib/rsyslog/rsyslog-rotate ] || command -v rsyslogd >/dev/null 2>&1; then
+    rsyslog_present=1
   fi
-  cat >"$lr_tmp" <<EOF
+
+  if [ "$rsyslog_present" = 0 ]; then
+    # Clean up any prior phantomos-syslog drop-in that no longer has a
+    # backing rsyslog install (e.g. operator removed the package).
+    if [ "$DRY_RUN" = 0 ] && [ -f "$lr_target" ]; then
+      rm -f "$lr_target"
+      info "removed stale $lr_target (rsyslog no longer installed)"
+    else
+      info "rsyslog not installed; skipping logrotate drop-in (journald handles all logs here)"
+    fi
+  else
+    local lr_tmp; lr_tmp=$(mktemp)
+    local compress_block
+    if [ "$rs_compress" = "true" ]; then
+      compress_block=$'    compress\n    delaycompress'
+    else
+      compress_block="    nocompress"
+    fi
+    cat >"$lr_tmp" <<EOF
 # Managed by scripts/bootstrap-robot.sh phase log-management.
 # Sorts after /etc/logrotate.d/rsyslog so this stanza wins.
 /var/log/syslog
@@ -2606,16 +2880,17 @@ ${compress_block}
     endscript
 }
 EOF
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  would install $lr_target (maxsize=$rs_size, rotate=$rs_rot, $rs_freq)"
-    rm -f "$lr_tmp"
-  elif [ -f "$lr_target" ] && cmp -s "$lr_tmp" "$lr_target"; then
-    info "logrotate drop-in unchanged"
-    rm -f "$lr_tmp"
-  else
-    install -D -m 0644 "$lr_tmp" "$lr_target"
-    rm -f "$lr_tmp"
-    info "logrotate drop-in installed (maxsize=$rs_size rotate=$rs_rot $rs_freq)"
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  would install $lr_target (maxsize=$rs_size, rotate=$rs_rot, $rs_freq)"
+      rm -f "$lr_tmp"
+    elif [ -f "$lr_target" ] && cmp -s "$lr_tmp" "$lr_target"; then
+      info "logrotate drop-in unchanged"
+      rm -f "$lr_tmp"
+    else
+      install -D -m 0644 "$lr_tmp" "$lr_target"
+      rm -f "$lr_tmp"
+      info "logrotate drop-in installed (maxsize=$rs_size rotate=$rs_rot $rs_freq)"
+    fi
   fi
 
   # --- validate ---
@@ -2624,15 +2899,26 @@ EOF
       fail "journalctl --header failed after restart"
       return
     fi
-    if command -v logrotate >/dev/null 2>&1; then
-      if ! logrotate --debug "$lr_target" >/dev/null 2>&1; then
-        fail "logrotate --debug parse failed for $lr_target"
-        return
+    # Logrotate validation is informational — `logrotate --debug` can
+    # exit non-zero for environmental reasons (missing /var/log/syslog
+    # despite `missingok`, postrotate-script path quirks, etc.) even
+    # when the stanza itself is fine. The file is still installed; the
+    # rotation will work the next time logrotate runs. Surface the
+    # warning so the operator can investigate, but don't halt bootstrap.
+    if [ "$rsyslog_present" = 1 ] && command -v logrotate >/dev/null 2>&1 && [ -f "$lr_target" ]; then
+      local lr_err
+      if ! lr_err=$(logrotate --debug "$lr_target" 2>&1 >/dev/null); then
+        info "logrotate --debug reported issues for $lr_target (drop-in installed anyway):"
+        printf '%s\n' "$lr_err" | sed 's/^/    logrotate: /' >&2
       fi
     fi
   fi
 
-  pass "log-management configured (journald: ${jd_use}/${jd_file}, syslog: ${rs_size}/${rs_rot}x${rs_freq})"
+  if [ "$rsyslog_present" = 1 ]; then
+    pass "log-management configured (journald: ${jd_use}/${jd_file}, syslog: ${rs_size}/${rs_rot}x${rs_freq})"
+  else
+    pass "log-management configured (journald: ${jd_use}/${jd_file}; rsyslog absent — logrotate skipped)"
+  fi
 }
 
 # ---- phase 9: install dma-ethercat (gates phase 10) -------------------
@@ -2879,7 +3165,7 @@ _cpu_isolation_prompt() {
     printf '\n  CPU isolation carves cpuset partitions for the EtherCAT realtime\n'
     printf '  control loop. Required for production robots — answer the prompts\n'
     printf '  below to populate cpuIsolation: in %s.\n' "$hc"
-    printf '  See docs/cpu-isolation.md for the full schema.\n\n'
+    printf '  See docs/internal/cpu-isolation.md for the full schema.\n\n'
   } >&2
 
   local ans
@@ -2915,6 +3201,48 @@ _cpu_isolation_prompt() {
     # Empty input means use default. Operators who really want "no nic"
     # can hand-edit later — most robots want the NIC pinned.
     nic_iface="ecat0"
+  fi
+
+  # If the chosen iface isn't currently visible to the kernel, show a
+  # list of real interfaces and let the operator pick one. Common case:
+  # `ecat0` doesn't exist yet because phase 7's udev rename hasn't run
+  # — phase 7 will create it on the next bootstrap. Operators can keep
+  # the default (rename later) or pick a real interface to use directly.
+  if ! ip link show dev "$nic_iface" >/dev/null 2>&1; then
+    printf '\n  iface "%s" is not present on this host. Available interfaces:\n' "$nic_iface" >&2
+    local _ifname _imac _istate _i=0
+    local -a _iface_names=()
+    while IFS=$'\t' read -r _ifname _imac _istate; do
+      [ -z "$_ifname" ] && continue
+      _i=$((_i+1))
+      _iface_names+=("$_ifname")
+      printf '    %d) %-16s  %s  (%s)\n' "$_i" "$_ifname" "$_imac" "$_istate" >&2
+    done < <(
+      command -v ip >/dev/null 2>&1 \
+        && ip -br link show 2>/dev/null \
+            | awk '$1!="lo" && $1!~/^(docker|veth|br-|cni|flannel|kube-bridge|kube-ipvs|tailscale|wg)/ {
+                     printf "%s\t%s\t%s\n", $1, $3, $2
+                   }'
+    )
+    if [ "${#_iface_names[@]}" -eq 0 ]; then
+      printf '  (no other interfaces detected; keeping "%s" — phase 7 will set it up later)\n' "$nic_iface" >&2
+    else
+      printf '\n  Pick a number [1-%d] to use that interface, or press Enter to keep "%s".\n' \
+        "${#_iface_names[@]}" "$nic_iface" >&2
+      printf '  Pressing Enter only makes sense if you have phase 7 selectors set\n' >&2
+      printf '  (mac/pci/driver) so phase 7 can rename a real NIC to "%s".\n' "$nic_iface" >&2
+      local _pick
+      printf '  > ' >&2
+      IFS= read -r _pick </dev/tty || return 1
+      if [ -n "$_pick" ] \
+         && printf '%s' "$_pick" | grep -Eq '^[0-9]+$' \
+         && [ "$_pick" -ge 1 ] && [ "$_pick" -le "${#_iface_names[@]}" ]; then
+        nic_iface="${_iface_names[$((_pick-1))]}"
+        printf '  ✓ using nic.iface=%s\n' "$nic_iface" >&2
+      else
+        printf '  keeping nic.iface=%s\n' "$nic_iface" >&2
+      fi
+    fi
   fi
 
   # Compute partition's expanded cpu list and pick two distinct
@@ -3325,6 +3653,70 @@ APP_TEMPLATE_FILE="${APP_TEMPLATE_FILE:-$REPO_ROOT/host-config-templates/_templa
 RENDERED_APP_DIR="${RENDERED_APP_DIR:-/etc/phantomos}"
 DEFAULT_REPO_URL="${DEFAULT_REPO_URL:-https://github.com/foundationbot/Phantom-OS-KubernetesOptions.git}"
 DEFAULT_TARGET_REVISION="${DEFAULT_TARGET_REVISION:-main}"
+LOCAL_GIT_TREE="${LOCAL_GIT_TREE:-/opt/Phantom-OS-KubernetesOptions}"
+
+# Resolve the (repoURL, targetRevision) pair the per-stack Applications
+# should point at. host-config's gitSource: field decides which mode:
+#
+#   gitSource: local  (RFC 0006 default) — repoURL=file:///opt/.../,
+#     targetRevision pinned to the SHA of HEAD inside that working tree
+#     so each `dpkg -i` of a new .deb yields a stable, reproducible
+#     revision string in `kubectl get application -o yaml`. Pinning
+#     beats `HEAD` because HEAD moves on every install; the SHA freezes
+#     Argo to exactly the .deb's snapshot.
+#
+#   gitSource: remote — repoURL stays at $DEFAULT_REPO_URL (GitHub),
+#     targetRevision comes from host-config's targetRevision: field
+#     (default 'main'). This is the pre-RFC-0006 behavior, retained for
+#     fleet ops who push hot-fixes via GitHub or CI test machines that
+#     run against a feature branch.
+#
+# Echoes "<repo_url>\t<target_revision>" on stdout. If gitSource=local
+# but the local tree isn't a git repo (older .deb without Phase 1 of
+# RFC 0006), falls back to remote and prints a warning so operators
+# notice. An unknown gitSource value is a hard error — host-config.py
+# is supposed to validate; if it didn't, fail loud rather than guess.
+_resolve_git_source() {
+  local hc="$1"
+  local git_source repo_url target_rev
+  if [ -r "$hc" ]; then
+    git_source="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-git-source 2>/dev/null \
+                  || printf 'local')"
+  else
+    git_source="local"
+  fi
+  case "$git_source" in
+    local)
+      repo_url="file://${LOCAL_GIT_TREE}"
+      if [ -d "${LOCAL_GIT_TREE}/.git" ]; then
+        target_rev="$(git -C "${LOCAL_GIT_TREE}" rev-parse HEAD 2>/dev/null \
+                       || printf 'main')"
+      else
+        # Warnings go to stderr — _resolve_git_source's stdout is the
+        # captured "<repo>\t<rev>" payload, must not be polluted.
+        info "warning: ${LOCAL_GIT_TREE}/.git missing — gitSource=local needs a git-initialized .deb" >&2
+        info "warning: falling back to repoURL=$DEFAULT_REPO_URL targetRevision=main" >&2
+        repo_url="$DEFAULT_REPO_URL"
+        target_rev="main"
+      fi
+      ;;
+    remote)
+      repo_url="$DEFAULT_REPO_URL"
+      if [ -r "$hc" ]; then
+        target_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null \
+                       || printf '%s' "$DEFAULT_TARGET_REVISION")"
+      else
+        target_rev="$DEFAULT_TARGET_REVISION"
+      fi
+      [ -z "$target_rev" ] && target_rev="$DEFAULT_TARGET_REVISION"
+      ;;
+    *)
+      fail "unknown gitSource=$git_source — expected 'local' or 'remote'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\t%s' "$repo_url" "$target_rev"
+}
 
 _rendered_app_path() {
   local stack="${1:?stack required}"
@@ -3447,18 +3839,24 @@ gitops() {
     fail "$kc not readable — phase 3 (cluster) should have written it"; return
   fi
 
-  # Resolve targetRevision: --host-config wins, then explicit override
-  # via DEFAULT_TARGET_REVISION env, then 'main'.
+  # Resolve (repoURL, targetRevision) once for this gitops run via
+  # _resolve_git_source — driven by host-config's gitSource: field
+  # (RFC 0006). The same pair is reused across every enabled stack.
   local hc="$HOST_CONFIG_FILE"
   if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
     hc="$HOST_CONFIG_INPUT"
   fi
-  local target_rev="$DEFAULT_TARGET_REVISION"
-  if [ -r "$hc" ]; then
-    if hc_rev="$(python3 "$HOST_CONFIG_HELPER" "$hc" get targetRevision 2>/dev/null)"; then
-      target_rev="$hc_rev"
-    fi
+  local git_pair repo_url target_rev
+  if ! git_pair="$(_resolve_git_source "$hc")"; then
+    return
   fi
+  repo_url="$(printf '%s' "$git_pair" | cut -f1)"
+  target_rev="$(printf '%s' "$git_pair" | cut -f2)"
+  if [ -z "$repo_url" ] || [ -z "$target_rev" ]; then
+    fail "could not resolve repoURL/targetRevision from host-config (gitSource)"
+    return
+  fi
+  info "gitops source: repoURL=$repo_url  targetRevision=$target_rev"
 
   # Enabled stacks (one per line); per-stack selfHeal (resolved against
   # production: + --production override).
@@ -3508,24 +3906,57 @@ PY
       [ -z "$stack" ] && continue
       local sh
       sh="$(_resolve_selfheal_for_stack "$stack")"
-      info "DRY-RUN    render template for stack=$stack  selfHeal=$sh"
+      info "DRY-RUN    render template for stack=$stack  repoURL=$repo_url  targetRevision=$target_rev  selfHeal=$sh"
       info "DRY-RUN    kubectl apply -f $(_rendered_app_path "$stack")"
+      info "DRY-RUN    kubectl -n argocd annotate application/phantomos-$ROBOT-$stack argocd.argoproj.io/refresh=hard --overwrite"
     done <<< "$enabled_stacks"
     info "DRY-RUN  wait for each phantomos-$ROBOT-<stack> Synced + Healthy"
     return
   fi
 
-  # If ArgoCD is already installed (not via this terraform state), warn
-  # but proceed — terraform will adopt the existing namespace.
-  if "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1 && \
-     ! [ -f "$REPO_ROOT/terraform/terraform.tfstate" ]; then
-    info "argocd ns exists but no terraform state file — terraform will adopt it"
+  # If ArgoCD is already installed (not via this terraform state), import
+  # the existing resources so `terraform apply` doesn't try to create
+  # them and trip on AlreadyExists / "name still in use". Common after a
+  # partial earlier bootstrap whose state file was lost / never
+  # persisted. Detect both the namespace and the Helm release; the
+  # release is detected via its helm-managed Secret (set by the helm
+  # provider when the chart is installed).
+  local argocd_ns_exists=0 argocd_release_exists=0
+  if "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1; then
+    argocd_ns_exists=1
+    if "${KUBECTL[@]}" -n argocd get secret \
+         -l owner=helm,name=argocd \
+         -o name 2>/dev/null | grep -q 'sh.helm.release'; then
+      argocd_release_exists=1
+    fi
   fi
 
   (
     cd "$REPO_ROOT/terraform" || exit 2
     terraform init -input=false -upgrade=false
   ) || { fail "terraform init"; return; }
+
+  # Imports are idempotent: if a resource is already in state,
+  # `terraform import` exits non-zero with "Resource already managed in
+  # state". We treat both that and "Import successful" as success.
+  _tf_import() {
+    local addr="$1" id="$2" label="$3"
+    if (
+      cd "$REPO_ROOT/terraform" || exit 2
+      terraform import -input=false -var="kubeconfig=$kc" \
+        "$addr" "$id" 2>&1 \
+        | grep -qE 'already managed|Import successful'
+    ); then
+      info "$label adopted into terraform state"
+    fi
+  }
+  if [ "$argocd_ns_exists" = 1 ]; then
+    _tf_import kubernetes_namespace.argocd argocd "argocd namespace"
+  fi
+  if [ "$argocd_release_exists" = 1 ]; then
+    _tf_import helm_release.argocd argocd/argocd "argocd helm release"
+  fi
+  unset -f _tf_import
   pass "terraform init"
 
   (
@@ -3563,20 +3994,33 @@ PY
     [ -z "$stack" ] && continue
     local sh
     sh="$(_resolve_selfheal_for_stack "$stack")"
-    if ! _gitops_render_app "$stack" "$DEFAULT_REPO_URL" "$target_rev" "$sh"; then
+    if ! _gitops_render_app "$stack" "$repo_url" "$target_rev" "$sh"; then
       return
     fi
-    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  branch=$target_rev  selfHeal=$sh"
+    pass "rendered $(_rendered_app_path "$stack")  stack=$stack  revision=$target_rev  selfHeal=$sh"
 
     if ! "${KUBECTL[@]}" apply -f "$(_rendered_app_path "$stack")" >/dev/null; then
       fail "kubectl apply -f $(_rendered_app_path "$stack")"
       return
     fi
     pass "phantomos-$ROBOT-$stack applied"
-    # Force ArgoCD to reconcile immediately instead of waiting for the
-    # next 3-min refresh tick.
-    "${KUBECTL[@]}" -n argocd annotate app "phantomos-$ROBOT-$stack" \
-      argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+  done <<< "$enabled_stacks"
+
+  # Post-render Argo refresh — best-effort. Forces argocd-application-
+  # controller to re-clone the repoURL and re-render manifests RIGHT NOW
+  # instead of waiting up to 3 minutes for its next poll. Especially
+  # important after a `dpkg -i` advances /opt/.../HEAD: without this,
+  # operators see "I just installed a new .deb but the cluster is still
+  # on the old manifests" for several minutes. Failures here are not
+  # fatal — Argo will eventually re-evaluate on its own.
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    local app="phantomos-${ROBOT}-${stack}"
+    if "${KUBECTL[@]}" -n argocd get application "$app" >/dev/null 2>&1; then
+      "${KUBECTL[@]}" -n argocd annotate "application/$app" \
+        argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
+      info "triggered hard refresh on $app"
+    fi
   done <<< "$enabled_stacks"
 
   # No Synced wait — phases 10 (image-overrides) and 11 (deployments)
@@ -3592,6 +4036,14 @@ PY
 # Bootstrap discovers the mapping by running kustomize on each enabled
 # stack and indexing image references in the rendered output. Then it
 # patches each stack's Application with only the images it owns.
+#
+# Every ENABLED stack is patched on every run, including stacks with
+# zero routed entries. A stack with no entries gets `kustomize.images:
+# []` patched onto its Application, which CLEARS any stale overrides
+# left over from a previous bootstrap run. This matters when the
+# wizard removes a row from host-config (e.g. operator-ui): without an
+# explicit empty-list patch, the prior `:REPLACE-WITH-...` retag would
+# persist on the Application and keep the pod in ImagePullBackOff.
 #
 # The image-to-stack map is computed once and cached for use by both
 # image_overrides and dev_mounts (the latter currently only targets
@@ -3742,10 +4194,18 @@ print(f"  DRY-RUN  {len(imgs)} image(s) to route across enabled stacks")
   fi
 
   # Group images by owning stack (Python — easier than nested bash).
+  #
+  # per_stack is authoritative: every ENABLED stack gets a key, even if
+  # host-config has zero entries that route there. Stacks with no
+  # entries get an empty list, which the patch loop downstream sends to
+  # Argo as `kustomize.images: []`. That empty patch CLEARS any stale
+  # overrides left by a prior bootstrap run (e.g. operator-ui retags
+  # left over after the wizard removes the row from host-config), so
+  # the Application reverts to its manifest defaults.
   local routing_json
-  routing_json="$(python3 - "$_IMAGE_STACK_MAP" "$images_json" <<'PY' 2>&1
+  routing_json="$(python3 - "$_IMAGE_STACK_MAP" "$images_json" "$enabled_stacks" <<'PY' 2>&1
 import json, sys
-mapping_raw, images_json = sys.argv[1], sys.argv[2]
+mapping_raw, images_json, enabled_stacks_raw = sys.argv[1], sys.argv[2], sys.argv[3]
 img_to_stack = {}
 for line in mapping_raw.splitlines():
     if "\t" in line:
@@ -3761,7 +4221,17 @@ NON_STACK_IMAGES = {
     "foundationbot/dma-ethercat",  # phase 9 install_dma_ethercat
 }
 
+# Seed every enabled stack with an empty list. This makes per_stack
+# authoritative — stacks with no host-config entries still get a key
+# (with []), so the patch loop downstream emits an empty
+# `kustomize.images: []` patch and clears any stale overrides from
+# prior bootstrap runs.
 per_stack: dict[str, list[str]] = {}
+for stack in enabled_stacks_raw.splitlines():
+    stack = stack.strip()
+    if stack:
+        per_stack[stack] = []
+
 unrouted: list[str] = []
 for entry in json.loads(images_json):
     # entry is "name:newTag" or "name=newName:newTag"
@@ -3769,8 +4239,13 @@ for entry in json.loads(images_json):
     if name in NON_STACK_IMAGES:
         continue
     stack = img_to_stack.get(name)
-    if stack:
-        per_stack.setdefault(stack, []).append(entry)
+    if stack and stack in per_stack:
+        per_stack[stack].append(entry)
+    elif stack:
+        # Routing map says this image lives in a stack that isn't
+        # enabled on this host — treat as unrouted so the warning
+        # below surfaces it.
+        unrouted.append(entry)
     else:
         unrouted.append(entry)
 
@@ -3800,7 +4275,8 @@ for entry in d["unrouted"]:
 import json, sys
 d = json.load(sys.stdin)
 for stack, imgs in d["per_stack"].items():
-    print(f"  DRY-RUN  patch phantomos-'"$ROBOT"'-{stack} kustomize.images = {imgs}")
+    suffix = " (cleared)" if not imgs else ""
+    print(f"  DRY-RUN  patch phantomos-'"$ROBOT"'-{stack} kustomize.images = {imgs}{suffix}")
 '
     return
   fi
@@ -3810,7 +4286,12 @@ for stack, imgs in d["per_stack"].items():
     return
   fi
 
-  # For each stack that has routed images, patch its Application.
+  # Iterate every enabled stack — including those whose kustomize.images
+  # list is empty. Patching an empty list is how we clear stale
+  # overrides from prior bootstrap runs (see the seed-with-empty-list
+  # logic in the heredoc above). Argo treats `images: []` as "no
+  # overrides", drops any retag, and the pod rolls onto the manifest
+  # default tag.
   local stacks_with_overrides
   stacks_with_overrides="$(printf '%s' "$routing_json" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["per_stack"].keys()))')"
   while IFS= read -r stack; do
@@ -3829,7 +4310,14 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
     local patch
     patch=$(printf '{"spec":{"source":{"kustomize":{"images":%s}}}}' "$stack_imgs_json")
     if "${KUBECTL[@]}" -n argocd patch app "$app" --type=merge -p "$patch" >/dev/null; then
-      pass "patched $app  kustomize.images: $stack_imgs_json"
+      # Specialize the log line for the empty case so operators can see
+      # at a glance that the stack got cleaned (vs. an unhelpful
+      # "kustomize.images: []" with no context).
+      if [ "$stack_imgs_json" = "[]" ]; then
+        pass "patched $app  kustomize.images: [] (cleared)"
+      else
+        pass "patched $app  kustomize.images: $stack_imgs_json"
+      fi
     else
       fail "kubectl patch app $app failed"
       continue
@@ -4218,7 +4706,7 @@ print_plan() {
   _step $([ "$SKIP_PURGE_PODS"           = 0 ] && echo 1 || echo 0) "purge workload pods"                    "--skip-purge-pods"
   _step $([ "$SKIP_DOCKER_STOP"          = 0 ] && echo 1 || echo 0) "stop docker containers"                 "--skip-docker-stop"
   _step $([ "$SKIP_STOP_SERVICES"        = 0 ] && echo 1 || echo 0) "stop system services"                   "--skip-stop-services"
-  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--uninstall-ethercat not passed (default: skip)"
+  _step $([ "$SKIP_ETHERCAT_UNINSTALL"   = 0 ] && echo 1 || echo 0) "uninstall dma-ethercat"                 "--skip-ethercat-uninstall passed"
   _step 1                                                           "phase  1  preflight"                    ""
   _step 1                                                           "          configure-host (if missing)"  ""
   _step $([ "$SKIP_DEPS"                 = 0 ] && echo 1 || echo 0) "phase  2  deps"                         "--deps not selected"
@@ -4230,7 +4718,7 @@ print_plan() {
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  7  ecat-interface (gates 8)"     "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  8  cpu-isolation (gates 9)"      "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
-  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--install-dma-ethercat not selected"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 12  image-overrides"              "--image-overrides not selected"

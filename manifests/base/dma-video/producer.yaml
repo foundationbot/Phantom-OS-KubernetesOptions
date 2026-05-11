@@ -21,7 +21,7 @@ spec:
       containers:
         - name: producer
           image: foundationbot/dma-video:main
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           # Compose: command: ["--fps", "25", "--camera-config", "/opt/configs/cameras.json"]
           # No entrypoint override → image ENTRYPOINT runs, these are CMD args
           args:

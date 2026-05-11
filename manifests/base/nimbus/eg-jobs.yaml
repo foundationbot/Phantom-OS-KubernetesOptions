@@ -23,7 +23,7 @@ spec:
       containers:
         - name: eg-jobs
           image: foundationbot/nimbus.s3_dynamo_athena-jobs:main
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: DATABASE_URL
               value: postgresql://episodes:episodes@db:5432/episodes

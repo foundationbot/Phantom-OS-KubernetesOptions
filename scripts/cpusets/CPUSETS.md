@@ -5,7 +5,7 @@ and EtherCAT NIC setup on Jetson Thor (applies to any Linux host with cgroup
 v2).
 
 > Looking for the runbook? See
-> [`docs/cpu-isolation.md`](../../docs/cpu-isolation.md) for the
+> [`docs/internal/cpu-isolation.md`](../../docs/internal/cpu-isolation.md) for the
 > step-by-step setup procedure (write config → apply → pin NIC →
 > install boot service → migrate cmdline → reboot). This file is the
 > reference doc covering subcommands, library internals, and the
@@ -375,5 +375,5 @@ the selector flags from `cpuIsolation.nic.selector` in
 - `pci` matches `^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]$`.
 - `driver` is non-empty; `index` is a non-negative integer.
 
-See [`docs/cpu-isolation.md`](../../docs/cpu-isolation.md#bootstrap-driven-setup)
+See [`docs/internal/cpu-isolation.md`](../../docs/internal/cpu-isolation.md#bootstrap-driven-setup)
 for the host-config schema and bootstrap integration.

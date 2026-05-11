@@ -73,25 +73,35 @@ spec:
       # shared emptyDir, and the api container mounts it read-only at
       # /home/operator/models. The image tag is rewritten per-host via
       # the same kustomize.images injection that handles positronic.
-      initContainers:
-        - name: load-models
-          image: localhost:5443/phantom-models:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              set -eu
-              echo "==> copying /models -> /shared"
-              cp -a /models/. /shared/
-              echo "==> done"
-              ls -la /shared | head
-          volumeMounts:
-            - name: phantom-models
-              mountPath: /shared
-          resources:
-            requests: { cpu: "100m", memory: "64Mi" }
-            limits:   { cpu: "500m", memory: "256Mi" }
+      #
+      # The load-models initContainer is OPTIONAL. When the
+      # localhost:5443/phantom-models image isn't available, leave it
+      # commented out — the api container's /home/operator/models
+      # mount becomes an empty emptyDir, and endpoints that read from
+      # PHANTOM_MODELS will return empty / error. To re-enable, build
+      # and push the phantom-models image to the local registry, set
+      # `images.phantom-models.image` in host-config.yaml to that tag,
+      # and uncomment the block below.
+      #
+      # initContainers:
+      #   - name: load-models
+      #     image: localhost:5443/phantom-models:PLACEHOLDER
+      #     imagePullPolicy: IfNotPresent
+      #     command:
+      #       - sh
+      #       - -c
+      #       - |
+      #         set -eu
+      #         echo "==> copying /models -> /shared"
+      #         cp -a /models/. /shared/
+      #         echo "==> done"
+      #         ls -la /shared | head
+      #     volumeMounts:
+      #       - name: phantom-models
+      #         mountPath: /shared
+      #     resources:
+      #       requests: { cpu: "100m", memory: "64Mi" }
+      #       limits:   { cpu: "500m", memory: "256Mi" }
 
       containers:
         - name: api

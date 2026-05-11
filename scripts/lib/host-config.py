@@ -23,6 +23,7 @@ Usage:
   host-config.py <path> get-deployment-patches-json
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
+  host-config.py <path> get-git-source                # 'local' | 'remote' (default 'local')
   host-config.py <path> inject-kustomize-block <app-yaml> <stack> <stacks-dir>
   host-config.py <path> validate
 
@@ -169,6 +170,16 @@ def cmd_get_dma_ethercat_config_path(cfg: dict) -> int:
     value = block.get("configPath")
     if not value:
         return 1
+    print(value)
+    return 0
+
+
+def cmd_get_git_source(cfg: dict) -> int:
+    """Print the gitSource field. Defaults to 'local' when absent.
+    Always exits 0 — gitSource has a real default, unlike most other
+    optional fields where 'unset' is meaningful to the caller.
+    """
+    value = cfg.get("gitSource") or "local"
     print(value)
     return 0
 
@@ -911,8 +922,40 @@ def cmd_inject_kustomize_block(
     return 0
 
 
+# Bundle manifest sidecar written by the image .deb's build script
+# (RFC 0005). Hidden filename keeps it out of k0s's auto-import scan.
+# When present, host-config.py validate cross-checks images.<container>.image
+# against bundle[].ref and emits informational `note:` lines on drift —
+# the operator's value still wins (host-config is the source of truth),
+# notes are purely informational about expected operator overrides.
+BUNDLE_MANIFEST_PATH = "/var/lib/k0s/images/.phantomos-image-bundle.yaml"
+
+
+def _load_bundle_manifest(path: "str | None" = None) -> "dict | None":
+    """Read and parse the bundle manifest. Returns None when the file is
+    missing or unparseable — callers treat that as "no bundle, no
+    cross-check" rather than an error. Older .debs predate the manifest;
+    parse errors mean a corrupt sidecar that the wizard's separate arch
+    check will already have flagged.
+
+    Reads ``BUNDLE_MANIFEST_PATH`` from the module at call time (rather
+    than capturing it as a default argument) so tests can rebind the
+    module-level constant to a fixture path."""
+    if path is None:
+        path = BUNDLE_MANIFEST_PATH
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+    except (FileNotFoundError, yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
 def cmd_validate(cfg: dict) -> int:
     errors: list[str] = []
+    notes: list[str] = []
     if not cfg.get("robot"):
         errors.append("'robot' is required")
     ai_pc = cfg.get("aiPcUrl") or ""
@@ -925,6 +968,18 @@ def cmd_validate(cfg: dict) -> int:
         errors.append(
             f"'production' must be true or false (got: {cfg['production']!r})"
         )
+
+    # gitSource: optional top-level enum. RFC 0006 — selects between
+    # local cluster-side git server and remote GitHub origin as the Argo
+    # CD source. Defaults to 'local' when absent (set by cmd_get_git_source).
+    git_source = cfg.get("gitSource")
+    if git_source is not None:
+        if not isinstance(git_source, str):
+            errors.append("'gitSource' must be a string")
+        elif git_source not in ("local", "remote"):
+            errors.append(
+                f"gitSource={git_source!r}: must be 'local' or 'remote'"
+            )
 
     # stacks: must be a mapping; only known stack names; required
     # stacks cannot be disabled; per-stack fields type-checked.
@@ -1308,9 +1363,62 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(f"images.{cname}.image: must be a string")
                 else:
                     try:
-                        _split_image_ref(img)
+                        _, tag = _split_image_ref(img)
                     except ValueError as exc:
                         errors.append(f"images.{cname}.image: {exc}")
+                    else:
+                        # Reject wizard-placeholder tags. configure-host.sh
+                        # used to write `REPLACE-WITH-*` strings as
+                        # canonical defaults; pressing enter through the
+                        # prompt left them in the file, and bootstrap
+                        # phase 12 would dutifully inject them as
+                        # kustomize.images overrides — guaranteeing
+                        # ImagePullBackOff. See
+                        # docs/image-flow-and-registry-bootstrap.md.
+                        if tag.startswith("REPLACE-WITH-"):
+                            errors.append(
+                                f"images.{cname}.image: tag {tag!r} is a "
+                                f"wizard placeholder; either set a real tag "
+                                f"or remove the entry to use the manifest "
+                                f"default"
+                            )
+
+            # Soft drift check against the bundle manifest sidecar
+            # (RFC 0005 phase 5). The host-config is the authoritative
+            # source of truth — operators may legitimately pin an older
+            # ref or swap to an upstream registry — so disagreements with
+            # the bundle are *expected* and don't fail validation. We
+            # surface them as `note:` lines so that re-running validate
+            # after a fresh `dpkg -i` of a new image .deb makes "operator
+            # override active" visible at a glance.
+            #
+            # Skipped silently when the bundle manifest is absent or
+            # unparseable; the wizard's bundle-arch and parse checks
+            # already handle that path.
+            bundle = _load_bundle_manifest()
+            if bundle is not None:
+                bundle_by_container: dict[str, str] = {}
+                for entry in bundle.get("bundle") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    bc = entry.get("container")
+                    bref = entry.get("ref")
+                    if isinstance(bc, str) and isinstance(bref, str) and bref:
+                        bundle_by_container[bc] = bref
+                for cname, spec in images_raw.items():
+                    if cname not in CONTAINER_TARGETS:
+                        continue  # already errored above
+                    if not isinstance(spec, dict):
+                        continue
+                    img = spec.get("image")
+                    if not isinstance(img, str) or not img:
+                        continue
+                    bref = bundle_by_container.get(cname)
+                    if bref and bref != img:
+                        notes.append(
+                            f"images.{cname}.image={img} differs from "
+                            f"bundle's {bref} — operator override active"
+                        )
 
     # deployments is optional. Each key must be a known deployment.
     # Reject relative paths and '~' — bootstrap runs as root, so '~'
@@ -1440,6 +1548,12 @@ def cmd_validate(cfg: dict) -> int:
                     f"(got {policy!r})"
                 )
 
+    # Notes are purely informational (e.g. host-config drift from bundle
+    # sidecar). They're printed regardless of error/success — operators
+    # want to see expected overrides whether or not validation passed —
+    # and never affect the exit code.
+    for n in notes:
+        print(f"note: {n}", file=sys.stderr)
     if errors:
         for e in errors:
             print(f"error: {e}", file=sys.stderr)
@@ -1506,6 +1620,8 @@ def main() -> int:
             print("usage: host-config.py <path> get-stack-selfheal <stack>", file=sys.stderr)
             return 2
         return cmd_get_stack_selfheal(cfg, sys.argv[3])
+    if cmd == "get-git-source":
+        return cmd_get_git_source(cfg)
     if cmd == "inject-kustomize-block":
         if len(sys.argv) != 6:
             print(
