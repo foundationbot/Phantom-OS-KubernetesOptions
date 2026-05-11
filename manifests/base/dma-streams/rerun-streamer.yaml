@@ -71,9 +71,13 @@ spec:
           # The image's default ENTRYPOINT is dma_recorder — override here
           # to launch the streamer binary instead.
           command: ["rerun_streamer"]
+          # rerun_streamer's argv parser is space-separated: `--flag value`,
+          # not `--flag=value`. Each option/value is its own list element.
           args:
-            - --port=9788
-            # --urdf=/opt/configs/robot.urdf   # optional, mount it if used
+            - --port
+            - "9788"
+            # - --urdf
+            # - /opt/configs/robot.urdf       # optional, mount it if used
 
           ports:
             - name: rerun

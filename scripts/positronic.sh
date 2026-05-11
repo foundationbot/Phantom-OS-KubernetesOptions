@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# positronic.sh — convenience wrapper for the positronic-control deployment.
+# positronic.sh — convenience wrapper for the positronic-control DaemonSet.
 #
 # Single entry point for the day-to-day lifecycle operations against the
-# positronic-control Deployment in the `positronic` namespace. Designed to
+# positronic-control DaemonSet in the `positronic` namespace. Designed to
 # be friendly on the robot (where only `k0s kubectl` is available) and on
 # laptops (where `kubectl` is the usual tool). Read-only commands degrade
 # gracefully when neither is available.
@@ -176,7 +176,7 @@ get_pod() {
 
 cmd_help() {
   cat <<EOF
-${C_BOLD}positronic.sh${C_RESET} — wrapper for the positronic-control deployment
+${C_BOLD}positronic.sh${C_RESET} — wrapper for the positronic-control DaemonSet
 
 ${C_BOLD}Usage:${C_RESET}
   bash scripts/positronic.sh [--robot <name>] [--dry-run] <subcommand> [args...]
@@ -188,21 +188,17 @@ ${C_BOLD}Subcommands:${C_RESET}
                                Stream logs from the main container (or the
                                load-models init container with --init).
                                --previous reads the prior crashed instance.
-  exec [flags] [-- command...]
-                               Drop into bash (--norc --noprofile) by
-                               default, or run an arbitrary command if
-                               args follow '--'. Flags retarget to any
-                               container in the cluster:
-                                 --ns NS                namespace
-                                 -l, --label SELECTOR   pod label
-                                 -c, --container NAME   container name
-                                 --pod NAME             skip label lookup
-                               'positronic.sh exec --help' for examples.
+  exec [<target>] [-- command...]
+                               Drop into bash on the targeted workload.
+                               <target> is 'positronic' (default) or
+                               'locomotion'. Args after '--' run instead
+                               of bash. 'positronic.sh exec --help' for
+                               examples.
   gpu-test                     Run a PyTorch CUDA matmul inside the pod;
                                PASS iff cuda is available and result != 0.
   set-cmd <command...>         Set PHANTOM_CMD in $CONFIGMAP_NAME to the
                                joined args, then rollout restart the
-                               Deployment so the new command takes effect.
+                               DaemonSet so the new command takes effect.
   clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
                                mode → sleep infinity), rollout restart.
   push-image <src> [--tag <dest-tag>] [--no-redeploy]
@@ -231,7 +227,7 @@ ${C_BOLD}Subcommands:${C_RESET}
                                just isn't reverted. Resume with argo-resume.
   argo-resume                  Re-enable selfHeal on every enabled per-stack
                                Application.
-  teardown [-y|--yes]          Delete the Deployment + ConfigMap + ns.
+  teardown [-y|--yes]          Delete the DaemonSet + ConfigMap + ns.
                                Cluster-side only — does not touch manifests.
   help                         This message.
 
@@ -258,11 +254,9 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh logs -f
   bash scripts/positronic.sh logs --previous --init
   bash scripts/positronic.sh exec
+  bash scripts/positronic.sh exec locomotion
   bash scripts/positronic.sh exec -- ros2 topic list
-  bash scripts/positronic.sh exec --ns phantom \
-        -l app.kubernetes.io/name=yovariable-server -c server
-  bash scripts/positronic.sh exec --ns phantom \
-        -l app.kubernetes.io/name=dma-recorder -c recorder -- sh
+  bash scripts/positronic.sh exec locomotion -- sh
   bash scripts/positronic.sh gpu-test
   bash scripts/positronic.sh set-cmd ros2 launch srg_localization global_positioning_launch.py
   bash scripts/positronic.sh clear-cmd
@@ -285,12 +279,12 @@ EOF
 cmd_status() {
   require_kubectl
 
-  bold "Deployment ($NAMESPACE/positronic-control)"
-  if ! $KUBECTL -n "$NAMESPACE" get deploy positronic-control >/dev/null 2>&1; then
-    fail "Deployment positronic-control not found in $NAMESPACE — not deployed"
+  bold "DaemonSet ($NAMESPACE/positronic-control)"
+  if ! $KUBECTL -n "$NAMESPACE" get ds positronic-control >/dev/null 2>&1; then
+    fail "DaemonSet positronic-control not found in $NAMESPACE — not deployed"
     return 0
   fi
-  $KUBECTL -n "$NAMESPACE" get deploy positronic-control \
+  $KUBECTL -n "$NAMESPACE" get ds positronic-control \
     -o wide 2>/dev/null | sed 's/^/    /'
 
   bold "Pod"
@@ -474,80 +468,79 @@ cmd_logs() {
 # ---------- subcommand: exec ----------------------------------------------
 
 cmd_exec() {
-  # Show help WITHOUT requiring kubectl — useful from a dev workstation.
-  for a in "$@"; do
-    if [ "$a" = "-h" ] || [ "$a" = "--help" ]; then
-      cat <<'HELP'
-exec [flags] [-- command...]
+  # exec [<target>] [-- command...]
+  # <target> picks one of the known workloads. Default = positronic.
+  # Help works without kubectl so it's usable from a dev workstation.
+  if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    cat <<'HELP'
+exec [<target>] [-- command...]
 
-  Drops into bash on the targeted container. Defaults to positronic-control
-  (namespace=positronic, label=app=positronic-control, container=positronic-control).
+  Drops into bash on the targeted container.
 
-  --namespace, --ns NS         Override namespace (default: positronic).
-  --label, -l SELECTOR         Override label selector used to find the pod
-                               (e.g. app.kubernetes.io/name=yovariable-server).
-  --container, -c NAME         Override the container within the pod
-                               (e.g. 'server' inside yovariable-server pod).
-  --pod NAME                   Skip label resolution; use this pod by name.
-  -- <cmd> [args...]           Run <cmd> instead of bash.
+  Targets (default: positronic):
+    positronic     positronic-control pod (positronic ns)
+    locomotion     phantom-locomotion DaemonSet pod (positronic ns)
 
   Examples
-    bash scripts/positronic.sh exec
-    bash scripts/positronic.sh exec -- ros2 topic list
-    bash scripts/positronic.sh exec --ns phantom \
-        -l app.kubernetes.io/name=yovariable-server -c server
-    bash scripts/positronic.sh exec --ns phantom \
-        -l app.kubernetes.io/name=dma-recorder -c recorder -- sh
+    bash scripts/positronic.sh exec                      # positronic shell
+    bash scripts/positronic.sh exec locomotion           # locomotion shell
+    bash scripts/positronic.sh exec -- ros2 topic list   # one-off in positronic
+    bash scripts/positronic.sh exec locomotion -- sh     # one-off in locomotion
 HELP
-      return 0
+    return 0
+  fi
+  # Absorb --dry-run wherever it appears (before/after target, before --).
+  # Beyond '--' it's part of the user's command and we leave it alone.
+  # Done before require_kubectl so dry-run works on a dev workstation.
+  local _filtered=() _seen_dashdash=0
+  for a in "$@"; do
+    if [ "$_seen_dashdash" = 0 ] && [ "$a" = "--dry-run" ]; then
+      DRY_RUN=1
+      continue
     fi
-    [ "$a" = "--" ] && break
+    [ "$a" = "--" ] && _seen_dashdash=1
+    _filtered+=("$a")
   done
+  set -- "${_filtered[@]}"
+
   require_kubectl
 
-  # Targeting flags. Default to positronic-control (the script's
-  # historical scope); operators shell into other workloads via flags.
-  local override_pod=""
-  # Args after `--` are the command to run. No `--` (or nothing after) -> bash.
-  local found_dd=0
+  # Pick the target. First positional arg is the target name, unless
+  # it's '--' (meaning "use default, command follows") or absent.
+  local target="positronic"
+  if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+    target="$1"; shift
+  fi
+  case "$target" in
+    positronic|positronic-control)
+      NAMESPACE="positronic"
+      APP_LABEL="app=positronic-control"
+      CONTAINER_NAME="positronic-control"
+      ;;
+    locomotion|phantom-locomotion)
+      NAMESPACE="positronic"
+      APP_LABEL="app.kubernetes.io/name=phantom-locomotion"
+      CONTAINER_NAME="phantom-locomotion"
+      ;;
+    *)
+      die "unknown target: $target (try 'positronic' or 'locomotion'; see exec --help)"
+      ;;
+  esac
+
+  # Anything left should be the optional `-- <cmd> [args...]`.
   local rest=()
-  while [ $# -gt 0 ]; do
-    if [ "$1" = "--" ] && [ "$found_dd" = 0 ]; then
-      found_dd=1; shift; continue
+  if [ $# -gt 0 ]; then
+    if [ "$1" != "--" ]; then
+      die "unexpected arg: $1 (use '--' before the command)"
     fi
-    if [ "$found_dd" = 1 ]; then
-      rest+=("$1")
-      shift; continue
-    fi
-    case "$1" in
-      -h|--help)  return 0 ;;  # already handled above before require_kubectl
-      --namespace|--ns)
-        [ -z "${2:-}" ] && die "$1 requires a namespace"
-        NAMESPACE="$2"; shift 2; continue ;;
-      -l|--label)
-        [ -z "${2:-}" ] && die "$1 requires a selector"
-        APP_LABEL="$2"; shift 2; continue ;;
-      -c|--container)
-        [ -z "${2:-}" ] && die "$1 requires a container name"
-        CONTAINER_NAME="$2"; shift 2; continue ;;
-      --pod)
-        [ -z "${2:-}" ] && die "$1 requires a pod name"
-        override_pod="$2"; shift 2; continue ;;
-      -*)
-        die "unknown exec flag: $1 (did you forget '--' before the command?)" ;;
-      *)
-        die "unexpected positional arg: $1 (commands go after '--')" ;;
-    esac
-  done
+    shift
+    rest=("$@")
+  fi
 
   local pod
-  if [ -n "$override_pod" ]; then
-    pod="$override_pod"
-  else
-    pod="$(get_pod)"
-    if [ -z "$pod" ]; then
-      die "no pod found in ns/$NAMESPACE for label $APP_LABEL"
-    fi
+  pod="$(get_pod)"
+  if [ -z "$pod" ]; then
+    die "no $target pod found (label=$APP_LABEL ns=$NAMESPACE)"
   fi
 
   if [ "${#rest[@]}" -eq 0 ]; then
@@ -649,7 +642,7 @@ print(json.dumps({"data": {"PHANTOM_CMD": os.environ["VALUE"]}}))
   kctl -n "$NAMESPACE" patch cm "$CONFIGMAP_NAME" --type=merge -p "$json"
 
   bold "Rolling out positronic-control"
-  kctl -n "$NAMESPACE" rollout restart deploy/positronic-control
+  kctl -n "$NAMESPACE" rollout restart ds/positronic-control
 
   if [ "$DRY_RUN" = 1 ]; then return 0; fi
 
@@ -806,11 +799,11 @@ cmd_redeploy() {
 
   bold "Watching rollout (Ctrl-C to exit)"
   if [ "$DRY_RUN" = 1 ]; then
-    printf '+ %s -n %q rollout status deploy/positronic-control --timeout=120s\n' \
+    printf '+ %s -n %q rollout status ds/positronic-control --timeout=120s\n' \
       "$KUBECTL" "$NAMESPACE"
     return 0
   fi
-  $KUBECTL -n "$NAMESPACE" rollout status deploy/positronic-control --timeout=120s || true
+  $KUBECTL -n "$NAMESPACE" rollout status ds/positronic-control --timeout=120s || true
   $KUBECTL -n "$NAMESPACE" get pod -l "$APP_LABEL" -o wide || true
 }
 
@@ -979,7 +972,7 @@ cmd_teardown() {
 
   bold "Teardown plan"
   cat <<EOF
-    delete deploy/positronic-control   in ns/$NAMESPACE
+    delete ds/positronic-control       in ns/$NAMESPACE
     delete cm/$CONFIGMAP_NAME           in ns/$NAMESPACE
     delete namespace/$NAMESPACE
     (manifest files in $REPO are NOT touched)
@@ -995,7 +988,7 @@ EOF
     esac
   fi
 
-  kctl -n "$NAMESPACE" delete deploy positronic-control --ignore-not-found
+  kctl -n "$NAMESPACE" delete ds positronic-control --ignore-not-found
   kctl -n "$NAMESPACE" delete cm "$CONFIGMAP_NAME" --ignore-not-found
   kctl delete namespace "$NAMESPACE" --ignore-not-found
   ok "teardown complete"

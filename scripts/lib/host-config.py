@@ -414,6 +414,15 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/cpp-robot-state-estimator",
     },
+    "dma-streams": {
+        # Single image, two DaemonSets — dma-recorder (has-recorder) and
+        # rerun-streamer (has-streamer) — both run a different binary
+        # from foundationbot/dma-streams. One CONTAINER_TARGETS entry
+        # rewrites both via kustomize.images find-by-image-name.
+        # CI publishes <branch>-latest-<arch> tags.
+        "stack": "core",
+        "manifest_image": "foundationbot/dma-streams",
+    },
 }
 
 
@@ -532,7 +541,7 @@ def cmd_get_image_for_container(cfg: dict, container: str) -> int:
 DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
     "positronic-control": {
         "stack": "core",
-        "kind": "Deployment",
+        "kind": "DaemonSet",
         "namespace": "positronic",
         "container": "positronic-control",
     },

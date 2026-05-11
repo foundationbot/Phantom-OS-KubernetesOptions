@@ -26,10 +26,13 @@ spec:
       labels:
         app.kubernetes.io/name: yovariable-server
     spec:
-      # ── Pin to robot node(s). Pick whichever selector your cluster
-      # already uses to identify robots.
+      # ── Pin to robot node(s). foundation.bot/has-yovariable is
+      # default-on (the cluster phase reconciler injects "true" on
+      # every robot unless host-config sets it to "false") — set it
+      # to "false" in nodeLabels to take this DaemonSet off a host.
       nodeSelector:
         foundation.bot/robot: "true"
+        foundation.bot/has-yovariable: "true"
       tolerations:
         - operator: Exists
           effect: NoSchedule

@@ -1,4 +1,4 @@
-# Tunable defaults for the positronic-control Deployment.
+# Tunable defaults for the positronic-control DaemonSet.
 # Consumed via `envFrom: configMapRef: positronic-config` in
 # manifests/base/positronic/positronic-control.yaml.
 #

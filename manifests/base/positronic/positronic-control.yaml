@@ -1,5 +1,13 @@
-# positronic-control — k0s Deployment that replaces the `phantom` service
+# positronic-control — DaemonSet that replaces the `phantom` service
 # in imu-policy/positronic_control/docker/development.docker-compose.yaml.
+#
+# A DaemonSet rather than a Deployment for symmetry with the other
+# robot workloads (phantom-locomotion, dma-recorder, rerun-streamer,
+# cpp-robot-state-estimator, yovariable-server). Gating on
+# foundation.bot/has-positronic via nodeSelector means a robot opting
+# out of positronic gets zero pods — versus a Deployment that always
+# wants 1 replica and would leave a Pending pod when the selector
+# doesn't match.
 #
 # Two images flow into this pod, both rewritten per-robot via Kustomize's
 # `images:` transformer in the overlay:
@@ -19,14 +27,11 @@
 # for interactive ROS work. Set PHANTOM_CMD in the ConfigMap to flip
 # the pod into service mode.
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: positronic-control
   namespace: positronic
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate          # hostNetwork + hostPath PVC-style mounts; no rolling overlap
   selector:
     matchLabels:
       app: positronic-control
