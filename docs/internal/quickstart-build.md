@@ -1,5 +1,11 @@
 # Quick start — build the Phantom-OS .deb packages
 
+> **CONFIDENTIAL.** This document and any corresponding documents shared
+> in this drive contain highly sensitive confidential information of
+> Foundation, including proprietary technical information that is
+> strictly restricted. Please handle in accordance with the NDA, do not
+> forward, and limit access to specifically authorized individuals only.
+
 For developers and CI building installable artifacts. Produces three
 files a fresh robot needs: one control-plane `.deb` and the image-bundle
 pair (a small `.deb` + a multi-GB `.tar.zst` sidecar).
