@@ -100,8 +100,8 @@ rsync -a \
   --exclude='.gitignore' \
   --exclude='dist/' \
   --exclude='packaging/' \
-  --exclude='docs/plans/' \
-  --exclude='docs/research/' \
+  --exclude='/docs/internal/' \
+  --exclude='/fix*.sh' \
   --exclude='.claude/' \
   --exclude='.obsidian/' \
   --exclude='__pycache__/' \

@@ -59,7 +59,9 @@ for the AI PC pairing.
 
 ## What you'll need
 
-Three files transferred to `~/` on the robot (scp from the build host):
+Three files transferred to the robot (scp from the build host). The
+commands below assume you `cd` to wherever they landed (e.g. `~/`
+or `~/Downloads/`) before running the install:
 
 | File | Purpose |
 |---|---|
@@ -91,13 +93,13 @@ repo via `file://` once the cluster is up (RFC 0006).
 ### 2. Install the image bundle
 
 ```bash
-sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh ~/
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh ./
 ```
 
 The wrapper:
 
 - Auto-discovers the matching `.deb` + `.tar.zst` pair in the directory
-  you pointed at (here `~/`).
+  you pointed at (here `./` — the current working directory).
 - Verifies that filename stems agree (same version + arch).
 - Verifies that the bundle's declared arch matches the host's
   `dpkg --print-architecture`.
@@ -113,8 +115,8 @@ If you want explicit args instead of auto-discovery:
 
 ```bash
 sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh \
-  ~/phantomos-k0s-images-<v>-<arch>.deb \
-  ~/phantomos-k0s-images-<v>-<arch>.tar.zst
+  ./phantomos-k0s-images-<v>-<arch>.deb \
+  ./phantomos-k0s-images-<v>-<arch>.tar.zst
 ```
 
 ### 3. Run the configure wizard
@@ -259,7 +261,7 @@ scp dist/phantomos-k0s-images-*-amd64.{deb,tar.zst} robot:~/
 
 # On the robot
 sudo dpkg -i ~/phantomos-k0s-*-all.deb
-sudo bash /opt/.../scripts/install-image-bundle.sh ~/
+sudo bash /opt/.../scripts/install-image-bundle.sh ./
 # /opt/.../.git/ HEAD advances; Argo reconciles within seconds
 ```
 
@@ -305,7 +307,7 @@ sudo bash /opt/.../scripts/bootstrap-robot.sh --image-overrides
 ```bash
 # install
 sudo dpkg -i ~/phantomos-k0s-*-all.deb
-sudo bash /opt/.../scripts/install-image-bundle.sh ~/
+sudo bash /opt/.../scripts/install-image-bundle.sh ./
 
 # configure + bootstrap
 sudo bash /opt/.../scripts/configure-host.sh

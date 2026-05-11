@@ -42,13 +42,13 @@
 #                        rules. Driven by cpuIsolation.nic.selector
 #                        (mac/pci/driver+index); falls back to the
 #                        vendored interactive picker on a TTY.
-#                        See docs/cpu-isolation.md.
+#                        See docs/internal/cpu-isolation.md.
 #   --cpu-isolation      activate cpuset partitions, install cpusets.service,
 #                        write systemd CPUAffinity drop-in, optionally pin
 #                        EtherCAT NIC IRQs and migrate kernel cmdline. Reads
 #                        host-config.yaml's cpuIsolation: block; no-op when
 #                        cpuIsolation.enabled is unset/false.
-#                        See docs/cpu-isolation.md.
+#                        See docs/internal/cpu-isolation.md.
 #   --log-management     install journald + logrotate drop-ins from
 #                        host-config.yaml's logManagement: block. Caps
 #                        journald disk usage and forces rsyslog logrotate
@@ -198,7 +198,7 @@
 #                    host-config.yaml; falls back to the vendored
 #                    interactive picker on a TTY. Idempotent — fast-paths
 #                    when `ip link show <iface>` already succeeds.
-#                    See docs/cpu-isolation.md.
+#                    See docs/internal/cpu-isolation.md.
 #    8. cpu-isolation (gates phase 9)
 #                    activate cgroup v2 cpuset partitions; install
 #                    cpusets.service so they reactivate at boot
@@ -208,7 +208,7 @@
 #                    optionally migrate kernel cmdline (--migrateCmdline).
 #                    Default-on: missing cpuIsolation: block prompts on
 #                    a TTY and persists answers. enabled: false skips.
-#                    See docs/cpu-isolation.md.
+#                    See docs/internal/cpu-isolation.md.
 #    9. install dma-ethercat (gates phase 10)
 #                    Default-on. Pass --skip-ethercat-install to bypass.
 #                    Renders the bootstrap-managed installer Job from
@@ -2161,7 +2161,7 @@ ecat_interface() {
   if [ -z "$ci_json" ] || [ "$ci_json" = "{}" ]; then
     phase "phase 7: ecat-interface  (skipped — no cpuIsolation block)"
     info "the pre-phase prompt populates this on a TTY; non-interactive"
-    info "runs must hand-edit $hc (see docs/cpu-isolation.md) and re-run."
+    info "runs must hand-edit $hc (see docs/internal/cpu-isolation.md) and re-run."
     return
   fi
   { read -r iface; } < <(cpusets_json_nic "$ci_json")
@@ -2301,7 +2301,7 @@ PY
 # defensive fallback for runs that bypass the pre-phase (e.g., the
 # operator answered N at the pre-phase prompt, or someone hand-rolled
 # `--cpu-isolation` only without `--ecat-interface`). Only an explicit
-# `enabled: false` skips the phase. See docs/cpu-isolation.md for the
+# `enabled: false` skips the phase. See docs/internal/cpu-isolation.md for the
 # schema and lifecycle.
 #
 # Idempotent: re-runs are safe. The vendored manage_cpusets.sh skips
@@ -2345,7 +2345,7 @@ cpu_isolation() {
     else
       phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
       info "first bringup needs an interactive shell to configure CPU isolation,"
-      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/cpu-isolation.md),"
+      info "OR hand-edit $hc to add a cpuIsolation: block (see docs/internal/cpu-isolation.md),"
       info "OR set cpuIsolation.enabled=false to opt out persistently."
       return
     fi
@@ -3125,7 +3125,7 @@ _cpu_isolation_prompt() {
     printf '\n  CPU isolation carves cpuset partitions for the EtherCAT realtime\n'
     printf '  control loop. Required for production robots — answer the prompts\n'
     printf '  below to populate cpuIsolation: in %s.\n' "$hc"
-    printf '  See docs/cpu-isolation.md for the full schema.\n\n'
+    printf '  See docs/internal/cpu-isolation.md for the full schema.\n\n'
   } >&2
 
   local ans
