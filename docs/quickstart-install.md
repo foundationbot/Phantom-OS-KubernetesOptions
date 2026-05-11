@@ -240,11 +240,90 @@ Useful flags:
   on the live Applications). Useful after re-running the wizard to
   change image refs without a full bootstrap cycle.
 
+To **start over from a clean slate** (e.g. after a botched bootstrap
+that left half-applied state, or before re-installing with a different
+`.deb` version):
+
+```bash
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/teardown.sh
+```
+
+Runs `bootstrap-robot.sh --reset` plus removes `/etc/phantomos`,
+`/var/lib/k0s/images`, `/opt/Phantom-OS-KubernetesOptions`, the
+`.deb` packages, and reverts the cpu-isolation kernel cmdline +
+systemd CPUAffinity drop-in. After running, **reboot** to clear
+`isolcpus=` from the kernel, then re-install from the top of this
+guide. Pass `--keep-grub` to preserve the kernel cmdline across the
+teardown/reinstall cycle.
+
 ---
 
-## Updating images on a deployed robot
+## Post-install cleanup (recommended)
 
-Two paths, depending on `gitSource`:
+After verifying the cluster is healthy (step 5 above), run:
+
+```bash
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/post-install-cleanup.sh
+```
+
+The image-bundle install drops ~15-18 GB of `*.tar` files into
+`/var/lib/k0s/images/`. Once containerd has imported them (the
+postinst's R2 step), those tarballs are redundant — the layers live
+in containerd's content store. This script verifies every bundled
+tarball is in containerd's local store, then deletes the `.tar`
+files (keeping the `.phantomos-image-bundle.yaml` manifest as a
+record). Typical disk savings: 15-18 GB.
+
+Why not just delete unconditionally during install? The tarballs are
+useful as a recovery backup — if containerd's content store ever gets
+corrupted, re-running `install-image-bundle.sh` re-imports from the
+on-disk tarballs without needing a fresh download. Cleanup is opt-in
+once the operator has confirmed the install works.
+
+Pass `--dry-run` to see what would be deleted before doing it.
+
+If you SKIP this step, you may eventually hit a
+`node.kubernetes.io/disk-pressure` taint when disk usage on `/` crosses
+the kubelet's eviction threshold (default 90% used). Pods stop
+scheduling, bootstrap halts on phase 9 (dma-ethercat installer pod
+goes Pending and never starts). See "Common things that bite" below.
+
+---
+
+## Day-2 operations: changing host-config
+
+After editing `/etc/phantomos/host-config.yaml`, re-run the right
+bootstrap phase. Each command below is idempotent and completes in
+seconds; pick the narrowest one that matches what you edited:
+
+| You edited | Re-run | What it does |
+|---|---|---|
+| `images:` block | `bootstrap-robot.sh --image-overrides` | Re-renders each per-stack Application's `kustomize.images` from host-config. Argo reconciles within seconds. |
+| `deployments:` block (mounts, privileged) | `bootstrap-robot.sh --deployments` | Re-renders strategic-merge patches on positronic-control + api-server. |
+| `gitSource:` or `targetRevision:` | `bootstrap-robot.sh --gitops` | Re-renders the Application CRs themselves (repoURL + revision) + re-applies. Required when flipping local↔remote git source. |
+| `stacks.<x>.enabled` | `bootstrap-robot.sh --gitops` | Renders Applications per enabled stack. Disabling a stack leaves its existing Application orphan in Argo (until RFC 0008 cleanup lands). |
+| `stacks.<x>.selfHeal` or top-level `production:` | `bootstrap-robot.sh --gitops` | Updates the rendered Application's `syncPolicy.automated.selfHeal`. |
+| `cpuIsolation:` cpus / partitions / dmaRtCpu | `bootstrap-robot.sh --cpu-isolation` then `sudo reboot` | Re-writes grub cmdline + systemd CPUAffinity. Kernel needs a reboot to pick up the new `isolcpus=`. |
+| `cpuIsolation.nic.iface` / `selector` | `bootstrap-robot.sh --ecat-interface` | Re-resolves the NIC, re-writes the udev rule. |
+| `aiPcUrl:` | `bootstrap-robot.sh --operator-ui-config` | Re-renders the `operator-ui-pairing` ConfigMap. Rolls operator-ui pod if the value changed. |
+| `nodeLabels:` | `bootstrap-robot.sh --cluster` | Reconciles `foundation.bot/*` labels on the node. |
+| `dmaEthercat.configPath` / `configSet` | `bootstrap-robot.sh --install-dma-ethercat` | Re-renders the installer Job + applies. |
+| `logManagement:` | `bootstrap-robot.sh --log-management` | Updates journald + logrotate drop-ins. |
+| **Anything / not sure** | `bootstrap-robot.sh` (no flags) | Runs all phases; each is idempotent and prints `SKIP` for phases where nothing changed. ~30 sec on a healthy cluster. |
+
+Two safe rules of thumb:
+
+1. **The no-flag re-run is always safe.** Each phase is idempotent —
+   if nothing changed, it prints `SKIP`. Run this if you're not sure
+   which flag applies.
+2. **`--image-overrides` and `--gitops` are the most common Day-2
+   actions.** Bump an image tag → `--image-overrides`. Switch git
+   source mode → `--gitops`.
+
+### Updating bundled images (new build)
+
+If you changed the image bundled in the `.deb` (not just the
+host-config ref), you also need to refresh the bundle itself:
 
 **`gitSource: local`** (default — atomic via `.deb`):
 
@@ -255,22 +334,24 @@ bash scripts/build-images-deb.sh \
   --phantom-models-image localhost:5443/phantom-models:<new-tag> \
   --arch amd64
 
-# Ship to the robot
+# Ship to the robot (matching version+arch on all three files)
 scp dist/phantomos-k0s-*-all.deb robot:~/
 scp dist/phantomos-k0s-images-*-amd64.{deb,tar.zst} robot:~/
 
 # On the robot
-sudo dpkg -i ~/phantomos-k0s-*-all.deb
-sudo bash /opt/.../scripts/install-image-bundle.sh ./
-# /opt/.../.git/ HEAD advances; Argo reconciles within seconds
+sudo dpkg -i ./phantomos-k0s-*-all.deb
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh ./
+# /opt/.../.git/ HEAD advances; Argo reconciles to the new SHA within seconds
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/post-install-cleanup.sh
 ```
 
-**`gitSource: remote`** (GitHub-driven):
+**`gitSource: remote`** (GitHub-driven; image refs change but
+manifest source stays at GitHub):
 
 ```bash
 # On the robot
 sudo vim /etc/phantomos/host-config.yaml          # bump image refs
-sudo bash /opt/.../scripts/bootstrap-robot.sh --image-overrides
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-overrides
 ```
 
 ---
@@ -299,6 +380,30 @@ sudo bash /opt/.../scripts/bootstrap-robot.sh --image-overrides
   workload pulls a private DockerHub image not in the bundled set.
   With the image `.deb` installed, every standard image is on disk and
   the missing secret is a no-op.
+- **Phase 9 (dma-ethercat installer) Job stuck in `Pending`, pod
+  describe says `0/1 nodes are available: 1 node(s) had untolerated
+  taint(s)`** — the kubelet auto-tainted the node with
+  `node.kubernetes.io/disk-pressure:NoSchedule` because disk usage on
+  `/` crossed the eviction threshold. The bundled image tarballs in
+  `/var/lib/k0s/images/` plus containerd's unpacked layers can easily
+  push a 200 GB disk past 90% used after a fresh install. Fix:
+  ```bash
+  sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/post-install-cleanup.sh
+  ```
+  Frees 15-18 GB by removing tarballs already imported into
+  containerd. The kubelet untaints the node automatically once usage
+  drops below the high watermark; the installer pod schedules and
+  bootstrap proceeds. **Always run post-install-cleanup.sh after a
+  successful first bootstrap** — see the "Post-install cleanup"
+  section above.
+- **Phase 8 (cpu-isolation) fails with `cpuIsolation.partitions and
+  cpuIsolation.dmaRtCpu are required`** — host-config has a partial
+  `cpuIsolation:` block (e.g. `enabled: true` plus a partition name
+  but no cpus / dmaRtCpu / nic.iface). The pre-phase prompt fires when
+  the block is completely absent, but skips when partial. Fix: either
+  re-run `configure-host.sh` and complete the cpu-isolation prompts,
+  or set `cpuIsolation.enabled: false` if this host has no EtherCAT
+  hardware.
 
 ---
 
@@ -306,16 +411,21 @@ sudo bash /opt/.../scripts/bootstrap-robot.sh --image-overrides
 
 ```bash
 # install
-sudo dpkg -i ~/phantomos-k0s-*-all.deb
-sudo bash /opt/.../scripts/install-image-bundle.sh ./
+sudo dpkg -i ./phantomos-k0s-*-all.deb
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh ./
 
 # configure + bootstrap
-sudo bash /opt/.../scripts/configure-host.sh
-sudo bash /opt/.../scripts/bootstrap-robot.sh
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/configure-host.sh
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh
 
-# quick re-run after host-config change
-sudo bash /opt/.../scripts/bootstrap-robot.sh --image-overrides
-sudo bash /opt/.../scripts/bootstrap-robot.sh --gitops
+# post-install: free 15-18 GB by removing redundant tarballs
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/post-install-cleanup.sh
+
+# day-2: apply host-config changes (pick the narrowest one)
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-overrides   # images:
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --deployments       # deployments:
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --gitops            # gitSource/targetRevision/stacks.*.enabled
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh                     # anything / not sure (idempotent)
 
 # verify
 sudo k0s kubectl get pods -A
