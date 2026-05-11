@@ -50,6 +50,30 @@ resource "helm_release" "argocd" {
         nodePortHttps = var.argocd_https_nodeport
       }
     }
+    # Mount the host's /opt/Phantom-OS-KubernetesOptions tree
+    # (read-only) into argocd-repo-server so it can clone
+    # Application sources using `repoURL: file:///opt/...` when
+    # the host-config gitSource field is "local". Harmless when
+    # gitSource is "remote" — argocd just doesn't reference the
+    # mount path. See RFC 0006.
+    repoServer = {
+      volumes = [
+        {
+          name = "phantomos-source"
+          hostPath = {
+            path = "/opt/Phantom-OS-KubernetesOptions"
+            type = "Directory"
+          }
+        }
+      ]
+      volumeMounts = [
+        {
+          name      = "phantomos-source"
+          mountPath = "/opt/Phantom-OS-KubernetesOptions"
+          readOnly  = true
+        }
+      ]
+    }
   })]
 
   wait           = true
