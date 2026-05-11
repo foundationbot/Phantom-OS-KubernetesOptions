@@ -1,5 +1,11 @@
 # Quick start — install Phantom-OS on a robot
 
+> **CONFIDENTIAL.** This document and any corresponding documents shared
+> in this drive contain highly sensitive confidential information of
+> Foundation, including proprietary technical information that is
+> strictly restricted. Please handle in accordance with the NDA, do not
+> forward, and limit access to specifically authorized individuals only.
+
 Six steps to bring up a fresh robot from clean Ubuntu to a fully
 running cluster, starting from the three artifacts your build host
 produced (see `docs/quickstart-build.md`).

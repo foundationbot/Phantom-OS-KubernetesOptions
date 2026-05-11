@@ -1,5 +1,11 @@
 # Quick start — run a positronic policy
 
+> **CONFIDENTIAL.** This document and any corresponding documents shared
+> in this drive contain highly sensitive confidential information of
+> Foundation, including proprietary technical information that is
+> strictly restricted. Please handle in accordance with the NDA, do not
+> forward, and limit access to specifically authorized individuals only.
+
 The positronic-control pod ships in **dev mode** by default: its
 entrypoint is `sleep infinity`, so the pod stays alive but doesn't run
 the control runtime. Operators (and devs iterating on policies) start
