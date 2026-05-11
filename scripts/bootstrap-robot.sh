@@ -1151,18 +1151,44 @@ deps() {
     if [ "$DRY_RUN" = 1 ]; then
       info "DRY-RUN  apt-get install -y ${to_install[*]}"
     else
+      # apt-get install -y's exit code conflates two failure modes:
+      #   (a) the package we want couldn't be installed
+      #   (b) some unrelated package in the same dpkg transaction had a
+      #       postinst failure
+      # Common (b) case: a fresh apt run also pulls in linux-headers
+      # updates, whose postinst triggers a DKMS rebuild of the NVIDIA
+      # module, which refuses because the module is already installed.
+      # apt-get exits non-zero, but the package we asked for is installed
+      # fine — bootstrap shouldn't halt on that. So we ignore apt's exit
+      # code and check each requested package's actual installed state
+      # via dpkg-query. Pass for what landed; fail only for what didn't.
       apt_log=$(mktemp)
-      if apt-get update -qq && apt-get install -y "${to_install[@]}" >"$apt_log" 2>&1; then
-        for p in "${to_install[@]}"; do pass "$p installed"; done
-        rm -f "$apt_log"
-      else
-        fail "apt install failed for: ${to_install[*]}"
-        # Surface the resolver's reasoning instead of swallowing it —
-        # held packages and conflicts are otherwise invisible in the
-        # run log.
+      apt-get update -qq >>"$apt_log" 2>&1 || true
+      apt-get install -y "${to_install[@]}" >>"$apt_log" 2>&1
+      apt_rc=$?
+
+      really_failed=()
+      for p in "${to_install[@]}"; do
+        if dpkg-query -W -f='${Status}' "$p" 2>/dev/null \
+             | grep -q 'install ok installed'; then
+          pass "$p installed"
+        else
+          really_failed+=("$p")
+        fi
+      done
+
+      if [ "${#really_failed[@]}" -gt 0 ]; then
+        fail "apt install failed for: ${really_failed[*]}"
         sed 's/^/    apt: /' "$apt_log" >&2
-        rm -f "$apt_log"
+      elif [ "$apt_rc" != 0 ]; then
+        # apt-get returned non-zero but every requested package is in
+        # 'install ok installed' state. Surface as informational, not a
+        # hard failure — almost always an unrelated postinst issue
+        # (e.g. nvidia DKMS conflict during a linux-headers upgrade).
+        info "apt-get exit=$apt_rc but all requested packages installed —"
+        info "  unrelated postinst issue, run 'sudo dpkg --audit' to inspect"
       fi
+      rm -f "$apt_log"
     fi
   fi
 
