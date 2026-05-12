@@ -73,11 +73,18 @@ spec:
           command: ["rerun_streamer"]
           # rerun_streamer's argv parser is space-separated: `--flag value`,
           # not `--flag=value`. Each option/value is its own list element.
+          #
+          # --variant selects which bundled URDF the streamer loads from
+          # /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf
+          # (baked into the image alongside the referenced meshes/). Override
+          # per-host with a kustomize patch when the robot is mk2 or later.
           args:
             - --port
             - "9788"
+            - --variant
+            - "mk1"
             # - --urdf
-            # - /opt/configs/robot.urdf       # optional, mount it if used
+            # - /opt/configs/robot.urdf       # optional, overrides --variant
 
           ports:
             - name: rerun
