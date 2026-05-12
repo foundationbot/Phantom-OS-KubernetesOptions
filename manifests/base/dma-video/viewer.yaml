@@ -18,6 +18,8 @@ spec:
       hostNetwork: true
       hostIPC: true
       dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-cameras: "true"
       containers:
         - name: viewer
           image: foundationbot/dma-video:main

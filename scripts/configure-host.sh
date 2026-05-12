@@ -376,6 +376,11 @@ seed_operator_selfheal=""
 # wizard defaults to "local" on a fresh run.
 seed_git_source=""
 
+# foundation.bot/has-* node label values harvested from the prior
+# host-config.yaml. Filled in below when $seed_path is set; consulted
+# by the wizard's nodeLabels emit block.
+declare -A seed_node_labels=()
+
 if [ -n "$seed_path" ]; then
   seed_robot="$(python3 "$HELPER" "$seed_path" get robot 2>/dev/null || true)"
   seed_ai="$(python3 "$HELPER" "$seed_path" get aiPcUrl 2>/dev/null || true)"
@@ -496,6 +501,32 @@ if isinstance(api, dict):
     for i, m in enumerate(api.get("mounts") or []):
         if isinstance(m, dict) and m.get("host") and m.get("container"):
             emit("api", m.get("name") or f"mount-{i}", m["host"], m["container"])
+PY
+)
+
+  # nodeLabels harvest — pull existing foundation.bot/has-* values so
+  # the wizard's always-emit block uses prior operator choices as
+  # defaults. Keys absent from the prior file fall through to the
+  # registry default in host-config.py:NODE_LABEL_REGISTRY.
+  while IFS=$'\t' read -r key value; do
+    [ -n "$key" ] || continue
+    seed_node_labels[$key]="$value"
+  done < <(python3 - "$seed_path" <<'PY'
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(0)
+nl = cfg.get("nodeLabels") if isinstance(cfg, dict) else None
+if isinstance(nl, dict):
+    for k, v in nl.items():
+        # Coerce bool to lowercase string so an unquoted `true` in the
+        # source file round-trips as `'true'` (matches schema). Skip
+        # anything else — the validator will catch malformed values.
+        if isinstance(v, bool):
+            print(f"{k}\t{'true' if v else 'false'}")
+        elif isinstance(v, str):
+            print(f"{k}\t{v}")
 PY
 )
 fi
@@ -1422,6 +1453,26 @@ tmp="$(mktemp)"
       done
     fi
   fi
+
+  # nodeLabels: always emitted, with every gate from the registry
+  # explicit so a developer reading host-config.yaml can see at a
+  # glance which workloads are (de)scheduled on this robot. Per-key
+  # values come from the prior host-config when present, else from
+  # the registry default. Source of truth for keys + defaults +
+  # descriptions: scripts/lib/host-config.py:NODE_LABEL_REGISTRY.
+  printf 'nodeLabels:\n'
+  printf '  # Gates per-robot workloads via Kubernetes nodeSelectors. Bootstrap\n'
+  printf '  # reconciles the node'"'"'s foundation.bot/* labels from this block on\n'
+  printf '  # every run. Edit a value to (de)schedule the workload on this host.\n'
+  while IFS=$'\t' read -r nl_key nl_default nl_desc; do
+    [ -n "$nl_key" ] || continue
+    nl_value="$nl_default"
+    if [ "${seed_node_labels[$nl_key]+x}" = "x" ]; then
+      nl_value="${seed_node_labels[$nl_key]}"
+    fi
+    printf '  # %s\n' "$nl_desc"
+    printf "  %s: '%s'\n" "$nl_key" "$nl_value"
+  done < <(python3 "$HELPER" /dev/null get-node-label-defaults)
 } > "$tmp"
 
 heading "review"
