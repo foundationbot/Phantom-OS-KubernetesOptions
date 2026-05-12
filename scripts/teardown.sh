@@ -158,7 +158,14 @@ done
 # ---- 5. /opt/Phantom-OS-KubernetesOptions ---------------------------------
 
 heading "5. force-remove residual /opt/Phantom-OS-KubernetesOptions"
-if [ -d /opt/Phantom-OS-KubernetesOptions ]; then
+if [ -L /opt/Phantom-OS-KubernetesOptions ]; then
+  # Checkout-mode symlink (created by bootstrap-robot.sh's stage-source
+  # step). rm -rf on a symlink removes only the link, not its target —
+  # the operator's checkout is preserved.
+  link_target=$(readlink -f /opt/Phantom-OS-KubernetesOptions 2>/dev/null || true)
+  run rm -f /opt/Phantom-OS-KubernetesOptions
+  pass "removed symlink (target preserved: ${link_target:-?})"
+elif [ -d /opt/Phantom-OS-KubernetesOptions ]; then
   run rm -rf /opt/Phantom-OS-KubernetesOptions
   pass "removed"
 else

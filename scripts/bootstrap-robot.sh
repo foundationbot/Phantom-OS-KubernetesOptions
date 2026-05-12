@@ -3,6 +3,21 @@
 # state for this fleet. Idempotent: re-running on a bootstrapped host
 # detects existing config and skips destructive steps.
 #
+# Supported invocation roots:
+#   - installed (.deb)  Run from /opt/Phantom-OS-KubernetesOptions/scripts/
+#                       after `dpkg -i phantom-os-k8s-options*.deb`. The
+#                       installed tree at /opt/... is the source tree.
+#   - checkout          Run from any git checkout of this repo (e.g.
+#                       ~/foundation/DMA/Phantom-OS-KubernetesOptions/
+#                       scripts/bootstrap-robot.sh). Phase 10 (gitops)
+#                       auto-symlinks /opt/Phantom-OS-KubernetesOptions
+#                       -> $REPO_ROOT before terraform apply, so the
+#                       argocd-repo-server hostPath mount resolves. If
+#                       a real /opt/Phantom-OS-KubernetesOptions dir
+#                       already exists (foreign .deb), bootstrap refuses
+#                       and tells the operator to teardown.sh first —
+#                       dpkg-managed files are not clobbered.
+#
 # Usage:
 #   sudo bash scripts/bootstrap-robot.sh --robot <name> [flags]
 #
@@ -3718,6 +3733,79 @@ _resolve_git_source() {
   printf '%s\t%s' "$repo_url" "$target_rev"
 }
 
+# Ensure $LOCAL_GIT_TREE (default /opt/Phantom-OS-KubernetesOptions)
+# exists on the host so argocd-repo-server's hostPath mount (configured
+# unconditionally in terraform/main.tf) starts cleanly.
+#
+# Two supported invocation modes:
+#
+#   1. installed     — REPO_ROOT == $LOCAL_GIT_TREE (the .deb laid down
+#                      the tree at /opt/...). Nothing to do; skip.
+#
+#   2. checkout      — REPO_ROOT != $LOCAL_GIT_TREE (the operator is
+#                      running the script from a git clone anywhere on
+#                      disk). Stage the tree by symlinking
+#                      $LOCAL_GIT_TREE -> $REPO_ROOT. kubelet follows
+#                      symlinks for hostPath type=Directory, so the
+#                      mount succeeds and the rendered Application
+#                      (repoURL=file://$LOCAL_GIT_TREE) keeps a stable
+#                      path inside the repo-server pod.
+#
+# Idempotent: a symlink already pointing at REPO_ROOT is a no-op. If a
+# real directory exists at $LOCAL_GIT_TREE and REPO_ROOT differs (a
+# foreign .deb tree), bootstrap refuses and tells the operator to
+# teardown the .deb first — we don't clobber dpkg-managed files.
+_stage_source_tree() {
+  local target="${LOCAL_GIT_TREE:-/opt/Phantom-OS-KubernetesOptions}"
+
+  if [ "$REPO_ROOT" = "$target" ]; then
+    skip "source tree already at $target (installed mode)"
+    return 0
+  fi
+
+  if [ -L "$target" ]; then
+    local cur
+    cur="$(readlink -f -- "$target" 2>/dev/null || true)"
+    if [ "$cur" = "$REPO_ROOT" ]; then
+      skip "source tree symlink already points at $REPO_ROOT"
+      return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  re-point $target -> $REPO_ROOT  (was -> ${cur:-?})"
+      return 0
+    fi
+    if rm -f -- "$target" && ln -s -- "$REPO_ROOT" "$target"; then
+      pass "re-pointed $target -> $REPO_ROOT  (was -> ${cur:-?})"
+      return 0
+    fi
+    fail "could not re-point $target -> $REPO_ROOT"
+    return 1
+  fi
+
+  if [ -d "$target" ]; then
+    fail "$target exists as a directory (likely a .deb install) and does not match REPO_ROOT=$REPO_ROOT"
+    info "either run the bootstrap from $target/scripts/, or remove the .deb (teardown.sh / apt remove) first"
+    return 1
+  fi
+
+  if [ -e "$target" ]; then
+    fail "$target exists and is neither a symlink nor a directory"
+    return 1
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  mkdir -p $(dirname "$target") && ln -s $REPO_ROOT $target"
+    return 0
+  fi
+  mkdir -p -- "$(dirname "$target")" || { fail "mkdir $(dirname "$target")"; return 1; }
+  if ln -s -- "$REPO_ROOT" "$target"; then
+    pass "staged source tree: $target -> $REPO_ROOT"
+    return 0
+  fi
+  fail "could not create symlink $target -> $REPO_ROOT"
+  return 1
+}
+
 _rendered_app_path() {
   local stack="${1:?stack required}"
   printf '%s/phantomos-app-%s.yaml' "$RENDERED_APP_DIR" "$stack"
@@ -3825,6 +3913,14 @@ _gitops_render_app() {
 gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 10: gitops  (skipped)"; return; fi
   phase "phase 10: gitops (install argocd + apply per-host Application)"
+
+  # argocd-repo-server mounts $LOCAL_GIT_TREE (/opt/Phantom-OS-KubernetesOptions)
+  # as a hostPath volume (terraform/main.tf). Stage that path here — for
+  # .deb installs it already exists (skip); for checkout-mode runs we
+  # symlink it to REPO_ROOT so kubelet's type=Directory check passes and
+  # the rendered Application's file:///opt/... repoURL resolves inside
+  # the repo-server pod.
+  _stage_source_tree || return
 
   if [ ! -d "$REPO_ROOT/terraform" ]; then
     fail "terraform/ not found at $REPO_ROOT/terraform"; return
