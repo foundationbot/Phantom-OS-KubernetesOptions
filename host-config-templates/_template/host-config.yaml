@@ -240,9 +240,8 @@ images:
 #     compress: true
 
 # Per-host node labels. Bootstrap applies these to the k8s Node
-# object so DaemonSets gating on nodeSelector can target subsets of
-# the fleet — yovariable-server, cpp-state-estimator, dma-recorder,
-# future has-imu workloads, etc.
+# object so Deployments / DaemonSets gating on nodeSelector can target
+# subsets of the fleet.
 #
 # Bootstrap manages the foundation.bot/ prefix as a CLOSED SET: every
 # label in this block is applied; any label on the node under the same
@@ -254,37 +253,36 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
-# Default-on: foundation.bot/has-positronic and
-# foundation.bot/has-yovariable are applied as 'true' on every robot
-# UNLESS explicitly set to 'false' here. Operators migrating a robot
-# to phantom-locomotion must set BOTH
-#   foundation.bot/has-positronic: "false"
-#   foundation.bot/has-locomotion: "true"
-# The validator rejects setting only has-locomotion=true (positronic
-# is on by default; both controllers would try to drive the robot).
+# Mutual exclusion: setting foundation.bot/has-locomotion to 'true'
+# requires foundation.bot/has-positronic: 'false' (the validator
+# rejects has-locomotion=true with default-on positronic).
 #
 # Values must be strings — quote 'true' / 'false' or the YAML parser
 # turns them into Python booleans, which the validator rejects with
 # a clear error.
 #
-# Known label conventions in this repo:
-#   foundation.bot/has-positronic        positronic-control Deployment   (default: true)
-#   foundation.bot/has-yovariable        yovariable-server DaemonSet     (default: true)
-#   foundation.bot/has-locomotion        phantom-locomotion DaemonSet    (mutually excl. with has-positronic)
-#   foundation.bot/has-state-estimator   cpp-robot-state-estimator DS    (default: false; opt-in)
-#   foundation.bot/has-recorder          dma-recorder DaemonSet          (default: false; opt-in)
-#   foundation.bot/has-streamer          rerun-streamer DaemonSet        (default: false; opt-in)
-#
-# nodeLabels:
-#   # Default robot — positronic is implicit; just opt into extras.
-#   foundation.bot/has-state-estimator: "true"
-#   foundation.bot/has-recorder:        "true"
-#
-# nodeLabels:
-#   # Locomotion-stack robot — explicitly disable positronic.
-#   foundation.bot/has-positronic:      "false"
-#   foundation.bot/has-locomotion:      "true"
-#   foundation.bot/has-state-estimator: "true"
+# Registry of known gates: scripts/lib/host-config.py:NODE_LABEL_REGISTRY.
+# configure-host.sh emits this block automatically with all known keys
+# populated to their defaults. Hand-editing is fine; the wizard
+# preserves your values on the next re-run.
+nodeLabels:
+  # Gates per-robot workloads via Kubernetes nodeSelectors. Bootstrap
+  # reconciles the node's foundation.bot/* labels from this block on
+  # every run. Edit a value to (de)schedule the workload on this host.
+  # dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)
+  foundation.bot/has-cameras: 'true'
+  # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
+  foundation.bot/has-locomotion: 'false'
+  # positronic-control Deployment
+  foundation.bot/has-positronic: 'true'
+  # dma-recorder DaemonSet (dma-streams)
+  foundation.bot/has-recorder: 'true'
+  # cpp-robot-state-estimator DaemonSet
+  foundation.bot/has-state-estimator: 'false'
+  # rerun-streamer Deployment (dma-streams)
+  foundation.bot/has-streamer: 'false'
+  # yovariable-server DaemonSet
+  foundation.bot/has-yovariable: 'true'
 
 # Per-host hostPath mounts injected into specific Deployments at
 # bootstrap time. The base manifests in this repo carry only universal

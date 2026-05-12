@@ -17,6 +17,7 @@ Usage:
   host-config.py <path> set-cpu-isolation-json <json>
   host-config.py <path> get-log-management-json
   host-config.py <path> get-node-labels-json
+  host-config.py <path> get-node-label-defaults       # TSV: key\tdefault\tdescription
   host-config.py <path> get-phantom-locomotion-policy
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
@@ -93,6 +94,45 @@ _K8S_LABEL_VALUE_RE = re.compile(
 # foundation.bot/robot is bootstrap-managed (always 'true' on every
 # robot). nodeLabels: in host-config.yaml cannot set or override it.
 RESERVED_NODE_LABEL_KEYS: frozenset[str] = frozenset({"foundation.bot/robot"})
+
+# Canonical registry of foundation.bot/has-* node labels that gate
+# workloads in this repo. Single source of truth for:
+#   1. configure-host.sh — emits the nodeLabels: block with all keys
+#      present, defaults applied, and one comment per key explaining
+#      what each gates.
+#   2. bootstrap-robot.sh — _reconcile_node_labels uses these defaults
+#      to fill in keys the operator omitted from host-config.yaml.
+#   3. validators / future tooling.
+#
+# To add a new gate: append a tuple here AND add the matching
+# nodeSelector to the gated manifest under manifests/base/. Keep
+# alphabetical by key so the rendered file diffs cleanly when a new
+# entry is inserted.
+#
+# Tuple: (key, default, description-shown-as-comment-in-host-config).
+NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
+    ("foundation.bot/has-cameras",
+     "true",
+     "dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)"),
+    ("foundation.bot/has-locomotion",
+     "false",
+     "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
+    ("foundation.bot/has-positronic",
+     "true",
+     "positronic-control Deployment"),
+    ("foundation.bot/has-recorder",
+     "true",
+     "dma-recorder DaemonSet (dma-streams)"),
+    ("foundation.bot/has-state-estimator",
+     "false",
+     "cpp-robot-state-estimator DaemonSet"),
+    ("foundation.bot/has-streamer",
+     "false",
+     "rerun-streamer Deployment (dma-streams)"),
+    ("foundation.bot/has-yovariable",
+     "true",
+     "yovariable-server DaemonSet"),
+)
 
 
 def _stack_spec(cfg: dict, name: str) -> dict:
@@ -286,6 +326,19 @@ def cmd_get_node_labels_json(cfg: dict) -> int:
         print("error: 'nodeLabels' must be a mapping", file=sys.stderr)
         return 2
     print(json.dumps(block))
+    return 0
+
+
+def cmd_get_node_label_defaults() -> int:
+    """Emit the NODE_LABEL_REGISTRY as TSV `key\\tdefault\\tdescription`,
+    one row per registered gate. Stateless — does not read host-config.
+
+    Wizard (configure-host.sh) uses this to emit the nodeLabels: block
+    with all known gates explicit; bootstrap-robot.sh's reconciler uses
+    it to fill in defaults for keys the operator omitted.
+    """
+    for key, default, desc in NODE_LABEL_REGISTRY:
+        print(f"{key}\t{default}\t{desc}")
     return 0
 
 
@@ -1567,6 +1620,10 @@ def main() -> int:
         print("usage: host-config.py <path> <get|get-images-json|validate> [field]", file=sys.stderr)
         return 2
     path, cmd = sys.argv[1], sys.argv[2]
+    # Stateless commands: do not read host-config (the file may not
+    # exist yet on a fresh host, e.g. during the wizard's initial run).
+    if cmd == "get-node-label-defaults":
+        return cmd_get_node_label_defaults()
     cfg = load(path)
     if cmd == "get":
         if len(sys.argv) != 4:

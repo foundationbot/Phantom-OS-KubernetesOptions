@@ -17,6 +17,8 @@ spec:
         - name: dockerhub-creds
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-cameras: "true"
       containers:
         - name: mediamtx
           image: bluenviron/mediamtx:latest

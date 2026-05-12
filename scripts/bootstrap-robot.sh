@@ -1567,8 +1567,8 @@ _reconcile_node_labels() {
   local hc_path="/etc/phantomos/host-config.yaml"
   [ -f "$hc_path" ] || hc_path="$REPO_ROOT/host-config.yaml"
 
-  # Desired = nodeLabels: from host-config + the unconditional
-  # foundation.bot/robot=true.
+  # Desired = nodeLabels: from host-config + registry defaults +
+  # the unconditional foundation.bot/robot=true.
   local desired_json='{}'
   if [ -f "$hc_path" ]; then
     if ! desired_json=$(python3 "$HOST_CONFIG_HELPER" "$hc_path" \
@@ -1578,24 +1578,21 @@ _reconcile_node_labels() {
   fi
   # Bootstrap-managed labels:
   #   foundation.bot/robot: always 'true' — overrides anything in host-config.
-  #   foundation.bot/has-positronic: default 'true' but operator can
-  #     override (set to "false" in host-config.yaml's nodeLabels: to
-  #     migrate a robot to phantom-locomotion). Validator enforces
-  #     mutual exclusion with foundation.bot/has-locomotion.
-  #   foundation.bot/has-yovariable: default 'true' — gates the
-  #     yovariable-server DaemonSet. Set to "false" in nodeLabels: to
-  #     take it off a host without touching the manifest.
-  desired_json=$(printf '%s' "$desired_json" | jq '
-    . + {"foundation.bot/robot": "true"}
-    | if has("foundation.bot/has-positronic")
-        then .
-        else . + {"foundation.bot/has-positronic": "true"}
-      end
-    | if has("foundation.bot/has-yovariable")
-        then .
-        else . + {"foundation.bot/has-yovariable": "true"}
-      end
-  ')
+  #   foundation.bot/has-*:  every entry in host-config.py's NODE_LABEL_REGISTRY
+  #     is filled in to its default value when not explicitly set in
+  #     host-config.yaml's nodeLabels:. Operator-set values win.
+  #     Validator enforces mutual exclusion of has-positronic/has-locomotion.
+  local defaults_tsv
+  defaults_tsv=$(python3 "$HOST_CONFIG_HELPER" /dev/null \
+                  get-node-label-defaults 2>/dev/null || true)
+  while IFS=$'\t' read -r key default _desc; do
+    [ -n "$key" ] || continue
+    desired_json=$(printf '%s' "$desired_json" \
+      | jq --arg k "$key" --arg v "$default" \
+          'if has($k) then . else . + {($k): $v} end')
+  done <<< "$defaults_tsv"
+  desired_json=$(printf '%s' "$desired_json" \
+    | jq '. + {"foundation.bot/robot": "true"}')
 
   # Apply each desired label.
   local key value
