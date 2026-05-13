@@ -127,6 +127,13 @@ spec:
                 optional: true
           env:
             # Hardcoded — image contract, never varies per robot.
+            # NVIDIA_* are normally inherited from upstream nvcr.io base
+            # images, but not every BASE_IMAGE in our chain sets them
+            # (e.g. amd64 derives from osrf/ros). Set explicitly so the
+            # nvidia-container-runtime hook reliably injects all GPUs +
+            # driver libs regardless of base image.
+            - { name: NVIDIA_VISIBLE_DEVICES,          value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES,      value: all }
             - { name: PHANTOM_MODELS,                  value: /root/models }
             - { name: RMW_IMPLEMENTATION,              value: rmw_fastrtps_cpp }
             - { name: FASTRTPS_DEFAULT_PROFILES_FILE,  value: /src/workspace/fastdds_config.xml }

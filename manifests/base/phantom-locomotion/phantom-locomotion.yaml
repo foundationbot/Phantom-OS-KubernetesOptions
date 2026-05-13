@@ -126,6 +126,13 @@ spec:
                 name: phantom-locomotion-config
                 optional: true
           env:
+            # NVIDIA_* are normally inherited from upstream nvcr.io base
+            # images, but not every BASE_IMAGE in our chain sets them
+            # (e.g. amd64 derives from osrf/ros). Set explicitly so the
+            # nvidia-container-runtime hook reliably injects all GPUs +
+            # driver libs regardless of base image.
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
             - { name: ROS_DOMAIN_ID,    value: "101" }
             - { name: SDL_VIDEODRIVER,  value: "dummy" }
           ports:
