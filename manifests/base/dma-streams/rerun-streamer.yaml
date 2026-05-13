@@ -78,11 +78,20 @@ spec:
           # /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf
           # (baked into the image alongside the referenced meshes/). Override
           # per-host with a kustomize patch when the robot is mk2 or later.
+          #
+          # --queue-memory-limit caps the in-process AsyncLogQueue in MB and
+          # drops oldest entries past the cap. The streamer was OOMing
+          # under sustained backpressure (downstream viewer slow or
+          # disconnected); the tight default keeps RSS bounded. Override
+          # per-host through deployments.rerun-streamer.queueMemoryLimitMb
+          # in host-config.yaml.
           args:
             - --port
             - "9788"
             - --variant
             - "mk1"
+            - --queue-memory-limit
+            - "8"
             # - --urdf
             # - /opt/configs/robot.urdf       # optional, overrides --variant
 

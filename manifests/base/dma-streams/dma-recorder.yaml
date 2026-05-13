@@ -93,9 +93,17 @@ spec:
           command: ["dma_recorder"]
           # dma_recorder's argv parser is space-separated: `--flag value`,
           # not `--flag=value`. Each option/value is its own list element.
+          #
+          # --variant picks which bundled URDF the recorder embeds into each
+          # .rrd via /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf
+          # (URDF + meshes are baked into the image). Without this the rrd
+          # has no robot to render when opened later. Override per-host
+          # through host-config deployments.dma-recorder.variant.
           args:
             - --output
             - /recordings
+            - --variant
+            - "mk1"
             - --max-duration
             - "60"                    # seconds per .rrd file
             - --max-size
