@@ -626,8 +626,11 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "container": "recorder",
     },
     # DMA.streams live web visualization. Deployed but inert by default
-    # (foundation.bot/has-streamer label not set). Override channel here
-    # is mainly for adding a URDF mount or swapping image tags per host.
+    # (foundation.bot/has-streamer label not set). Override channels:
+    #   * variant: mk1 | mk2 — picks the bundled URDF rerun_streamer loads.
+    #     The image ships /usr/local/share/dma-streams/urdf/phantom_<v>.urdf
+    #     for both variants; this knob just flips the --variant argv.
+    #   * mounts: host-path overlays (e.g. a custom URDF file).
     "rerun-streamer": {
         "stack": "core",
         "kind": "DaemonSet",
@@ -635,6 +638,20 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "container": "streamer",
     },
 }
+
+
+# Base args for rerun_streamer's container. The strategic-merge patch
+# emitted for `deployments.rerun-streamer.variant:` replaces args
+# wholesale (strategic-merge cannot merge a list of scalar strings), so
+# this constant is the contract between host-config.py and the base
+# manifest at manifests/base/dma-streams/rerun-streamer.yaml. If the
+# manifest gains another flag, mirror it here so per-host variant
+# overrides don't silently drop it.
+RERUN_STREAMER_BASE_ARGS: list[str] = ["--port", "9788"]
+
+# Allowlist for deployments.rerun-streamer.variant. Add new mk-N entries
+# as new robot generations ship with bundled URDFs in the image.
+RERUN_STREAMER_VARIANTS: frozenset[str] = frozenset({"mk1", "mk2"})
 
 
 def _build_deployment_patch(
@@ -686,6 +703,14 @@ def _build_deployment_patch(
             f"will run with full host access (/dev passthrough enabled)"
         )
         container_spec["securityContext"] = {"privileged": True}
+
+    # rerun-streamer: variant: mk1|mk2 → strategic-merge replaces the
+    # container's args list. See RERUN_STREAMER_BASE_ARGS for the
+    # base-manifest contract. Only valid for the rerun-streamer target;
+    # validate() rejects the field on any other deployment.
+    variant = spec.get("variant")
+    if variant is not None and deployment_name == "rerun-streamer":
+        container_spec["args"] = [*RERUN_STREAMER_BASE_ARGS, "--variant", str(variant)]
 
     api_version = "apps/v1"
     patch = {
@@ -1496,6 +1521,26 @@ def cmd_validate(cfg: dict) -> int:
                 errors.append(
                     f"deployments.{name}.privileged: must be true or false"
                 )
+            # variant: only valid on rerun-streamer (selects bundled URDF).
+            if "variant" in spec:
+                if name != "rerun-streamer":
+                    errors.append(
+                        f"deployments.{name}.variant: only supported on "
+                        f"rerun-streamer (selects bundled URDF)"
+                    )
+                else:
+                    v = spec["variant"]
+                    if not isinstance(v, str):
+                        errors.append(
+                            f"deployments.{name}.variant: must be a string"
+                        )
+                    elif v not in RERUN_STREAMER_VARIANTS:
+                        errors.append(
+                            f"deployments.{name}.variant: {v!r} not in "
+                            f"{sorted(RERUN_STREAMER_VARIANTS)} — add the "
+                            f"new variant to RERUN_STREAMER_VARIANTS and "
+                            f"ship the URDF in the dma-streams image first"
+                        )
             mounts = spec.get("mounts") or []
             if not isinstance(mounts, list):
                 errors.append(f"deployments.{name}.mounts: must be a list")

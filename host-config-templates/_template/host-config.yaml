@@ -326,3 +326,10 @@ nodeLabels:
 #                                  container: /home/operator/repos/argus/operator_ui}
 #       - {name: phantom-scripts,  host: /opt/phantom/scripts,
 #                                  container: /opt/phantom/scripts}
+#
+#   # rerun-streamer: variant: mk1|mk2 picks the bundled URDF the live
+#   # viewer loads from /usr/local/share/dma-streams/urdf/. Both URDFs
+#   # are baked into the image, so this is purely an argv override — no
+#   # mount needed. mk2 hosts:
+#   rerun-streamer:
+#     variant: mk2
