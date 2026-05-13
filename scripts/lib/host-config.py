@@ -616,9 +616,11 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "container": "api",
     },
     # DMA.streams recorder DaemonSet — patches go to the `recorder` container
-    # (not the `janitor` sidecar). Typical override: redirect /recordings to
-    # a dedicated data partition (e.g. /data2/recordings) on hosts where
-    # /root sits on the OS disk.
+    # (not the `janitor` sidecar). Override channels:
+    #   * variant: mk1 | mk2 — picks the bundled URDF the recorder embeds
+    #     into each .rrd via log_file_from_path. Required for the recorded
+    #     file to render a robot when opened off-robot.
+    #   * mounts: host-path overlays (e.g. redirect /recordings to /data2).
     "dma-recorder": {
         "stack": "core",
         "kind": "DaemonSet",
@@ -626,8 +628,14 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "container": "recorder",
     },
     # DMA.streams live web visualization. Deployed but inert by default
-    # (foundation.bot/has-streamer label not set). Override channel here
-    # is mainly for adding a URDF mount or swapping image tags per host.
+    # (foundation.bot/has-streamer label not set). Override channels:
+    #   * variant: mk1 | mk2 — picks the bundled URDF rerun_streamer loads.
+    #     The image ships /usr/local/share/dma-streams/urdf/phantom_<v>.urdf
+    #     for both variants; this knob just flips the --variant argv.
+    #   * queueMemoryLimitMb: hard cap on the streamer's in-process
+    #     AsyncLogQueue (drops oldest when over budget). Tight cap is
+    #     the OOM-prevention knob.
+    #   * mounts: host-path overlays (e.g. a custom URDF file).
     "rerun-streamer": {
         "stack": "core",
         "kind": "DaemonSet",
@@ -635,6 +643,39 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "container": "streamer",
     },
 }
+
+
+# Base args for argv-overlaying deployments. The strategic-merge patches
+# emitted when host-config sets argv-shaped fields (variant,
+# queueMemoryLimitMb) REPLACE args wholesale — strategic-merge cannot
+# merge a list of scalar strings — so each entry below is the contract
+# between host-config.py and the matching base manifest under
+# manifests/base/dma-streams/. If a base manifest gains another flag,
+# mirror it here so per-host overrides don't silently drop it.
+#
+# Each list is exactly what the manifest's `args:` contains EXCEPT for
+# the fields we project from host-config (variant, queueMemoryLimitMb).
+# Those are appended onto the base list when set.
+RERUN_STREAMER_BASE_ARGS: list[str] = ["--port", "9788"]
+DMA_RECORDER_BASE_ARGS: list[str] = [
+    "--output", "/recordings",
+    "--max-duration", "60",
+    "--max-size", "100",
+    "--decimate", "1",
+    "--manual-arm",
+]
+DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
+    "rerun-streamer": RERUN_STREAMER_BASE_ARGS,
+    "dma-recorder": DMA_RECORDER_BASE_ARGS,
+}
+
+# Allowlist for deployments.{rerun-streamer,dma-recorder}.variant. Add
+# new mk-N entries as new robot generations ship with bundled URDFs in
+# the image. The streamer auto-loads phantom_<variant>.urdf for live
+# rendering; the recorder embeds the same URDF + meshes into each .rrd
+# so the file is self-contained when opened off-robot.
+ROBOT_VARIANTS: frozenset[str] = frozenset({"mk1", "mk2"})
+VARIANT_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"rerun-streamer", "dma-recorder"})
 
 
 def _build_deployment_patch(
@@ -686,6 +727,27 @@ def _build_deployment_patch(
             f"will run with full host access (/dev passthrough enabled)"
         )
         container_spec["securityContext"] = {"privileged": True}
+
+    # Argv-overlay fields (variant, queueMemoryLimitMb). When any of these
+    # are set, strategic-merge REPLACES the whole args list, so we
+    # re-emit the base manifest's args from DEPLOYMENT_BASE_ARGS and
+    # append the overlay flags. validate() rejects each field on
+    # deployments where it isn't supported.
+    variant = spec.get("variant")
+    queue_limit_mb = spec.get("queueMemoryLimitMb")
+    if variant is not None or queue_limit_mb is not None:
+        base_args = DEPLOYMENT_BASE_ARGS.get(deployment_name)
+        if base_args is None:
+            # Defensive — validate() should have caught this. Skip silently
+            # rather than emit a broken patch.
+            pass
+        else:
+            args_out = list(base_args)
+            if variant is not None:
+                args_out += ["--variant", str(variant)]
+            if queue_limit_mb is not None:
+                args_out += ["--queue-memory-limit", str(queue_limit_mb)]
+            container_spec["args"] = args_out
 
     api_version = "apps/v1"
     patch = {
@@ -1496,6 +1558,50 @@ def cmd_validate(cfg: dict) -> int:
                 errors.append(
                     f"deployments.{name}.privileged: must be true or false"
                 )
+            # variant: selects the bundled URDF the deployment loads
+            # (rerun-streamer renders it live; dma-recorder embeds it
+            # into each .rrd so the file is self-contained off-robot).
+            if "variant" in spec:
+                if name not in VARIANT_SUPPORTED_DEPLOYMENTS:
+                    errors.append(
+                        f"deployments.{name}.variant: only supported on "
+                        f"{sorted(VARIANT_SUPPORTED_DEPLOYMENTS)}"
+                    )
+                else:
+                    v = spec["variant"]
+                    if not isinstance(v, str):
+                        errors.append(
+                            f"deployments.{name}.variant: must be a string"
+                        )
+                    elif v not in ROBOT_VARIANTS:
+                        errors.append(
+                            f"deployments.{name}.variant: {v!r} not in "
+                            f"{sorted(ROBOT_VARIANTS)} — add the new "
+                            f"variant to ROBOT_VARIANTS and ship the URDF "
+                            f"in the dma-streams image first"
+                        )
+            # queueMemoryLimitMb: bounds rerun-streamer's in-process
+            # AsyncLogQueue (drops oldest frames when over budget).
+            # Tight cap is the OOM-prevention knob; only meaningful on
+            # the live streamer.
+            if "queueMemoryLimitMb" in spec:
+                if name != "rerun-streamer":
+                    errors.append(
+                        f"deployments.{name}.queueMemoryLimitMb: only "
+                        f"supported on rerun-streamer"
+                    )
+                else:
+                    q = spec["queueMemoryLimitMb"]
+                    if isinstance(q, bool) or not isinstance(q, int):
+                        errors.append(
+                            f"deployments.{name}.queueMemoryLimitMb: "
+                            f"must be a positive integer (MB)"
+                        )
+                    elif q < 1:
+                        errors.append(
+                            f"deployments.{name}.queueMemoryLimitMb: "
+                            f"must be >= 1 MB"
+                        )
             mounts = spec.get("mounts") or []
             if not isinstance(mounts, list):
                 errors.append(f"deployments.{name}.mounts: must be a list")
