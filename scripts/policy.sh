@@ -25,8 +25,8 @@ case "${1:-}" in
 esac
 
 POD="$($KUBECTL -n "$NAMESPACE" get pod -l "$LABEL" \
-       -o jsonpath='{.items[0].metadata.name}')"
-[ -n "$POD" ] || { echo "error: no phantom-locomotion pod found" >&2; exit 1; }
+       -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print $1}')"
+[ -n "$POD" ] || { echo "error: no pod matching -l $LABEL in namespace $NAMESPACE" >&2; exit 1; }
 
 exec $KUBECTL -n "$NAMESPACE" exec "$POD" -c "$CONTAINER" -- \
   bash -lc "source /opt/ros/jazzy/setup.bash && \
