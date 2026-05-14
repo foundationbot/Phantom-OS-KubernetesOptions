@@ -1145,13 +1145,28 @@ land directly on the host):
 access but only publish outbound to `mediamtx`; neither opens a
 listening port. `dma-recorder` runs with `hostNetwork: false`.
 
-**Operator stack:**
+**Operator stack** — host-exposed:
 
 | Port | Proto | Owner | Source |
 |---|---|---|---|
-| 30080 | TCP | `operator-ui` (NodePort, every node IP) | `manifests/base/argus/nginx.yaml` |
+| 30080 | TCP | `nginx` → `operator-ui` (NodePort, every node IP) | `manifests/base/argus/nginx.yaml` |
 
-`nimbus` services are cluster-internal only — no host port exposure.
+**Operator stack** — cluster-internal `ClusterIP` Services (reachable
+only from inside the cluster, e.g. `argus-auth.argus.svc.cluster.local:9000`;
+not bound on the host):
+
+| Service.port | Pod containerPort | Owner | Source |
+|---|---|---|---|
+| 80 | 80 | `nginx` (front-door, fronted by the 30080 NodePort) | `manifests/base/argus/nginx.yaml` |
+| 8004 | 8004 | `operator-ui` | `manifests/base/argus/operator-ui.yaml` |
+| 9000 | 9000 | `argus-auth` | `manifests/base/argus/argus-auth.yaml` |
+| 9001 | 9001 | `argus-user` | `manifests/base/argus/argus-user.yaml` |
+| 9002 | 9002 | `argus-company` | `manifests/base/argus/argus-company.yaml` |
+| 9100 | 9100 | `argus-gateway` | `manifests/base/argus/argus-gateway.yaml` |
+| 27017 | 27017 | `mongodb` | `manifests/base/argus/mongodb.yaml` |
+| 6379 | 6379 | `redis` | `manifests/base/argus/redis.yaml` |
+| 8080 | 80 | `eg-server` (nimbus) | `manifests/base/nimbus/eg-server.yaml` |
+| 5432 | 5432 | `postgres` (nimbus) | `manifests/base/nimbus/postgres.yaml` |
 
 ### 8.4 Targeted overrides
 
