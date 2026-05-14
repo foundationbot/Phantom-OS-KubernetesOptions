@@ -379,8 +379,7 @@ while [ $# -gt 0 ]; do
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
     --skip-ethercat-uninstall)
-                         # Back-compat: now a no-op; uninstall is opt-in.
-                         SKIP_ETHERCAT_UNINSTALL=0; shift ;;
+                         SKIP_ETHERCAT_UNINSTALL=1; shift ;;
     --uninstall-ethercat)
                          # Explicitly run the dma-ethercat uninstaller. Wipes
                          # /etc/dma/ — operator-placed config files there
@@ -598,6 +597,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_PURGE_PODS=1
   SKIP_DOCKER_STOP=1
   SKIP_STOP_SERVICES=1
+  SKIP_ETHERCAT_UNINSTALL=1
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
       deps)              SKIP_DEPS=0 ;;
