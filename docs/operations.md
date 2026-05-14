@@ -1111,7 +1111,49 @@ the full schema and defaults.
 | ArgoCD UI port-forward | `sudo k0s kubectl -n argocd port-forward svc/argocd-server 8080:443` |
 | Operator UI | `http://<robot-ip>:30080` |
 
-### 8.3 Targeted overrides
+### 8.3 Host ports exposed by stack workloads
+
+Ports bound on the robot's host network namespace by each stack. Use
+this when diagnosing port collisions, opening firewall holes, or
+mapping a tcpdump back to the workload that owns the socket.
+
+**Core stack** — explicit `hostPort` declarations:
+
+| Port | Proto | Owner | Bind | Source |
+|---|---|---|---|---|
+| 5000 | TCP | `phantomos-api-server` | all | `manifests/base/phantomos-api-server/phantomos-api-server.yaml` |
+| 5443 | TCP | `registry` | `127.0.0.1` | `manifests/base/registry/registry.yaml` |
+| 8008 | TCP | `yovariable-server` (variable) | all | `manifests/base/yovariable-server/yovariable-server.yaml` |
+| 8080 | TCP | `yovariable-server` (admin) | all | `manifests/base/yovariable-server/yovariable-server.yaml` |
+| 9788 | TCP | `rerun-streamer` | all | `manifests/base/dma-streams/rerun-streamer.yaml` |
+| 7400 | UDP | `phantom-locomotion` (ROS 2 / DDS) | all | `manifests/base/phantom-locomotion/phantom-locomotion.yaml` |
+
+**Core stack** — `hostNetwork: true` pods (ports bound by the process
+land directly on the host):
+
+| Port(s) | Proto | Owner | Source |
+|---|---|---|---|
+| 8554 | TCP | `mediamtx` RTSP | `manifests/base/dma-video/configmaps.yaml` |
+| 8888 | TCP | `mediamtx` HLS | `manifests/base/dma-video/configmaps.yaml` |
+| 8889 | TCP | `mediamtx` WebRTC | `manifests/base/dma-video/configmaps.yaml` |
+| 9997 | TCP | `mediamtx` API | `manifests/base/dma-video/mediamtx.yaml` (`MTX_APIADDRESS`) |
+| 9299 | TCP | `viewer` (`--port 9299`) | `manifests/base/dma-video/viewer.yaml` |
+| 8420 | TCP | `camera-params` (`--port 8420`) | `manifests/base/dma-video/camera-params.yaml` |
+| dynamic 7400+ | UDP | `positronic-control`, `cpp-robot-state-estimator` ROS 2 / DDS | respective deployment YAMLs |
+
+`producer` and `rtsp-streamer` use `hostNetwork: true` for USB / IPC
+access but only publish outbound to `mediamtx`; neither opens a
+listening port. `dma-recorder` runs with `hostNetwork: false`.
+
+**Operator stack:**
+
+| Port | Proto | Owner | Source |
+|---|---|---|---|
+| 30080 | TCP | `operator-ui` (NodePort, every node IP) | `manifests/base/argus/nginx.yaml` |
+
+`nimbus` services are cluster-internal only — no host port exposure.
+
+### 8.4 Targeted overrides
 
 | Flag | Effect |
 |---|---|
