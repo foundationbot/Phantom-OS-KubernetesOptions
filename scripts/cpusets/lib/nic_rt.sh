@@ -389,14 +389,31 @@ apply_nic_tuning() {
 
 # Emit a shell snippet that re-applies apply_nic_tuning's settings at boot.
 # Used by both networkd-dispatcher scripts and the systemd one-shot.
+#
+# Failures are intentionally NOT swallowed by '2>/dev/null || true' —
+# the previous silent-suppression pattern hid the very class of bugs we
+# need to catch (e.g. driver rejecting an ethtool change, or the kernel
+# refusing autoneg=off). Errors now surface in the calling unit's
+# journal. The trailing verify block reads /sys/class/net to confirm
+# PHY actually landed and prints a single "verified" or "MISMATCH"
+# line that can be grepped for in the journal.
 emit_nic_tuning_snippet() {
     local nic="$1"
     cat <<EOF
-ethtool -s $nic speed 100 duplex full autoneg off 2>/dev/null || true
-ethtool -C $nic rx-usecs 0 tx-usecs 0 2>/dev/null || true
-ethtool -K $nic tso off gso off gro off lro off 2>/dev/null || true
-ethtool -G $nic rx 64 tx 64 2>/dev/null || true
-echo 50 > /sys/class/net/$nic/napi_defer_hard_irqs 2>/dev/null || true
+ethtool -s $nic speed 100 duplex full autoneg off
+ethtool -C $nic rx-usecs 0 tx-usecs 0
+ethtool -K $nic tso off gso off gro off lro off
+ethtool -G $nic rx 64 tx 64
+echo 50 > /sys/class/net/$nic/napi_defer_hard_irqs
+# Verify PHY actually settled where we asked. Loud mismatches > silent drift.
+_ecat_speed=\$(cat /sys/class/net/$nic/speed 2>/dev/null || echo unknown)
+_ecat_duplex=\$(cat /sys/class/net/$nic/duplex 2>/dev/null || echo unknown)
+_ecat_autoneg=\$(ethtool $nic 2>/dev/null | awk -F': ' '/Auto-negotiation:/ {print \$2}')
+if [ "\$_ecat_speed" = "100" ] && [ "\$_ecat_duplex" = "full" ] && [ "\$_ecat_autoneg" = "off" ]; then
+    echo "ecat tuning verified for $nic: speed=\$_ecat_speed duplex=\$_ecat_duplex autoneg=\$_ecat_autoneg"
+else
+    echo "ecat tuning MISMATCH for $nic: speed=\$_ecat_speed duplex=\$_ecat_duplex autoneg=\$_ecat_autoneg (wanted 100/full/off)" >&2
+fi
 EOF
 }
 

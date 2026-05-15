@@ -262,22 +262,32 @@ apply_named_iface() {
 
     nic_validate_iface_name "$iface" || die "invalid iface name: $iface"
 
-    local need_rule=1 need_apply=1
+    local need_rule=1 need_apply=1 need_link=1
     if nic_already_named "$iface" "$mac"; then
         need_apply=0
     fi
     if nic_udev_rule_present "$iface" "$mac"; then
         need_rule=0
     fi
+    if nic_link_file_present "$iface" "$mac"; then
+        need_link=0
+    fi
 
-    if (( need_rule == 0 && need_apply == 0 )); then
-        echo -e "${GREEN}$iface already exists and udev rule is in place — nothing to do.${NC}"
+    if (( need_rule == 0 && need_apply == 0 && need_link == 0 )); then
+        echo -e "${GREEN}$iface already exists, udev rule + .link file are in place — nothing to do.${NC}"
         return 0
     fi
 
     if (( need_rule )); then
         echo -e "${BLUE}Writing udev rule for $iface -> $mac in $UDEV_RULE_FILE${NC}"
         nic_write_udev_rule "$iface" "$mac" || die "failed to write udev rule"
+    fi
+
+    if (( need_link )); then
+        local link_path
+        link_path=$(nic_link_file_path "$iface")
+        echo -e "${BLUE}Writing systemd .link file for $iface PHY pinning in $link_path${NC}"
+        nic_write_link_file "$iface" "$mac" || die "failed to write .link file"
     fi
 
     if (( need_apply )); then
@@ -304,7 +314,9 @@ apply_named_iface() {
 
     echo ""
     echo -e "${GREEN}$iface configured.${NC}"
-    echo "Persistence: $UDEV_RULE_FILE (applies on next boot too)."
+    echo "Persistence:"
+    echo "  - $UDEV_RULE_FILE (iface naming on next boot)"
+    echo "  - $(nic_link_file_path "$iface") (PHY 100M/full/autoneg-off on every device-add)"
 }
 
 # ---------- Main flow ------------------------------------------------------
