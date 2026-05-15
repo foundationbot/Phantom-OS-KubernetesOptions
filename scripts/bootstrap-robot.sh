@@ -2186,9 +2186,11 @@ ensure_cpu_isolation_block() {
 # Workflow (sources scripts/cpusets/lib/nic_setup.sh — no shell-out):
 #   1. resolve target MAC: from selector (mac/pci/driver+index) OR
 #      interactive picker on TTY
-#   2. nic_already_named && nic_udev_rule_present  -> no-op
-#   3. nic_write_udev_rule   (idempotent line-scoped rewrite)
-#   4. nic_apply_udev        (reload+trigger+wait for iface)
+#   2. nic_already_named && nic_udev_rule_present
+#      && nic_link_file_present                    -> no-op
+#   3. nic_write_udev_rule    (idempotent line-scoped rewrite)
+#   4. nic_write_link_file    (systemd .link pins PHY autoneg/100M/full)
+#   5. nic_apply_udev         (reload+trigger+wait for iface)
 #
 # This explicit guard sequence is what fixes the prior bug where the
 # entire shell-out re-ran on every bootstrap and re-renamed an already
@@ -2233,8 +2235,8 @@ ecat_interface() {
     else
       info "DRY-RUN  resolve MAC via interactive picker (TTY) and persist to host-config"
     fi
-    info "DRY-RUN  if iface $iface already exists with that MAC and udev rule binds it -> no-op"
-    info "DRY-RUN  else: write /etc/udev/rules.d/70-ecat.rules entry, udevadm reload+trigger, wait for iface"
+    info "DRY-RUN  if iface $iface already exists with that MAC, udev rule binds it, and .link file pins PHY -> no-op"
+    info "DRY-RUN  else: write /etc/udev/rules.d/70-ecat.rules entry, write /etc/systemd/network/00-${iface}-phy.link, udevadm reload+trigger, wait for iface"
     return
   fi
 
@@ -2271,8 +2273,10 @@ ecat_interface() {
   fi
 
   # --- Step 2: idempotency guard ---------------------------------------
-  if nic_already_named "$iface" "$mac" && nic_udev_rule_present "$iface" "$mac"; then
-    pass "iface $iface already named for MAC $mac and udev rule binds it — no-op"
+  if nic_already_named "$iface" "$mac" \
+     && nic_udev_rule_present "$iface" "$mac" \
+     && nic_link_file_present "$iface" "$mac"; then
+    pass "iface $iface already named, udev rule + .link file in place — no-op"
     return
   fi
 
@@ -2284,7 +2288,22 @@ ecat_interface() {
   fi
   pass "udev rule installed"
 
-  # --- Step 4: apply --------------------------------------------------
+  # --- Step 4: write systemd .link file (PHY pinning) ------------------
+  # EtherCAT slaves advertise only 100baseT/Half and don't auto-negotiate.
+  # The .link file is applied by udevd on every device-add event,
+  # independent of who manages L3 (networkd / NetworkManager / unmanaged).
+  # This is what makes autoneg=off survive cable replug, driver reset,
+  # and netplan apply — the only mechanism in the stack that does.
+  local link_path
+  link_path=$(nic_link_file_path "$iface")
+  note "writing systemd .link file pinning $iface PHY (100M/full/autoneg-off)..."
+  if ! nic_write_link_file "$iface" "$mac"; then
+    fail "could not write $link_path"
+    return
+  fi
+  pass ".link file installed at $link_path"
+
+  # --- Step 5: apply --------------------------------------------------
   # nic_apply_iface handles all three cases: already correct (no-op),
   # current iface has the right MAC under a different name (in-kernel
   # rename), or hot-plug wait. The library's nic_apply_udev alone is
