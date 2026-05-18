@@ -528,7 +528,23 @@ cmd_status() {
     echo "Present CPUs:    $(get_present_cpus)"
     echo "Online CPUs:     $(get_online_cpus)"
     echo "Isolated (sysfs): $(detect_isolated_cores)"
+    local mi_cmdline mi_expected
+    mi_cmdline=$(parse_isolcpus_managed_irq_cmdline)
+    mi_expected=$(compute_managed_irq_list)
     echo "isolcpus= (cmdline): $(parse_isolcpus_cmdline)"
+    if [[ -n "$mi_cmdline" ]]; then
+        echo "isolcpus=managed_irq: $mi_cmdline"
+        if [[ -n "$mi_expected" && "$mi_cmdline" != "$mi_expected" ]]; then
+            echo "  WARN: cmdline managed_irq list ($mi_cmdline) differs from partition state ($mi_expected)"
+            echo "        Run: sudo $(basename "$0") migrate-cmdline --add-rt-flags"
+        fi
+    elif [[ -n "$mi_expected" ]]; then
+        echo "isolcpus=managed_irq: NOT SET (expected: $mi_expected)"
+        echo "  WARN: managed PCIe/MSI-X IRQs may land on isolated cores."
+        echo "        Run: sudo $(basename "$0") migrate-cmdline --add-rt-flags"
+    else
+        echo "isolcpus=managed_irq: not set (no partitions)"
+    fi
     echo "nohz_full=         : $(parse_nohz_full_cmdline)"
     echo "rcu_nocbs=         : $(parse_rcu_nocbs_cmdline)"
     echo "irqaffinity=       : $(parse_irqaffinity_cmdline)"
@@ -1005,9 +1021,18 @@ cmd_migrate_cmdline() {
     new_line=$(echo "$current" | sed -E 's/\s*isolcpus=[^ "]*//g' | sed -E 's/\s+/ /g')
 
     if [[ $add_rt_flags -eq 1 ]]; then
-        local hk
+        local hk managed
         hk=$(compute_housekeeping_list)
+        managed=$(compute_managed_irq_list)
         local need=("rcu_nocb_poll" "skew_tick=1" "irqaffinity=$hk")
+        # Only add isolcpus=managed_irq,<list> when partitions exist.
+        # On a host with no partitions there's nothing to exclude.
+        # Without managed_irq, PCIe/MSI-X managed vectors (NVMe, modern
+        # NICs) ignore runtime smp_affinity writes and may land on
+        # isolated cores at driver probe time.
+        if [[ -n "$managed" ]]; then
+            need+=("isolcpus=managed_irq,$managed")
+        fi
         local flag
         for flag in "${need[@]}"; do
             local key="${flag%%=*}"

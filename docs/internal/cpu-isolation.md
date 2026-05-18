@@ -215,11 +215,18 @@ What it does (manage_cpusets.sh:875):
 - Detects bootloader: `/boot/extlinux/extlinux.conf` (Jetson) or
   `/etc/default/grub` (x86 GRUB). Errors out if neither is present.
 - Backs up the config to `<path>.bak.<timestamp>`.
-- Removes every `isolcpus=<…>` token from the cmdline.
+- Removes every plain `isolcpus=<…>` token from the cmdline. Scheduler
+  isolation now comes from cpuset partitions, not legacy `isolcpus=`.
 - With `--add-rt-flags`: also injects `rcu_nocb_poll`, `skew_tick=1`,
-  and `irqaffinity=<housekeeping>` (computed from current partitions).
-  Existing values for any of these keys are stripped first so the
-  replacement is clean.
+  `irqaffinity=<housekeeping>`, and `isolcpus=managed_irq,<rt-cpus>`
+  (computed from current partition state). Existing values for any of
+  these keys are stripped first so the replacement is clean.
+- `isolcpus=managed_irq,<rt-cpus>` is the only knob that excludes a
+  CPU from driver-managed PCIe/MSI-X IRQ allocation (NVMe, modern NICs
+  with `IRQF_MANAGED`). Runtime writes to `/proc/irq/N/smp_affinity`
+  are silently ignored for these vectors, and cpuset partitions cannot
+  influence them either. Without this flag, managed IRQs can land on
+  isolated cores at driver probe time and add jitter to the RT path.
 - Prints the proposed diff and **prompts** before writing.
 - For GRUB, runs `update-grub` after writing.
 
@@ -264,8 +271,9 @@ sudo ./scripts/cpusets/manage_cpusets.sh verify
 sudo ./scripts/cpusets/manage_cpusets.sh status
 
 # Kernel cmdline migrated
-cat /proc/cmdline                     # must NOT contain isolcpus=
-                                       # must contain rcu_nocb_poll, skew_tick=1, irqaffinity=
+cat /proc/cmdline                     # must NOT contain plain isolcpus=
+                                       # must contain rcu_nocb_poll, skew_tick=1, irqaffinity=,
+                                       # and isolcpus=managed_irq,<rt-cpus>
 
 # Sysfs reflects the partition
 cat /sys/devices/system/cpu/isolated  # matches your config CPUs
@@ -274,11 +282,23 @@ cat /sys/devices/system/cpu/isolated  # matches your config CPUs
 grep ecat1 /proc/interrupts           # IRQ counts only on the pinned core
                                        # (use the actual iface name)
 
+# Status surfaces managed_irq state and warns on mismatches
+sudo ./scripts/cpusets/manage_cpusets.sh status
+# Expect: 'isolcpus=managed_irq: <rt-cpus>' matching partition CPUs, no WARN.
+
+# Boot script runtime tweaks (only present after ethercat-rt service ran)
+cat /proc/sys/kernel/timer_migration  # 0 (hrtimers pinned to arming CPU)
+cat /proc/sys/kernel/watchdog_cpumask # housekeeping range (e.g. 0-3,8-15)
+# Note: watchdog_cpumask keeps the soft/hard-lockup safety net active on
+# housekeeping cores while removing the periodic watchdog/N kick on
+# isolated cores. We deliberately do NOT set nosoftlockup or nowatchdog.
+
 # Optional: latency under load (requires rt-tests + stress-ng)
 stress-ng --cpu 10 --taskset 0-9 --timeout 60s &
 sudo ./scripts/cpusets/manage_cpusets.sh run ecat -- \
     cyclictest -p 95 -t 1 -a 13 -i 200 -l 1000000 -q
-# Pass: max < 20 µs on Thor with all three layers active.
+# Pass: max < 20 µs on Thor with all four layers active (cpuset + managed_irq
+# + timer_migration + watchdog_cpumask + Tegra kthread sweep).
 ```
 
 ---

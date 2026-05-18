@@ -639,6 +639,24 @@ check_kernel_params() {
         echo -e "${YELLOW}           Recommend adding irqaffinity=$(compute_housekeeping_list) to the cmdline${NC}"
     fi
 
+    # managed_irq: only knob that excludes a CPU from driver-managed
+    # PCIe/MSI-X IRQ allocation. cpuset partitions don't influence this.
+    local mi_expected mi_cmdline
+    mi_expected=$(compute_managed_irq_list)
+    mi_cmdline=$(parse_isolcpus_managed_irq_cmdline)
+    if [[ -n "$mi_expected" ]]; then
+        if [[ "$mi_cmdline" == "$mi_expected" ]]; then
+            echo -e "${GREEN}  isolcpus=managed_irq,$mi_cmdline${NC}"
+        elif [[ -n "$mi_cmdline" ]]; then
+            echo -e "${YELLOW}  isolcpus=managed_irq,$mi_cmdline — differs from partition state ($mi_expected)${NC}"
+            echo -e "${YELLOW}           Run: sudo manage_cpusets.sh migrate-cmdline --add-rt-flags${NC}"
+        else
+            echo -e "${YELLOW}  isolcpus=managed_irq= not set — managed PCIe/MSI-X IRQs (NVMe, modern NICs)${NC}"
+            echo -e "${YELLOW}           can land on isolated cores at driver probe and ignore runtime smp_affinity writes.${NC}"
+            echo -e "${YELLOW}           Run: sudo manage_cpusets.sh migrate-cmdline --add-rt-flags${NC}"
+        fi
+    fi
+
     if [[ -n "$missing" ]]; then
         echo ""
         echo -e "${YELLOW}Missing kernel parameters:$missing${NC}"
