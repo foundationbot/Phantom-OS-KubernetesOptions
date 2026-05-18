@@ -1005,9 +1005,18 @@ cmd_migrate_cmdline() {
     new_line=$(echo "$current" | sed -E 's/\s*isolcpus=[^ "]*//g' | sed -E 's/\s+/ /g')
 
     if [[ $add_rt_flags -eq 1 ]]; then
-        local hk
+        local hk managed
         hk=$(compute_housekeeping_list)
+        managed=$(compute_managed_irq_list)
         local need=("rcu_nocb_poll" "skew_tick=1" "irqaffinity=$hk")
+        # Only add isolcpus=managed_irq,<list> when partitions exist.
+        # On a host with no partitions there's nothing to exclude.
+        # Without managed_irq, PCIe/MSI-X managed vectors (NVMe, modern
+        # NICs) ignore runtime smp_affinity writes and may land on
+        # isolated cores at driver probe time.
+        if [[ -n "$managed" ]]; then
+            need+=("isolcpus=managed_irq,$managed")
+        fi
         local flag
         for flag in "${need[@]}"; do
             local key="${flag%%=*}"
