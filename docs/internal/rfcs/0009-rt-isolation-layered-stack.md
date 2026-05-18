@@ -105,7 +105,17 @@ sudo manage_cpusets.sh migrate-cmdline --add-rt-flags
 sudo reboot
 ```
 
-`bootstrap-robot.sh --cpu-isolation` chains these from `host-config.yaml`'s `cpuIsolation:` block on a fresh robot.
+`bootstrap-robot.sh --cpu-isolation` chains the **same** commands from `host-config.yaml`'s `cpuIsolation:` block — there is one cmdline editor and one partition lifecycle, shared between the bootstrap and standalone paths. The bootstrap orchestrator's responsibilities:
+
+1. Render `/etc/cpusets.conf` from `cpuIsolation.partitions[]` (lib helper `cpusets_render_conf`)
+2. Sweep orphan partitions whose names aren't in the rendered conf (handles renames cleanly when migrating from older bootstrap layouts)
+3. `manage_cpusets.sh apply --yes`
+4. `manage_cpusets.sh install-service`
+5. `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes`
+6. systemd `CPUAffinity=` drop-in (still bootstrap-side; computed as `online − partitions − {0}`)
+7. `manage_cpusets.sh ethercat-rt <partition-name>` with the partition name resolved by finding which `partitions[]` entry covers `nic.irqCore`
+
+Every step is idempotent. A re-run on a fully-bootstrapped host produces all SKIP / "No change needed" outcomes, no bootloader rewrite, no service restart.
 
 ### Verification
 
@@ -135,3 +145,4 @@ On ch4 the layers that materially contribute are scheduler isolation (cpuset par
 - Pure FIR-316 delta measurement (vs a pre-isolated baseline that already has the cpuset partition + legacy cmdline flags) to isolate the new RT tweaks' individual contribution. Tracked as a follow-up; not a merge blocker.
 - Repeat the cyclictest pass on an x86 RT robot when one becomes available.
 - Stress-test (`stress-ng --cpu N --taskset 0-10`) while cyclictest runs in the partition. Today's measurement was idle-baseline only.
+- A spurious "isolcpus= is active on the kernel cmdline" warning fires inside `manage_cpusets.sh apply` because the parser strips the `managed_irq` modifier when computing the cpu list, so it can't tell whether the cmdline form is the legacy `isolcpus=11-13` (which would conflict) or the modern `isolcpus=managed_irq,11-13` (which does not). Cosmetic; doesn't affect correctness. Fix by teaching the warning helper to inspect the modifier list.
