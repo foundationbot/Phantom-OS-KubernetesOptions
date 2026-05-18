@@ -125,6 +125,16 @@ spec:
             - configMapRef:
                 name: positronic-config
                 optional: true
+            # positronic-perf carries the PERF_* env-var contract that
+            # workspace/positronic_control/positronic/utils/perf_config.py
+            # reads at node startup. In-image defaults are at
+            # manifests/base/positronic/perf-config.yaml; per-robot
+            # overrides flow in via host-config.yaml:perf →
+            # `host-config.py get-perf-configmap-json` at bootstrap
+            # phase 13.
+            - configMapRef:
+                name: positronic-perf
+                optional: true
           env:
             # Hardcoded — image contract, never varies per robot.
             # NVIDIA_* are normally inherited from upstream nvcr.io base

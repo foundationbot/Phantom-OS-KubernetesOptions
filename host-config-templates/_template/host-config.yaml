@@ -345,3 +345,64 @@ nodeLabels:
 #     # Raise only if frame loss during transient viewer stalls is a
 #     # bigger problem than RSS growth.
 #     queueMemoryLimitMb: 8
+
+# ----------------------------------------------------------------------
+# perf: optional perfetto-tracing + optimization-preset toggles for
+# the positronic-control workload.
+#
+# Bootstrap phase 13 (deployments) reads this and:
+#   1. Renders a ConfigMap override patch (PERF_* env vars) over
+#      manifests/base/positronic/perf-config.yaml.
+#   2. When perf.tracing.backend == "system": also injects /tmp/
+#      perfetto-{producer,consumer} hostPath socket mounts and
+#      ``securityContext.fsGroup: 2026`` into positronic-control
+#      so the pod can talk to the host's traced daemon. Bootstrap
+#      phase 4.5 (system_backend_tracing) installs that daemon via
+#      the phantom-tracing .deb when this backend is selected.
+#
+# Schema:
+#   preset            string — name of a YAML preset shipped in the
+#                     positronic-control image at
+#                     /etc/positronic/perf-presets/<preset>.yaml.
+#                     Defaults to "none" (no behaviour change).
+#                     Known: none, inductor, inductor-cudagraphs,
+#                     inductor-tf32, inductor-tome25, …,
+#                     tensorrt, tensorrt-fp8, tensorrt-int8,
+#                     tensorrt-nvfp4, torchao-int8, torchao-float8,
+#                     aot-inductor, eager-bf16. See
+#                     positronic_control/config/optimization/*.yaml
+#                     for the full list.
+#   tracing.enabled   bool — turn perfetto.init() on at node startup.
+#                     Default false. When false, all probe call sites
+#                     compile to no-ops.
+#   tracing.backend   "system" | "in_process". Default "system" to
+#                     match SOF-877 production. "in_process" writes
+#                     trace to tracing.output and doesn't need a host
+#                     daemon (useful for dev/CI).
+#   tracing.output    Path inside the pod for the in_process trace
+#                     file. Ignored when backend=system.
+#   targetNodes       List of node names the optimization preset
+#                     applies to. Default ["fossil_encoder",
+#                     "dma_policy"]. Examples: ["fossil_encoder"]
+#                     compiles only vision; ["dma_policy"] compiles
+#                     only locomotion.
+#
+# Example (vision + locomotion both running through TensorRT-fp16,
+# system-backend tracing enabled — production setup):
+#
+# perf:
+#   preset: tensorrt-fp16
+#   tracing:
+#     enabled: true
+#     backend: system
+#   targetNodes: [fossil_encoder, dma_policy]
+#
+# Example (dev box without host traced daemon — pin trace to a file):
+#
+# perf:
+#   preset: inductor
+#   tracing:
+#     enabled: true
+#     backend: in_process
+#     output: /tmp/positronic.perfetto-trace
+#   targetNodes: [fossil_encoder]

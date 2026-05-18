@@ -188,6 +188,164 @@ def cmd_get(cfg: dict, field: str) -> int:
     return 0
 
 
+def cmd_get_perf(cfg: dict, field: str) -> int:
+    """Print one perf-block field (dotted path) or exit 1 if unset.
+
+    The field is a dotted path under ``perf:`` — e.g.
+
+        cmd_get_perf(cfg, "preset")          # → "tensorrt-fp16"
+        cmd_get_perf(cfg, "tracing.backend") # → "system"
+        cmd_get_perf(cfg, "tracing.enabled") # → "1" | "0"
+
+    Booleans are stringified as ``"1"`` / ``"0"`` so the shell consumer
+    can match against PERF_* env-var conventions without case-folding.
+    Lists are emitted as a comma-joined string (e.g. ``fossil_encoder,
+    dma_policy``).
+
+    The plan's "active ID alignment" rule applies to ``targetNodes``:
+    if you rename anything here, scripts/perfetto-pivot.py reads the
+    same comma-list and breaks the same way.
+    """
+    block = cfg.get("perf")
+    if not isinstance(block, dict):
+        return 1
+    node: object = block
+    for part in field.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return 1
+        node = node[part]
+    if node is None or node == "":
+        return 1
+    if isinstance(node, bool):
+        print("1" if node else "0")
+    elif isinstance(node, list):
+        print(",".join(str(x) for x in node))
+    else:
+        print(node)
+    return 0
+
+
+def cmd_get_perf_configmap_json(cfg: dict) -> int:
+    """Emit the ``positronic-perf`` ConfigMap data overlay as JSON.
+
+    Returns an object mapping the PERF_* env-var names that operators
+    customised in host-config.yaml to their string values. Keys absent
+    from host-config are NOT emitted — bootstrap merges this onto the
+    in-image defaults at manifests/base/positronic/perf-config.yaml so
+    missing keys keep their default.
+
+    Empty object when there is no ``perf:`` block (or it's empty), so
+    bootstrap can blindly merge regardless of host-config shape.
+    """
+    block = cfg.get("perf") or {}
+    if not isinstance(block, dict):
+        print("error: 'perf' must be a mapping", file=sys.stderr)
+        return 2
+
+    out: dict[str, str] = {}
+    if "preset" in block and block["preset"] is not None:
+        out["PERF_PRESET"] = str(block["preset"])
+    tracing = block.get("tracing") or {}
+    if not isinstance(tracing, dict):
+        print("error: 'perf.tracing' must be a mapping", file=sys.stderr)
+        return 2
+    if "enabled" in tracing and tracing["enabled"] is not None:
+        out["PERF_TRACING_ENABLED"] = "1" if tracing["enabled"] else "0"
+    if "backend" in tracing and tracing["backend"]:
+        out["PERF_TRACING_BACKEND"] = str(tracing["backend"])
+    if "output" in tracing and tracing["output"]:
+        out["PERF_TRACING_OUTPUT"] = str(tracing["output"])
+    target_nodes = block.get("targetNodes")
+    if target_nodes:
+        if not isinstance(target_nodes, list):
+            print(
+                "error: 'perf.targetNodes' must be a list",
+                file=sys.stderr,
+            )
+            return 2
+        out["PERF_TARGET_NODES"] = ",".join(str(x) for x in target_nodes)
+    print(json.dumps(out))
+    return 0
+
+
+# Pinned GID for the host-side `perfetto` group. Created by
+# bootstrap phase 4.5; the positronic-control pod's securityContext
+# .fsGroup matches this so the unprivileged container UID can read
+# and write /tmp/perfetto-{producer,consumer} group-writable sockets.
+# If 2026 collides on any host distro, update both sides in lockstep
+# (the host groupadd in bootstrap-robot.sh and this constant).
+PERFETTO_GROUP_GID = 2026
+
+
+def cmd_get_perf_deployment_patch_json(cfg: dict) -> int:
+    """Emit the strategic-merge patch for positronic-control needed
+    when ``perf.tracing.backend == "system"``: hostPath mounts for
+    /tmp/perfetto-{producer,consumer} plus ``fsGroup: 2026`` so the
+    container can read/write the group-writable sockets.
+
+    When tracing is disabled, in_process, or the perf block is
+    absent: emits an empty JSON object so bootstrap can blindly
+    consume it without branching.
+
+    Output shape mirrors cmd_get_deployment_patches_json entries:
+        {"target": {kind, name, namespace}, "patch": "<yaml>"}
+    """
+    block = cfg.get("perf") or {}
+    tracing = block.get("tracing") or {}
+    backend = tracing.get("backend")
+    if backend != "system":
+        print(json.dumps({}))
+        return 0
+
+    target = DEPLOYMENT_TARGETS["positronic-control"]
+    volumes = [
+        {
+            "name": "perfetto-producer",
+            "hostPath": {"path": "/tmp/perfetto-producer", "type": "Socket"},
+        },
+        {
+            "name": "perfetto-consumer",
+            "hostPath": {"path": "/tmp/perfetto-consumer", "type": "Socket"},
+        },
+    ]
+    volume_mounts = [
+        {"name": "perfetto-producer", "mountPath": "/tmp/perfetto-producer"},
+        {"name": "perfetto-consumer", "mountPath": "/tmp/perfetto-consumer"},
+    ]
+    patch = {
+        "apiVersion": "apps/v1",
+        "kind": target["kind"],
+        "metadata": {
+            "name": "positronic-control",
+            "namespace": target["namespace"],
+        },
+        "spec": {
+            "template": {
+                "spec": {
+                    "securityContext": {"fsGroup": PERFETTO_GROUP_GID},
+                    "volumes": volumes,
+                    "containers": [
+                        {
+                            "name": target["container"],
+                            "volumeMounts": volume_mounts,
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    out = {
+        "target": {
+            "kind": target["kind"],
+            "name": "positronic-control",
+            "namespace": target["namespace"],
+        },
+        "patch": yaml.safe_dump(patch, sort_keys=False),
+    }
+    print(json.dumps(out))
+    return 0
+
+
 def cmd_get_dma_ethercat_config_set(cfg: dict) -> int:
     """Print dmaEthercat.configSet (a single directory name under
     /usr/share/dma-ethercat/config/) or exit 1 if unset."""
@@ -1707,6 +1865,55 @@ def cmd_validate(cfg: dict) -> int:
                     f"(got {policy!r})"
                 )
 
+    # perf: optional block of operator-facing perfetto + optimization
+    # toggles. Renders into the positronic-perf ConfigMap (env vars)
+    # plus a positronic-control deployment patch when backend=system.
+    perf = cfg.get("perf")
+    if perf is not None:
+        if not isinstance(perf, dict):
+            errors.append("'perf' must be a mapping")
+        else:
+            preset = perf.get("preset")
+            if preset is not None and not isinstance(preset, str):
+                errors.append(
+                    f"perf.preset: must be a string (got: {preset!r})"
+                )
+            tracing = perf.get("tracing")
+            if tracing is not None:
+                if not isinstance(tracing, dict):
+                    errors.append("perf.tracing: must be a mapping")
+                else:
+                    if "enabled" in tracing and not isinstance(
+                        tracing["enabled"], bool
+                    ):
+                        errors.append(
+                            "perf.tracing.enabled: must be true or false "
+                            f"(got: {tracing['enabled']!r})"
+                        )
+                    backend = tracing.get("backend")
+                    if backend is not None and backend not in (
+                        "system",
+                        "in_process",
+                    ):
+                        errors.append(
+                            f"perf.tracing.backend={backend!r}: must be "
+                            f"'system' or 'in_process'"
+                        )
+                    if "output" in tracing and not isinstance(
+                        tracing["output"], str
+                    ):
+                        errors.append(
+                            "perf.tracing.output: must be a string path"
+                        )
+            target_nodes = perf.get("targetNodes")
+            if target_nodes is not None and not isinstance(
+                target_nodes, list
+            ):
+                errors.append(
+                    "perf.targetNodes: must be a list of node names "
+                    f"(got: {type(target_nodes).__name__})"
+                )
+
     # Notes are purely informational (e.g. host-config drift from bundle
     # sidecar). They're printed regardless of error/success — operators
     # want to see expected overrides whether or not validation passed —
@@ -1776,6 +1983,18 @@ def main() -> int:
         return cmd_set_dma_ethercat_config_path(path, sys.argv[3])
     if cmd == "get-deployment-patches-json":
         return cmd_get_deployment_patches_json(cfg)
+    if cmd == "get-perf":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> get-perf <field>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_get_perf(cfg, sys.argv[3])
+    if cmd == "get-perf-configmap-json":
+        return cmd_get_perf_configmap_json(cfg)
+    if cmd == "get-perf-deployment-patch-json":
+        return cmd_get_perf_deployment_patch_json(cfg)
     if cmd == "get-enabled-stacks":
         return cmd_get_enabled_stacks(cfg)
     if cmd == "get-stack-selfheal":
