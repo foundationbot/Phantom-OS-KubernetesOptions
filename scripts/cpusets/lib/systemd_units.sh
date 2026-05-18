@@ -198,6 +198,26 @@ if [[ -w /proc/sys/kernel/watchdog_cpumask && -n "\$HK_EXPANDED" ]]; then
     fi
 fi
 
+# --- Tegra/NV kthread reaffinity (Thor and other Tegra hosts) ----------
+# Tegra service kthreads (tegra-bpmp, nvgpu_*, nvhost-*, nv-watchdog)
+# spawn early with a wide cpu mask. They aren't per-CPU bound, but
+# without an explicit affinity pass they may run on isolated cores.
+# Per-CPU kthreads have PF_NO_SETAFFINITY — taskset returns non-zero
+# for those. We silently accept failures and only count successes.
+if [[ -r /proc/device-tree/compatible ]] && \\
+   tr -d '\\0' </proc/device-tree/compatible | grep -q 'nvidia,tegra'; then
+    if [[ -n "\$HK_EXPANDED" ]]; then
+        HK_LIST_FOR_TEGRA=\$(echo "\$HK_EXPANDED" | tr ' ' ',' | sed 's/^,//;s/,\$//')
+        MOVED=0
+        for pid in \$(ps -eo pid=,comm= | awk '\$2 ~ /^(nvgpu|nvhost|tegra|nv-|nv_)/ {print \$1}'); do
+            if taskset -pc "\$HK_LIST_FOR_TEGRA" "\$pid" > /dev/null 2>&1; then
+                MOVED=\$((MOVED + 1))
+            fi
+        done
+        echo "Reaffined \$MOVED Tegra/NV kthreads to housekeeping (\$HK_LIST_FOR_TEGRA)"
+    fi
+fi
+
 exit 0
 BOOT_EOF
 
