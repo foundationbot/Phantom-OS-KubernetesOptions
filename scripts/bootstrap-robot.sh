@@ -2608,6 +2608,34 @@ print(compress(acc))
 PY
 }
 
+# Echo the name of the cpuIsolation.partitions[] entry whose `cpus`
+# range contains the given cpu, or empty string if no entry matches.
+# Used to resolve which partition ethercat-rt should anchor to from
+# cpuIsolation.nic.irqCore, replacing the historical hardcoded
+# "ecat-cmdline" partition name.
+_cpu_isolation_partition_for_cpu() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+try:
+    target = int(sys.argv[2])
+except (ValueError, IndexError):
+    sys.exit(0)
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1); out.update(range(int(lo), int(hi)+1))
+        else: out.add(int(part))
+    return out
+for p in (data.get("partitions") or []):
+    cpus = p.get("cpus", "")
+    if not isinstance(cpus, str): continue
+    if target in expand(cpus):
+        print(p.get("name", "")); break
+PY
+}
+
 # Echo the systemd CPUAffinity= value (online cpus minus partition cpus
 # minus cpu 0). Empty if the result would be empty.
 _compute_systemd_cpuaffinity() {
