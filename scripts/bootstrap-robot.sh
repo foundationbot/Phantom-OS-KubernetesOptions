@@ -2556,6 +2556,39 @@ cpu_isolation() {
     return
   fi
 
+  # ---- Step 3b: render per-partition systemd slices --------------------
+  # Cgroup-v2 enforces cpuset.cpus strictly: a service in system.slice
+  # (which manage_cpusets shrinks to housekeeping) cannot use isolated
+  # cpus regardless of CPUAffinity= or taskset. Services that *need*
+  # isolated cores (dma-ethercat) must be placed in a sibling slice with
+  # its own AllowedCPUs covering those cpus. Render one slice per
+  # cpuIsolation.partitions[] entry; the slice path mirrors the partition
+  # name. Systemd auto-activates each slice the first time a unit
+  # references it via Slice=<name>.slice (phase 9 writes the dma-ethercat
+  # drop-in that does this).
+  local _slice_count=0 _slice_name _slice_cpus
+  while IFS=$'\t' read -r _slice_name _slice_cpus; do
+    [ -z "$_slice_name" ] && continue
+    if cpusets_render_slice "$_slice_name" "$_slice_cpus" >/dev/null; then
+      _slice_count=$((_slice_count + 1))
+    else
+      warn "failed to render ${_slice_name}.slice"
+    fi
+  done < <(python3 - "$ci_json" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+for p in (data.get("partitions") or []):
+    name = p.get("name", "")
+    cpus = p.get("cpus", "")
+    if name and isinstance(cpus, str):
+        print(f"{name}\t{cpus}")
+PY
+)
+  if [ "$_slice_count" -gt 0 ]; then
+    systemctl daemon-reload
+    pass "rendered ${_slice_count} RT cpuset slice unit(s)"
+  fi
+
   # ---- Step 4: kernel cmdline migration --------------------------------
   # Delegates to manage_cpusets.sh migrate-cmdline so the bootstrap and
   # standalone operator workflows share a single cmdline editor. Adds
@@ -3098,6 +3131,31 @@ install_dma_ethercat() {
   #        /usr/share/dma-ethercat/config/<robot>/<robot>.json
   #   3. neither -> halt with instructions to set dmaEthercat.configSet.
   configure_dma_ethercat_env "$hc"
+
+  # Place dma-ethercat.service in the cpuset partition's slice (rendered
+  # in phase 8 step 3b) so it can actually run on the isolated cpus.
+  # Without this, the service inherits system.slice's housekeeping
+  # cpuset.cpus ceiling and the unit's ExecStart `taskset -c 11-13`
+  # fails with EINVAL because the cgroup-v2 cpuset ceiling forbids it.
+  # The slice name is resolved from cpuIsolation.partitions[] — find
+  # the partition whose cpus range contains nic.irqCore (matches
+  # ethercat-rt's partition lookup in phase 8 step 6).
+  local _ci_json _nic_irq _slice_name
+  _ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  { read -r _ ; read -r _nic_irq; } < <(cpusets_json_nic "$_ci_json")
+  if [ -n "$_nic_irq" ]; then
+    _slice_name="$(_cpu_isolation_partition_for_cpu "$_ci_json" "$_nic_irq")"
+    if [ -n "$_slice_name" ]; then
+      if cpusets_render_service_slice_dropin dma-ethercat.service "$_slice_name" >/dev/null; then
+        systemctl daemon-reload
+        pass "dma-ethercat.service drop-in: Slice=${_slice_name}.slice"
+      else
+        warn "failed to render dma-ethercat slice drop-in (service may fail to start on isolated cpus)"
+      fi
+    else
+      warn "no cpuIsolation.partitions[] entry covers nic.irqCore=$_nic_irq — skipping dma-ethercat slice drop-in"
+    fi
+  fi
 
   # Enable + start. Failed start halts the bootstrap.
   note "enabling + starting dma-ethercat.service..."
