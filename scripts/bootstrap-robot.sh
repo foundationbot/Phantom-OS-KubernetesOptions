@@ -2510,9 +2510,30 @@ cpu_isolation() {
     return
   fi
 
+  # ---- Step 2a: reconcile orphan partitions -----------------------------
+  # manage_cpusets.sh apply creates/updates partitions named in the config
+  # but does NOT remove ones absent from it — applied partitions whose
+  # cpus overlap an orphan cause apply to fail. This matters on robots
+  # bootstrapped before the partitions[].name field was honoured: they
+  # carry a legacy "ecat-cmdline" partition that overlaps with whatever
+  # name host-config now declares (e.g. "ecat1"). Sweep any state-file
+  # entry whose name isn't in the desired list before apply runs.
+  local state_file="${MANAGE_CPUSETS_STATE_FILE:-/var/lib/manage_cpusets/state}"
+  if [ -r "$state_file" ]; then
+    local desired_names existing_name
+    desired_names="$(cpusets_json_partition_names "$ci_json")"
+    while IFS='|' read -r existing_name _ _; do
+      [ -z "$existing_name" ] && continue
+      if ! printf '%s\n' "$desired_names" | grep -Fxq -- "$existing_name"; then
+        note "removing orphan partition '$existing_name' (not in cpuIsolation.partitions)..."
+        cpusets_run remove "$existing_name" >/dev/null 2>&1 || \
+          warn "manage_cpusets.sh remove $existing_name failed (continuing)"
+      fi
+    done < "$state_file"
+  fi
+
   # ---- Step 2: apply cpuset partitions (cgroup-v2) ----------------------
-  # apply reconciles live partitions to match the config: creates new
-  # partitions, deactivates orphans, no-ops on already-matching cpus.
+  # apply creates new partitions and no-ops on already-matching cpus.
   # --yes skips the isolcpus= overlap prompt; we migrate the cmdline to
   # the managed_irq form in step 4.
   note "applying cpuset partitions from $CPUSETS_CONF..."
