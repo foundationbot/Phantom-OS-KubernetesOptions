@@ -3224,7 +3224,7 @@ system_backend_tracing() {
     return
   fi
 
-  note "host-side traced ready. positronic-control pod hostPath mounts + fsGroup=$PERFETTO_GROUP_GID auto-injected at phase 13 (deployments)."
+  note "host-side traced ready. positronic-control pod hostPath mounts + fsGroup=$perfetto_gid auto-injected at phase 13 (deployments)."
 }
 
 install_dma_ethercat() {
