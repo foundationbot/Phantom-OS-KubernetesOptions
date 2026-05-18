@@ -104,6 +104,14 @@ images:
     image: foundationbot/argus.operator-ui:REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
   dma-ethercat:
     image: foundationbot/dma-ethercat:main-latest-aarch64
+  # phantom-tracing: source for the Perfetto tracebox .deb installed
+  # by bootstrap phase 4.5 when perf.tracing.backend == "system". Tag
+  # picks the upstream tracebox version (vN.0) bundled in the image.
+  # -aarch64 on Jetson Thor, plain on x86. Optional — when absent and
+  # perf.tracing.backend is "in_process" (or unset), phase 4.5 is a
+  # no-op.
+  phantom-tracing:
+    image: foundationbot/phantom-tracing:main-latest-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

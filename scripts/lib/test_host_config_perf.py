@@ -255,3 +255,73 @@ def test_validate_rejects_non_list_target_nodes(capsys):
     assert rc != 0
     err = capsys.readouterr().err
     assert "targetNodes" in err
+
+
+# ----------------------------------------------------------------------
+# Integration with cmd_get_deployment_patches_json — the perf patches
+# must surface inside the core-stack patches list so phase 13 wiring
+# picks them up automatically.
+# ----------------------------------------------------------------------
+
+
+def test_deployment_patches_includes_perf_configmap_patch(cfg_perf_full, capsys):
+    rc = hc.cmd_get_deployment_patches_json(cfg_perf_full)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    targets = [p["target"]["name"] for p in core["patches"]]
+    assert "positronic-perf" in targets, (
+        f"expected positronic-perf ConfigMap patch in core stack; got: {targets}"
+    )
+    cm_patch = next(
+        p for p in core["patches"] if p["target"]["name"] == "positronic-perf"
+    )
+    assert cm_patch["target"]["kind"] == "ConfigMap"
+    assert "PERF_PRESET: tensorrt-fp16" in cm_patch["patch"]
+
+
+def test_deployment_patches_includes_perf_deployment_patch_when_system_backend(
+    cfg_perf_full, capsys
+):
+    rc = hc.cmd_get_deployment_patches_json(cfg_perf_full)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    # The positronic-control entry should now include the hostPath
+    # socket mounts and fsGroup from the perf-deployment patch.
+    pc = [p for p in core["patches"] if p["target"]["name"] == "positronic-control"]
+    assert len(pc) == 1, (
+        f"expected exactly one positronic-control patch; got {len(pc)}"
+    )
+    assert "fsGroup: 2026" in pc[0]["patch"]
+    assert "/tmp/perfetto-producer" in pc[0]["patch"]
+
+
+def test_deployment_patches_no_perf_deployment_when_in_process(
+    cfg_perf_in_process, capsys
+):
+    rc = hc.cmd_get_deployment_patches_json(cfg_perf_in_process)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    pc = [p for p in core["patches"] if p["target"]["name"] == "positronic-control"]
+    # in_process backend: no positronic-control patch from perf (only
+    # the ConfigMap patch with PERF_* values). When deployments: block
+    # is absent there should be no entry at all.
+    if pc:
+        assert "fsGroup: 2026" not in pc[0]["patch"]
+        assert "/tmp/perfetto-producer" not in pc[0]["patch"]
+
+
+def test_deployment_patches_no_perf_anywhere_when_no_perf_block(
+    cfg_no_perf, capsys
+):
+    rc = hc.cmd_get_deployment_patches_json(cfg_no_perf)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    targets = [p["target"]["name"] for p in core["patches"]]
+    assert "positronic-perf" not in targets
+    pc = [p for p in core["patches"] if p["target"]["name"] == "positronic-control"]
+    # No perf, no deployments overrides → no positronic-control patch.
+    assert pc == []

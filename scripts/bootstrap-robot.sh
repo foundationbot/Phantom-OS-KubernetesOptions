@@ -325,6 +325,12 @@ SKIP_LOG_MANAGEMENT=0
 # bypass (e.g. when iterating on a non-ethercat phase and you want to
 # preserve the running realtime stack).
 SKIP_INSTALL_DMA_ETHERCAT=0
+# system-backend perfetto tracing setup. The phase is a no-op when
+# host-config.yaml has no perf block, perf.tracing.backend != "system",
+# or no images.phantom-tracing.image entry — so default-on is safe.
+# Pass --skip-system-tracing to force-skip even when the host-config
+# would otherwise trigger it.
+SKIP_SYSTEM_TRACING=0
 SELECTED_PHASES=()
 
 # Namespaces whose pods are deleted by the purge-workload-pods pre-phase.
@@ -370,6 +376,7 @@ while [ $# -gt 0 ]; do
                          SELECTED_PHASES+=(dev-mounts); shift ;;
     --install-dma-ethercat)
                          SELECTED_PHASES+=(install-dma-ethercat); shift ;;
+    --system-tracing)    SELECTED_PHASES+=(system-tracing); shift ;;
     --validate)          SELECTED_PHASES+=(validate); shift ;;
 
     # Targeted overrides that compose with both modes.
@@ -400,6 +407,8 @@ while [ $# -gt 0 ]; do
                          # --install-dma-ethercat does). Companion to the
                          # default-off SKIP_INSTALL_DMA_ETHERCAT.
                          SKIP_INSTALL_DMA_ETHERCAT=0; shift ;;
+    --skip-system-tracing)
+                         SKIP_SYSTEM_TRACING=1; shift ;;
 
     # Inputs.
     --robot)             ROBOT="${2:-}"; shift 2 ;;
@@ -590,6 +599,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_DEV_MOUNTS=1
   SKIP_VALIDATE=1
   SKIP_INSTALL_DMA_ETHERCAT=1
+  SKIP_SYSTEM_TRACING=1
   # Pre-phases are off by default in selected-phases mode: the
   # operator asked for ONE thing and shouldn't get a fleet-wide pod
   # purge / docker stop / service halt as a side effect. Full
@@ -614,6 +624,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
+      system-tracing)    SKIP_SYSTEM_TRACING=0 ;;
       validate)          SKIP_VALIDATE=0 ;;
     esac
   done
@@ -629,7 +640,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|system-tracing|cpu-isolation|log-management|ecat-interface) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -2975,6 +2986,225 @@ EOF
 DMA_ETHERCAT_TEMPLATE="${DMA_ETHERCAT_TEMPLATE:-$REPO_ROOT/manifests/installers/dma-ethercat/base/job.yaml}"
 DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-installer.yaml}"
 
+# Pinned GID for the host-side `perfetto` group. Must stay in lockstep
+# with PERFETTO_GROUP_GID in scripts/lib/host-config.py — the patch
+# generator emits a literal `fsGroup: 2026` into the positronic-control
+# pod spec, and this value is the gid that backs that group on the host.
+PERFETTO_GROUP_GID=2026
+PHANTOM_TRACING_TEMPLATE="${PHANTOM_TRACING_TEMPLATE:-$REPO_ROOT/manifests/installers/phantom-tracing/base/job.yaml}"
+PHANTOM_TRACING_RENDERED="${PHANTOM_TRACING_RENDERED:-/etc/phantomos/phantom-tracing-installer.yaml}"
+PHANTOM_TRACING_INSTALLER_HOSTDIR="${PHANTOM_TRACING_INSTALLER_HOSTDIR:-/var/lib/phantom-tracing-installer}"
+
+# Phase 9.5 — install the upstream Perfetto traced daemon on the host
+# via the phantom-tracing .deb. Runs only when host-config.yaml has
+# perf.tracing.backend == "system" AND an images.phantom-tracing.image
+# entry; otherwise a no-op. Mirrors install_dma_ethercat's pattern:
+# Job extracts the .deb from a delivery container image, dpkg -i,
+# bootstrap creates the perfetto group + cleans stale sockets +
+# enables the systemd units (host state is bootstrap-owned; the .deb
+# postinst places files only).
+#
+# Plan note: this was branded "phase 4.5" in the design plan but
+# operationally it depends on phase 5 (seed_pull_secrets, for the
+# dockerhub-creds Secret the installer Job's imagePullSecrets points
+# at). Placed at 9.5 alongside install_dma_ethercat (which has the
+# same Job-extracts-deb dependency).
+#
+# The pod's hostPath mounts for /tmp/perfetto-{producer,consumer} and
+# fsGroup: 2026 are emitted as a separate strategic-merge patch by
+# host-config.py:cmd_get_perf_deployment_patch_json and applied at
+# phase 13 (deployments_phase) onto the ArgoCD Application's
+# kustomize.patches list. That patch is gated on backend=="system"
+# too, so the in_process / no-perf paths leave the positronic-control
+# pod unchanged.
+system_backend_tracing() {
+  if [ "$SKIP_SYSTEM_TRACING" = 1 ]; then
+    phase "phase 9.5: system-backend-tracing  (skipped — --skip-system-tracing)"
+    return
+  fi
+
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    phase "phase 9.5: system-backend-tracing  (skipped — no host-config.yaml)"
+    return
+  fi
+
+  local backend
+  backend="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-perf tracing.backend 2>/dev/null || true)"
+  if [ "$backend" != "system" ]; then
+    phase "phase 9.5: system-backend-tracing  (skipped — perf.tracing.backend not 'system')"
+    return
+  fi
+
+  phase "phase 9.5: system-backend-tracing (install traced + traced_probes)"
+
+  if [ ! -f "$PHANTOM_TRACING_TEMPLATE" ]; then
+    fail "$PHANTOM_TRACING_TEMPLATE missing"
+    return
+  fi
+
+  local image_ref
+  image_ref="$(python3 "$HOST_CONFIG_HELPER" "$hc" \
+                 get-image-for-container phantom-tracing 2>/dev/null || true)"
+  if [ -z "$image_ref" ]; then
+    fail "host-config.yaml has no images.phantom-tracing.image entry"
+    info "add 'images.phantom-tracing.image: foundationbot/phantom-tracing:<tag>' to host-config.yaml"
+    info "or pass --skip-system-tracing to bypass"
+    return
+  fi
+  pass "resolved phantom-tracing image: $image_ref"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  render $PHANTOM_TRACING_TEMPLATE -> $PHANTOM_TRACING_RENDERED  (image=$image_ref)"
+    info "DRY-RUN  kubectl -n phantom delete job phantom-tracing-installer --ignore-not-found"
+    info "DRY-RUN  kubectl apply -f $PHANTOM_TRACING_RENDERED"
+    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/phantom-tracing-installer"
+    info "DRY-RUN  dpkg -i $PHANTOM_TRACING_INSTALLER_HOSTDIR/phantom-tracing_*.deb"
+    info "DRY-RUN  groupadd -f -g $PERFETTO_GROUP_GID perfetto"
+    info "DRY-RUN  rm -f /tmp/perfetto-producer /tmp/perfetto-consumer  (stale-socket hygiene)"
+    info "DRY-RUN  systemctl daemon-reload"
+    info "DRY-RUN  systemctl enable --now traced.service traced_probes.service"
+    info "DRY-RUN  wait up to 5s for /tmp/perfetto-producer socket"
+    return
+  fi
+
+  mkdir -p "$(dirname "$PHANTOM_TRACING_RENDERED")"
+  sed -e "s#foundationbot/phantom-tracing:PLACEHOLDER#$image_ref#" \
+    "$PHANTOM_TRACING_TEMPLATE" > "$PHANTOM_TRACING_RENDERED"
+  chmod 0644 "$PHANTOM_TRACING_RENDERED"
+  pass "rendered $PHANTOM_TRACING_RENDERED"
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — phase 3 should have set this up"
+    return
+  fi
+
+  # Reuse the phantom namespace already created by phase 9 / phase 4
+  # patterns. If absent (selected-phases mode with only system-tracing),
+  # create it on-the-fly.
+  if ! "${KUBECTL[@]}" get ns phantom >/dev/null 2>&1; then
+    note "creating ns/phantom..."
+    "${KUBECTL[@]}" create ns phantom >/dev/null || true
+  fi
+
+  if "${KUBECTL[@]}" -n phantom get job phantom-tracing-installer >/dev/null 2>&1; then
+    note "removing prior installer Job (forces fresh extract)..."
+    "${KUBECTL[@]}" -n phantom delete job phantom-tracing-installer --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    pass "prior Job removed"
+  fi
+
+  note "applying installer manifest..."
+  if "${KUBECTL[@]}" apply -f "$PHANTOM_TRACING_RENDERED" >/dev/null; then
+    pass "installer Job applied"
+  else
+    fail "kubectl apply -f $PHANTOM_TRACING_RENDERED"
+    return
+  fi
+
+  note "waiting up to 2min for installer Job to reach Complete..."
+  if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=120s job/phantom-tracing-installer >/dev/null 2>&1; then
+    pass "installer Job Complete"
+  else
+    fail "installer Job did not Complete in 2min"
+    "${KUBECTL[@]}" -n phantom logs -l app=phantom-tracing-installer --tail=50 2>&1 | sed 's/^/      /' || true
+    return
+  fi
+
+  local deb
+  deb=$(ls -1t "$PHANTOM_TRACING_INSTALLER_HOSTDIR"/phantom-tracing_*.deb 2>/dev/null | head -1 || true)
+  if [ -z "$deb" ]; then
+    fail "no phantom-tracing_*.deb at $PHANTOM_TRACING_INSTALLER_HOSTDIR/"
+    return
+  fi
+  note "found .deb on host: $(basename "$deb")"
+  note "running dpkg -i..."
+  if dpkg -i "$deb"; then
+    pass "dpkg -i $(basename "$deb")"
+  else
+    fail "dpkg -i $deb"
+    return
+  fi
+
+  # Host state. Bootstrap owns: pinned-GID group, socket-dir hygiene,
+  # systemctl enable. Doing this here (not in the .deb postinst) keeps
+  # the .deb portable across hosts that may have different group
+  # conventions.
+  if getent group perfetto >/dev/null; then
+    local gid_current
+    gid_current=$(getent group perfetto | awk -F: '{print $3}')
+    if [ "$gid_current" != "$PERFETTO_GROUP_GID" ]; then
+      fail "group 'perfetto' already exists with gid $gid_current (expected $PERFETTO_GROUP_GID)"
+      info "manually 'groupmod -g $PERFETTO_GROUP_GID perfetto' (caution: file ownerships) or update PERFETTO_GROUP_GID in both bootstrap-robot.sh and scripts/lib/host-config.py"
+      return
+    fi
+    skip "group 'perfetto' already at gid $PERFETTO_GROUP_GID"
+  else
+    if groupadd -f -g "$PERFETTO_GROUP_GID" perfetto; then
+      pass "created group 'perfetto' (gid $PERFETTO_GROUP_GID)"
+    else
+      fail "groupadd -f -g $PERFETTO_GROUP_GID perfetto"
+      return
+    fi
+  fi
+
+  # Clean stale sockets — the .deb didn't touch them but a previous
+  # traced run may have left files owned by the wrong group.
+  for sock in /tmp/perfetto-producer /tmp/perfetto-consumer; do
+    if [ -S "$sock" ] || [ -e "$sock" ]; then
+      local group_current
+      group_current=$(stat -c '%G' "$sock" 2>/dev/null || echo "?")
+      if [ "$group_current" != "perfetto" ]; then
+        note "removing stale $sock (group $group_current != perfetto)"
+        rm -f "$sock"
+      fi
+    fi
+  done
+
+  if systemctl daemon-reload; then
+    pass "systemctl daemon-reload"
+  else
+    fail "systemctl daemon-reload"
+    return
+  fi
+
+  if systemctl enable --now traced.service traced_probes.service; then
+    pass "traced + traced_probes enabled and started"
+  else
+    fail "systemctl enable --now traced.service traced_probes.service"
+    systemctl --no-pager status traced.service 2>&1 | sed 's/^/      /' || true
+    return
+  fi
+
+  # Confirm traced actually came up (enable --now doesn't surface
+  # immediate post-start crashes).
+  if ! systemctl is-active --quiet traced.service; then
+    fail "traced.service not active after enable --now"
+    info "journalctl -u traced for details"
+    return
+  fi
+
+  # Wait for the producer socket — traced creates it on startup. If it
+  # doesn't appear, the systemd unit's ExecStart is likely wrong or
+  # traced is exiting immediately.
+  local waited=0
+  while [ "$waited" -lt 5 ] && [ ! -S /tmp/perfetto-producer ]; do
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+  if [ -S /tmp/perfetto-producer ]; then
+    pass "/tmp/perfetto-producer socket present"
+  else
+    fail "/tmp/perfetto-producer never appeared (waited ${waited}*0.5s)"
+    info "journalctl -u traced for the underlying cause"
+    return
+  fi
+
+  note "host-side traced ready. positronic-control pod hostPath mounts + fsGroup=$PERFETTO_GROUP_GID auto-injected at phase 13 (deployments)."
+}
+
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
     phase "phase 9: install dma-ethercat  (skipped — --skip-ethercat-install)"
@@ -4898,6 +5128,7 @@ ecat_interface     ; guard
 cpu_isolation      ; guard
 log_management     ; guard
 install_dma_ethercat ; guard
+system_backend_tracing ; guard
 gitops             ; guard
 argocd_admin       ; guard
 image_overrides    ; guard

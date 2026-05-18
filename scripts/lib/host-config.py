@@ -618,6 +618,15 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": None,
         "manifest_image": "foundationbot/dma-ethercat",
     },
+    "phantom-tracing": {
+        # Not stack-routed. Phase 4.5 (system_backend_tracing) reads
+        # images.phantom-tracing.image directly to render the
+        # bootstrap-managed installer Job that extracts the upstream
+        # tracebox .deb to the host. CI publishes <branch>-latest +
+        # <branch>-latest-aarch64 variants.
+        "stack": None,
+        "manifest_image": "foundationbot/phantom-tracing",
+    },
     "phantom-locomotion": {
         # phantom-locomotion DaemonSet (foundation.bot/has-locomotion gated).
         # Container key tracks the workload name (matches DaemonSet name and
@@ -980,6 +989,18 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
 
     for w in all_warnings:
         print(f"warning: {w}", file=sys.stderr)
+
+    # Fold in the perf-block patches (ConfigMap data overlay + optional
+    # positronic-control hostPath socket mounts when backend=system).
+    # Both belong on the "core" stack since positronic is core. They are
+    # additive — when host-config also has a `deployments.positronic-
+    # control.mounts` block, the existing patch goes first and the perf
+    # patch second; Kustomize applies both in order, with the volumes
+    # lists merging on the `name` strategic-merge key.
+    perf_extras = _perf_extra_patches(cfg)
+    for entry in perf_extras:
+        by_stack.setdefault("core", []).append(entry)
+
     # Emit as a stable list-of-{stack,patches} so bash callers can
     # iterate predictably.
     out = [
@@ -988,6 +1009,126 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
     ]
     print(json.dumps(out))
     return 0
+
+
+def _perf_extra_patches(cfg: dict) -> list[dict]:
+    """Build the perf-block patch entries that fold into the core stack
+    list.
+
+    Returns up to two entries:
+      1. A ConfigMap patch overlaying positronic-perf data with the
+         operator-selected PERF_* env-var values (only emitted when
+         the perf block has at least one value to set).
+      2. A positronic-control Deployment patch adding /tmp/perfetto-
+         {producer,consumer} hostPath socket mounts + fsGroup: 2026
+         (only emitted when perf.tracing.backend == "system").
+
+    Each entry has the same {target, patch} shape used by the rest of
+    cmd_get_deployment_patches_json so bash callers don't have to
+    special-case perf.
+    """
+    block = cfg.get("perf") or {}
+    if not isinstance(block, dict) or not block:
+        return []
+
+    out: list[dict] = []
+
+    # ConfigMap overlay. Build the data dict via the same logic as
+    # cmd_get_perf_configmap_json, but inline (we already validated the
+    # block in cmd_validate, and re-rendering here keeps the data
+    # source single-sourced).
+    data: dict[str, str] = {}
+    if block.get("preset") is not None:
+        data["PERF_PRESET"] = str(block["preset"])
+    tracing = block.get("tracing") or {}
+    if isinstance(tracing, dict):
+        if tracing.get("enabled") is not None:
+            data["PERF_TRACING_ENABLED"] = "1" if tracing["enabled"] else "0"
+        if tracing.get("backend"):
+            data["PERF_TRACING_BACKEND"] = str(tracing["backend"])
+        if tracing.get("output"):
+            data["PERF_TRACING_OUTPUT"] = str(tracing["output"])
+    tn = block.get("targetNodes")
+    if isinstance(tn, list) and tn:
+        data["PERF_TARGET_NODES"] = ",".join(str(x) for x in tn)
+    if data:
+        cm_patch = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "positronic-perf",
+                "namespace": "positronic",
+            },
+            "data": data,
+        }
+        out.append({
+            "target": {
+                "kind": "ConfigMap",
+                "name": "positronic-perf",
+                "namespace": "positronic",
+            },
+            "patch": yaml.safe_dump(cm_patch, sort_keys=False),
+        })
+
+    # Deployment hostPath / fsGroup patch — only when backend=system.
+    if isinstance(tracing, dict) and tracing.get("backend") == "system":
+        target = DEPLOYMENT_TARGETS["positronic-control"]
+        dep_patch = {
+            "apiVersion": "apps/v1",
+            "kind": target["kind"],
+            "metadata": {
+                "name": "positronic-control",
+                "namespace": target["namespace"],
+            },
+            "spec": {
+                "template": {
+                    "spec": {
+                        "securityContext": {"fsGroup": PERFETTO_GROUP_GID},
+                        "volumes": [
+                            {
+                                "name": "perfetto-producer",
+                                "hostPath": {
+                                    "path": "/tmp/perfetto-producer",
+                                    "type": "Socket",
+                                },
+                            },
+                            {
+                                "name": "perfetto-consumer",
+                                "hostPath": {
+                                    "path": "/tmp/perfetto-consumer",
+                                    "type": "Socket",
+                                },
+                            },
+                        ],
+                        "containers": [
+                            {
+                                "name": target["container"],
+                                "volumeMounts": [
+                                    {
+                                        "name": "perfetto-producer",
+                                        "mountPath": "/tmp/perfetto-producer",
+                                    },
+                                    {
+                                        "name": "perfetto-consumer",
+                                        "mountPath": "/tmp/perfetto-consumer",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+        out.append({
+            "target": {
+                "kind": target["kind"],
+                "name": "positronic-control",
+                "namespace": target["namespace"],
+            },
+            "patch": yaml.safe_dump(dep_patch, sort_keys=False),
+        })
+
+    return out
 
 
 def cmd_get_enabled_stacks(cfg: dict) -> int:
