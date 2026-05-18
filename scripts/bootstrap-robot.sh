@@ -2556,38 +2556,12 @@ cpu_isolation() {
     return
   fi
 
-  # ---- Step 3b: render per-partition systemd slices --------------------
-  # Cgroup-v2 enforces cpuset.cpus strictly: a service in system.slice
-  # (which manage_cpusets shrinks to housekeeping) cannot use isolated
-  # cpus regardless of CPUAffinity= or taskset. Services that *need*
-  # isolated cores (dma-ethercat) must be placed in a sibling slice with
-  # its own AllowedCPUs covering those cpus. Render one slice per
-  # cpuIsolation.partitions[] entry; the slice path mirrors the partition
-  # name. Systemd auto-activates each slice the first time a unit
-  # references it via Slice=<name>.slice (phase 9 writes the dma-ethercat
-  # drop-in that does this).
-  local _slice_count=0 _slice_name _slice_cpus
-  while IFS=$'\t' read -r _slice_name _slice_cpus; do
-    [ -z "$_slice_name" ] && continue
-    if cpusets_render_slice "$_slice_name" "$_slice_cpus" >/dev/null; then
-      _slice_count=$((_slice_count + 1))
-    else
-      warn "failed to render ${_slice_name}.slice"
-    fi
-  done < <(python3 - "$ci_json" <<'PY' 2>/dev/null || true
-import json, sys
-data = json.loads(sys.argv[1] or "{}")
-for p in (data.get("partitions") or []):
-    name = p.get("name", "")
-    cpus = p.get("cpus", "")
-    if name and isinstance(cpus, str):
-        print(f"{name}\t{cpus}")
-PY
-)
-  if [ "$_slice_count" -gt 0 ]; then
-    systemctl daemon-reload
-    pass "rendered ${_slice_count} RT cpuset slice unit(s)"
-  fi
+  # Note: per-partition slice units are rendered by `manage_cpusets.sh apply`
+  # in step 2 above (since FIR-319). The slice cgroup IS the partition: the
+  # apply subcommand writes the slice unit, starts it, then sets
+  # cpuset.cpus.exclusive and cpuset.cpus.partition=isolated on the slice's
+  # cgroup. Earlier versions of this phase rendered the slice here
+  # separately, which led to a sibling-cgroup conflict with the partition.
 
   # ---- Step 4: kernel cmdline migration --------------------------------
   # Delegates to manage_cpusets.sh migrate-cmdline so the bootstrap and
