@@ -414,3 +414,34 @@ nodeLabels:
 #     backend: in_process
 #     output: /tmp/positronic.perfetto-trace
 #   targetNodes: [fossil_encoder]
+
+# ----------------------------------------------------------------------
+# dmaVideo: optional dma-video producer mode override. The base
+# manifest runs the producer in OAK camera-capture mode. Set
+# `dmaVideo.producer.mode: video` to patch the Deployment into
+# replaying a video file via `multi_camera_producer.py video` —
+# matches the recorded-video benchmark flow SOF-877 used on
+# docker-compose. See docs/optimization/PERFETTO_K0S.md.
+#
+# Schema:
+#   producer.mode          "camera" (default) | "video"
+#   producer.file          Required when mode==video. Absolute host
+#                          path to the video file. The parent directory
+#                          is hostPath-mounted at /videos inside the
+#                          container; the file appears at /videos/<name>.
+#   producer.numCameras    Replay the same video as N virtual cameras
+#                          (default 1).
+#   producer.fps           Playback FPS (default 25).
+#   producer.format        nv12 (default) | gray8 | gray | bgr | mjpeg
+#   producer.width         Frame width (default 1280)
+#   producer.height        Frame height (default 800)
+#
+# Example (recorded-video benchmark on ch4):
+#
+# dmaVideo:
+#   producer:
+#     mode: video
+#     file: /home/phantom/foundation/positronic_control/videos/test.mp4
+#     numCameras: 1
+#     fps: 25
+#     format: nv12

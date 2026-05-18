@@ -325,3 +325,140 @@ def test_deployment_patches_no_perf_anywhere_when_no_perf_block(
     pc = [p for p in core["patches"] if p["target"]["name"] == "positronic-control"]
     # No perf, no deployments overrides → no positronic-control patch.
     assert pc == []
+
+
+# ----------------------------------------------------------------------
+# dmaVideo schema — switch dma-video producer to video-playback mode
+# for recorded-video benchmarks (the SOF-877 testing flow on k0s).
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def cfg_video_playback() -> dict:
+    return {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {
+                "mode": "video",
+                "file": "/home/phantom/foundation/positronic_control/videos/test.mp4",
+                "numCameras": 1,
+                "fps": 25,
+                "format": "nv12",
+            },
+        },
+    }
+
+
+def test_video_producer_patch_emits_video_args(cfg_video_playback, capsys):
+    rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    prod = [
+        p for p in core["patches"]
+        if p["target"]["name"] == "producer"
+        and p["target"]["namespace"] == "dma-video"
+    ]
+    assert len(prod) == 1, (
+        f"expected exactly one dma-video producer patch; got {len(prod)}"
+    )
+    patch = prod[0]["patch"]
+    # Args switch to the `video` subcommand. The container sees the
+    # video at /videos/<basename>; the host directory is bind-mounted
+    # at /videos via a hostPath volume (see the mount test below).
+    assert "- video" in patch
+    assert "/videos/test.mp4" in patch
+    assert "--num-cameras" in patch
+    assert "--fps" in patch
+    assert "--format" in patch
+    assert "nv12" in patch
+
+
+def test_video_producer_patch_mounts_video_file(cfg_video_playback, capsys):
+    """The video file's parent directory must be mounted into the pod."""
+    rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    prod = next(
+        p for p in core["patches"]
+        if p["target"]["name"] == "producer"
+        and p["target"]["namespace"] == "dma-video"
+    )
+    patch = prod["patch"]
+    assert "/home/phantom/foundation/positronic_control/videos" in patch
+
+
+def test_no_video_producer_patch_when_mode_camera(capsys):
+    """mode != "video" → no producer patch (default camera manifest stands)."""
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {"producer": {"mode": "camera"}},
+    }
+    rc = hc.cmd_get_deployment_patches_json(cfg)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    prod = [
+        p for p in core["patches"]
+        if p["target"]["name"] == "producer"
+        and p["target"]["namespace"] == "dma-video"
+    ]
+    assert prod == []
+
+
+def test_no_video_producer_patch_when_dmavideo_absent(capsys):
+    rc = hc.cmd_get_deployment_patches_json({"robot": "ch4", "stacks": {"core": {}}})
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    core = next(e for e in data if e["stack"] == "core")
+    prod = [
+        p for p in core["patches"]
+        if p["target"]["name"] == "producer"
+        and p["target"]["namespace"] == "dma-video"
+    ]
+    assert prod == []
+
+
+def test_validate_rejects_video_mode_without_file(capsys):
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {"producer": {"mode": "video"}},
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "file" in err.lower()
+
+
+def test_validate_rejects_unknown_mode(capsys):
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {"producer": {"mode": "gibberish", "file": "/tmp/x.mp4"}},
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "mode" in err.lower()
+
+
+def test_validate_rejects_unknown_format(capsys):
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {
+                "mode": "video",
+                "file": "/tmp/x.mp4",
+                "format": "h264",
+            },
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "format" in err.lower()

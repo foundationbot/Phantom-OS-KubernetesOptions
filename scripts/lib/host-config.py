@@ -809,6 +809,17 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "phantom",
         "container": "streamer",
     },
+    # dma-video producer Deployment. Default args run the OAK camera
+    # capture path; override via host-config dmaVideo.producer.mode=video
+    # flips to video-file playback for recorded-video benchmarks (the
+    # SOF-877 docker-compose test flow, adapted to k0s). See
+    # _dma_video_producer_patch().
+    "dma-video-producer": {
+        "stack": "core",
+        "kind": "Deployment",
+        "namespace": "dma-video",
+        "container": "producer",
+    },
 }
 
 
@@ -1001,6 +1012,15 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
     for entry in perf_extras:
         by_stack.setdefault("core", []).append(entry)
 
+    # dmaVideo: optional dma-video producer mode switch. When
+    # dmaVideo.producer.mode == "video", emit a Deployment patch that
+    # replaces args + mounts a video file. Used for recorded-video
+    # benchmarks (the FIR-315/k0s adaptation of SOF-877's
+    # docker-compose-based recorded-video test).
+    video_extras = _dma_video_extra_patches(cfg)
+    for entry in video_extras:
+        by_stack.setdefault("core", []).append(entry)
+
     # Emit as a stable list-of-{stack,patches} so bash callers can
     # iterate predictably.
     out = [
@@ -1129,6 +1149,113 @@ def _perf_extra_patches(cfg: dict) -> list[dict]:
         })
 
     return out
+
+
+# DMA.video formats supported by multi_camera_producer.py's `video`
+# subcommand (mirror of the argparse `choices=` list in
+# DMA.video/src/multi_camera_producer.py). If upstream gains a new
+# format, add it here so the validator accepts it.
+DMA_VIDEO_FORMATS = frozenset({"nv12", "gray8", "gray", "bgr", "mjpeg"})
+
+
+def _dma_video_extra_patches(cfg: dict) -> list[dict]:
+    """Build the dma-video producer patch when host-config requests
+    video-playback mode.
+
+    Returns:
+        Zero or one patch entries with the same ``{target, patch}``
+        shape ``cmd_get_deployment_patches_json`` consumes. Emits
+        nothing when ``dmaVideo`` is absent or ``producer.mode`` is
+        not ``"video"``.
+
+    The patch:
+      * Replaces ``args`` on the producer container with the
+        ``multi_camera_producer.py video ...`` invocation matching the
+        host-config fields.
+      * Adds a ``hostPath`` volume + mount for the directory containing
+        the video file, exposed at ``/videos`` inside the container.
+        (The file's basename gets joined into ``/videos/<name>`` for
+        the ``--video`` arg.)
+
+    The default camera-mode args remain in the base manifest; this
+    patch overrides them via strategic merge.
+    """
+    block = cfg.get("dmaVideo") or {}
+    if not isinstance(block, dict):
+        return []
+    producer = block.get("producer") or {}
+    if not isinstance(producer, dict) or producer.get("mode") != "video":
+        return []
+
+    target = DEPLOYMENT_TARGETS["dma-video-producer"]
+    file_path = producer["file"]
+    file_path_obj = Path(file_path)
+    host_dir = str(file_path_obj.parent)
+    file_basename = file_path_obj.name
+    container_path = f"/videos/{file_basename}"
+
+    num_cameras = int(producer.get("numCameras", 1))
+    fps = producer.get("fps", 25)
+    fmt = producer.get("format", "nv12")
+    width = producer.get("width")
+    height = producer.get("height")
+
+    args: list[str] = [
+        "video",
+        "--video",
+        container_path,
+        "--num-cameras",
+        str(num_cameras),
+        "--fps",
+        str(fps),
+        "--format",
+        str(fmt),
+    ]
+    if width is not None:
+        args += ["--width", str(width)]
+    if height is not None:
+        args += ["--height", str(height)]
+
+    patch = {
+        "apiVersion": "apps/v1",
+        "kind": target["kind"],
+        "metadata": {
+            "name": "producer",
+            "namespace": target["namespace"],
+        },
+        "spec": {
+            "template": {
+                "spec": {
+                    "volumes": [
+                        {
+                            "name": "videos",
+                            "hostPath": {
+                                "path": host_dir,
+                                "type": "Directory",
+                            },
+                        },
+                    ],
+                    "containers": [
+                        {
+                            "name": target["container"],
+                            "args": args,
+                            "volumeMounts": [
+                                {"name": "videos", "mountPath": "/videos"},
+                            ],
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    return [{
+        "target": {
+            "kind": target["kind"],
+            "name": "producer",
+            "namespace": target["namespace"],
+        },
+        "patch": yaml.safe_dump(patch, sort_keys=False),
+    }]
 
 
 def cmd_get_enabled_stacks(cfg: dict) -> int:
@@ -2005,6 +2132,39 @@ def cmd_validate(cfg: dict) -> int:
                     f"phantomLocomotion.policy: must be a non-empty string "
                     f"(got {policy!r})"
                 )
+
+    # dmaVideo: optional dma-video producer mode switch. When
+    # producer.mode == "video", bootstrap phase 13 patches the producer
+    # Deployment's args to replay a video file through
+    # multi_camera_producer.py. Used for recorded-video benchmarks.
+    dma_video = cfg.get("dmaVideo")
+    if dma_video is not None:
+        if not isinstance(dma_video, dict):
+            errors.append("'dmaVideo' must be a mapping")
+        else:
+            producer = dma_video.get("producer")
+            if producer is not None:
+                if not isinstance(producer, dict):
+                    errors.append("dmaVideo.producer: must be a mapping")
+                else:
+                    mode = producer.get("mode")
+                    if mode is not None and mode not in ("camera", "video"):
+                        errors.append(
+                            f"dmaVideo.producer.mode={mode!r}: must be "
+                            f"'camera' or 'video'"
+                        )
+                    if mode == "video":
+                        if not producer.get("file"):
+                            errors.append(
+                                "dmaVideo.producer.mode=video requires "
+                                "a 'file' field naming the video path"
+                            )
+                    fmt = producer.get("format")
+                    if fmt is not None and fmt not in DMA_VIDEO_FORMATS:
+                        errors.append(
+                            f"dmaVideo.producer.format={fmt!r}: must be "
+                            f"one of {sorted(DMA_VIDEO_FORMATS)}"
+                        )
 
     # perf: optional block of operator-facing perfetto + optimization
     # toggles. Renders into the positronic-perf ConfigMap (env vars)
