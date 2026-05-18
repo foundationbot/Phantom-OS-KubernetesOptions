@@ -184,6 +184,20 @@ if [[ -w /proc/sys/kernel/timer_migration ]]; then
       || echo "Failed to disable kernel.timer_migration"
 fi
 
+# --- Restrict soft/hard-lockup watchdog to housekeeping ----------------
+# nohz_full does NOT auto-restrict watchdog_cpumask. Each watched CPU
+# spawns a watchdog/N kthread that wakes every watchdog_thresh seconds;
+# on an isolated core that's a periodic jitter source. Restricting the
+# mask keeps the safety net on housekeeping cores.
+if [[ -w /proc/sys/kernel/watchdog_cpumask && -n "\$HK_EXPANDED" ]]; then
+    HK_LIST_FOR_WD=\$(echo "\$HK_EXPANDED" | tr ' ' ',' | sed 's/^,//;s/,\$//')
+    if echo "\$HK_LIST_FOR_WD" > /proc/sys/kernel/watchdog_cpumask 2>/dev/null; then
+        echo "Restricted watchdog_cpumask to housekeeping (\$HK_LIST_FOR_WD)"
+    else
+        echo "Failed to restrict watchdog_cpumask"
+    fi
+fi
+
 exit 0
 BOOT_EOF
 
