@@ -235,6 +235,53 @@ parse_isolcpus_cmdline() {
     echo "$raw"
 }
 
+# Extract the CPU list from isolcpus=managed_irq,<cpus> (or any isolcpus=
+# form where managed_irq appears in the modifier list). Returns empty if
+# managed_irq is not in effect. Distinct from parse_isolcpus_cmdline,
+# which strips ALL modifiers and returns the cpu list for any isolcpus=
+# form — including the legacy scheduler-isolation form that we've moved
+# off of in favour of cpuset partitions. Only the managed_irq modifier
+# is still load-bearing on modern kernels (it controls PCIe/MSI-X
+# managed IRQ allocation, which cpuset partitions cannot influence).
+parse_isolcpus_managed_irq_cmdline() {
+    local cmdline raw modifiers cpus part remaining
+    [[ -r /proc/cmdline ]] || { echo ""; return 0; }
+    cmdline=$(cat /proc/cmdline)
+    raw=$(echo "$cmdline" | grep -oE 'isolcpus=[^ ]+' | head -1 | cut -d= -f2-)
+    [[ -z "$raw" ]] && { echo ""; return 0; }
+
+    # Split modifiers (alpha tokens) from the trailing cpu-list. Modifiers
+    # are comma-separated and appear before the cpu list, per kernel docs:
+    #   isolcpus=[flag-list,]<cpu-list>
+    # Flag tokens are alpha-only (managed_irq, domain, nohz). The cpu list
+    # contains digits, commas, and hyphens.
+    modifiers=""
+    cpus=""
+    remaining="$raw"
+    while [[ -n "$remaining" ]]; do
+        if [[ "$remaining" == *,* ]]; then
+            part="${remaining%%,*}"
+            remaining="${remaining#*,}"
+        else
+            part="$remaining"
+            remaining=""
+        fi
+        if [[ "$part" =~ ^[a-zA-Z_]+$ ]]; then
+            modifiers="$modifiers,$part"
+        else
+            # First non-alpha token: everything from here on is the cpu list.
+            cpus="$part"
+            [[ -n "$remaining" ]] && cpus="$cpus,$remaining"
+            break
+        fi
+    done
+
+    case ",$modifiers," in
+        *,managed_irq,*) echo "$cpus" ;;
+        *)               echo "" ;;
+    esac
+}
+
 # Extract the irqaffinity= value from /proc/cmdline, or empty if unset.
 parse_irqaffinity_cmdline() {
     [[ -r /proc/cmdline ]] || { echo ""; return 0; }
