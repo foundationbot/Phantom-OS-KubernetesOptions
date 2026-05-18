@@ -374,3 +374,13 @@ _read_state_managed_cpus() {
 compute_housekeeping_mask() {
     cpu_list_to_hex_mask "$(compute_housekeeping_list)"
 }
+
+# CPUs to exclude from driver-managed IRQ (MSI-X) allocation. Defined as
+# the union of all managed cpuset-partition CPUs. Empty when no
+# partitions exist. The kernel knob is isolcpus=managed_irq,<list>; this
+# helper produces the <list> portion. Unlike compute_housekeeping_list,
+# we deliberately do NOT subtract anything: managed_irq is allocation-
+# time only and we want every isolated CPU excluded.
+compute_managed_irq_list() {
+    _read_state_managed_cpus
+}
