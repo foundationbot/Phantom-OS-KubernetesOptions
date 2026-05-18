@@ -417,18 +417,98 @@ fields.
 
 1. Validates cgroup v2 is mounted.
 2. Renders `/etc/cpusets.conf` from `cpuIsolation.partitions`.
-3. `manage_cpusets.sh apply --yes` (idempotent — skips matching state).
-4. `manage_cpusets.sh install-service` (boot persistence).
-5. `manage_cpusets.sh install-affinity-defaults` + `daemon-reexec`
-   (skipped only when `installAffinityDefaults: false`).
-6. If `cpuIsolation.nic` is set:
-   `manage_cpusets.sh ethercat-rt <partition> --nic <iface> --rt-core <N>`
-   (the `--rt-core` flag is a Phantom-OS local addition — see
-   [`scripts/cpusets/VENDORED.md`](../scripts/cpusets/VENDORED.md)).
-7. If `migrateCmdline: true`:
-   `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes`, then drop
-   `/etc/phantomos/cpu-isolation.reboot-pending` so the operator
-   knows a reboot is needed.
+3. **Reconciles orphan partitions** — sweeps `/var/lib/manage_cpusets/state`
+   for entries whose names aren't in the rendered conf, removes them via
+   `manage_cpusets.sh remove`. Lets renames (e.g. legacy hardcoded
+   `ecat-cmdline` → host-config `ecat1`) migrate cleanly without overlap
+   errors.
+4. `manage_cpusets.sh apply --yes` (idempotent — skips matching state).
+5. `manage_cpusets.sh install-service` (boot persistence).
+6. **Renders per-partition systemd slice units** at
+   `/etc/systemd/system/<name>.slice` with `AllowedCPUs=<cpus>`. These
+   are root-child slices (sibling of `system.slice`), so the shrink of
+   `system.slice` to housekeeping cores does not constrain them. Any
+   service that needs to run on the isolated cores must declare
+   `Slice=<name>.slice` in its unit or a drop-in. See "Services on
+   isolated cores" below.
+7. `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes` — strips
+   legacy `isolcpus=<cpus>` and writes `isolcpus=managed_irq,<cpus>` +
+   `rcu_nocb_poll skew_tick=1 irqaffinity=<housekeeping>` etc. Drops
+   `/etc/phantomos/cpu-isolation.reboot-pending` when the cmdline
+   actually changed. Reports "No change needed." on idempotent re-runs.
+8. `_install_cpuaffinity_dropin` writes
+   `/etc/systemd/system.conf.d/cpuaffinity.conf` with the manager-wide
+   `[Manager] CPUAffinity=<housekeeping>` (skipped only when
+   `installAffinityDefaults: false`).
+9. If `cpuIsolation.nic` is set:
+   `manage_cpusets.sh ethercat-rt <partition-containing-nic.irqCore> --nic <iface> --rt-core <N>`.
+   The partition name is resolved from `cpuIsolation.partitions[]`
+   (whichever entry covers `nic.irqCore`), replacing the historical
+   hardcoded `ecat-cmdline`. The `--rt-core` flag is a Phantom-OS local
+   addition — see [`scripts/cpusets/VENDORED.md`](../scripts/cpusets/VENDORED.md).
+10. (Phase 9, **after dma-ethercat .deb installs**) — renders
+    `/etc/systemd/system/dma-ethercat.service.d/10-slice.conf` with
+    `Slice=<partition-containing-nic.irqCore>.slice` and `CPUAffinity=`
+    (empty, overrides the manager-wide drop-in from step 8). This is the
+    final piece that lets `dma-ethercat.service` actually run on the
+    isolated cores under cgroup-v2.
+
+### Services on isolated cores
+
+Cgroup-v2 enforces `cpuset.cpus` strictly: a service whose cgroup is
+under `system.slice` (which step 5's `manage_cpusets.sh apply` shrinks
+to housekeeping cpus 0-10) **cannot reach** the isolated cores 11-13.
+`taskset -c 11-13` from inside such a service fails with `EINVAL`
+because the cgroup ceiling is honoured by `sched_setaffinity`. The
+manager-wide `CPUAffinity=` drop-in adds a second constraint at the
+syscall level, but even removing it doesn't help — the cgroup is the
+authoritative ceiling.
+
+The fix is to place the service in a **sibling slice** of `system.slice`
+whose `AllowedCPUs=` covers the isolated cores. Phase 8 step 6 does
+exactly this for every declared partition: `/etc/systemd/system/<name>.slice`
+exists with `AllowedCPUs=<cpus>` for that partition. Systemd auto-activates
+the slice the first time a unit references it via `Slice=`.
+
+For `dma-ethercat.service`, phase 9 (`install-dma-ethercat`) writes the
+drop-in that does this. For **any other service** that needs isolated
+cores, you have two options:
+
+**Option A — declare it in the unit (cleanest, requires owning the unit)**:
+```ini
+[Service]
+CPUAffinity=                # override manager-wide drop-in
+Slice=<partition-name>.slice
+```
+
+**Option B — drop-in (when the unit ships from a .deb you don't own)**:
+```bash
+sudo mkdir -p /etc/systemd/system/<your-service>.d
+sudo tee /etc/systemd/system/<your-service>.d/10-slice.conf <<'EOF'
+[Service]
+CPUAffinity=
+Slice=<partition-name>.slice
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart <your-service>
+```
+
+Verify with:
+```bash
+systemctl show <your-service> -p Slice,ControlGroup,CPUAffinity
+# expect: Slice=<partition-name>.slice
+#         ControlGroup=/<partition-name>.slice/<your-service>
+#         CPUAffinity= (empty)
+cat /sys/fs/cgroup/<partition-name>.slice/cpuset.cpus.effective
+# expect: matches the partition's cpus
+taskset -p $(systemctl show <your-service> -p MainPID --value)
+# expect: affinity mask covering the partition's cpus
+```
+
+The slice file is rendered by bootstrap, not by `manage_cpusets.sh` — it
+is a bootstrap-only artifact. If you're setting up isolation entirely by
+hand (the Steps 0-5 procedure above), you also need to write the slice
+unit and drop-ins yourself.
 
 ### Skipping the phase
 
