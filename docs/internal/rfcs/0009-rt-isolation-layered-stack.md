@@ -109,13 +109,20 @@ sudo reboot
 
 1. Render `/etc/cpusets.conf` from `cpuIsolation.partitions[]` (lib helper `cpusets_render_conf`)
 2. Sweep orphan partitions whose names aren't in the rendered conf (handles renames cleanly when migrating from older bootstrap layouts)
-3. `manage_cpusets.sh apply --yes`
-4. `manage_cpusets.sh install-service`
+3. `manage_cpusets.sh apply --yes` — renders **per-partition systemd slice units** (`/etc/systemd/system/<name>.slice` with `[Slice] AllowedCPUs=<cpus>`), starts them, writes `cpuset.cpus.exclusive=<cpus>` + `cpuset.cpus.partition=isolated` directly on each slice's cgroup. **The slice IS the partition** — there is one cgroup per partition, at `/sys/fs/cgroup/<name>.slice/`, owned jointly by systemd (which created it via the slice unit) and manage_cpusets (which set the kernel partition flag on it).
+4. `manage_cpusets.sh install-service` (boot persistence)
 5. `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes`
 6. systemd `CPUAffinity=` drop-in (still bootstrap-side; computed as `online − partitions − {0}`)
 7. `manage_cpusets.sh ethercat-rt <partition-name>` with the partition name resolved by finding which `partitions[]` entry covers `nic.irqCore`
+8. (phase 9, after `dma-ethercat.deb` installs) — bootstrap renders a `dma-ethercat.service` drop-in with `Slice=<partition>.slice` and `CPUAffinity=` (empty, to override the manager-wide drop-in from step 6) so the service runs in the partition's cgroup.
 
 Every step is idempotent. A re-run on a fully-bootstrapped host produces all SKIP / "No change needed" outcomes, no bootloader rewrite, no service restart.
+
+### Why "slice IS partition" (FIR-319)
+
+An earlier iteration (FIR-318) kept the manage_cpusets-owned cgroup and the systemd slice as **separate sibling cgroups** at `/sys/fs/cgroup/<name>` and `/sys/fs/cgroup/<name>.slice`, both claiming the same isolated cpus. The kernel rejected the partition flag with `isolated invalid (Cpu list in cpuset.cpus not exclusive)` because cgroup-v2 requires partition cpus to be exclusive at the root level — and the two siblings violated that.
+
+FIR-319 collapses the two: manage_cpusets no longer creates a standalone cgroup. It writes the slice unit, starts the slice, and sets the kernel partition flag on the *slice's* cgroup. The cascade works because cgroup-v2's `cpuset.cpus.exclusive` mechanism on the slice tells the kernel to remove those cpus from all sibling cgroups' effective sets automatically — no manual sibling-slice shrink needed.
 
 ### Verification
 
