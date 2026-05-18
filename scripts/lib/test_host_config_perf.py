@@ -446,6 +446,36 @@ def test_validate_rejects_unknown_mode(capsys):
     assert "mode" in err.lower()
 
 
+def test_fsgroup_uses_perfetto_gid_file_when_present(
+    cfg_perf_full, capsys, tmp_path, monkeypatch
+):
+    """When /etc/phantomos/perfetto-gid exists, fsGroup matches its value
+    (not the PERFETTO_GROUP_GID default). Models the JetPack Thor case
+    where the perfetto group pre-exists at a distro-specific GID."""
+    gid_file = tmp_path / "perfetto-gid"
+    gid_file.write_text("978\n")
+    monkeypatch.setattr(hc, "PERFETTO_GID_FILE", str(gid_file))
+
+    rc = hc.cmd_get_perf_deployment_patch_json(cfg_perf_full)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "fsGroup: 978" in out["patch"]
+
+
+def test_fsgroup_falls_back_to_default_when_no_gid_file(
+    cfg_perf_full, capsys, tmp_path, monkeypatch
+):
+    """Without /etc/phantomos/perfetto-gid (fresh install case), the
+    fsGroup falls back to PERFETTO_GROUP_GID (2026)."""
+    missing = tmp_path / "perfetto-gid"  # never created
+    monkeypatch.setattr(hc, "PERFETTO_GID_FILE", str(missing))
+
+    rc = hc.cmd_get_perf_deployment_patch_json(cfg_perf_full)
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "fsGroup: 2026" in out["patch"]
+
+
 def test_validate_rejects_unknown_format(capsys):
     cfg = {
         "robot": "ch4",

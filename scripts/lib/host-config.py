@@ -268,13 +268,30 @@ def cmd_get_perf_configmap_json(cfg: dict) -> int:
     return 0
 
 
-# Pinned GID for the host-side `perfetto` group. Created by
-# bootstrap phase 4.5; the positronic-control pod's securityContext
-# .fsGroup matches this so the unprivileged container UID can read
-# and write /tmp/perfetto-{producer,consumer} group-writable sockets.
-# If 2026 collides on any host distro, update both sides in lockstep
-# (the host groupadd in bootstrap-robot.sh and this constant).
+# Default GID for the host-side `perfetto` group. Used ONLY when no
+# /etc/phantomos/perfetto-gid file is present.
+#
+# Many distros (notably JetPack 6 on Jetson Thor) pre-create the
+# perfetto group at a distro-specific GID before bootstrap runs.
+# Bootstrap phase 9.5 detects the actual GID and writes it to
+# PERFETTO_GID_FILE; this loader prefers that file so the pod's
+# `securityContext.fsGroup` always matches whatever GID the host's
+# group is at. The 2026 default is what gets used for fresh installs
+# where no `perfetto` group exists yet.
 PERFETTO_GROUP_GID = 2026
+PERFETTO_GID_FILE = "/etc/phantomos/perfetto-gid"
+
+
+def _resolve_perfetto_gid() -> int:
+    """Return the GID to use for `securityContext.fsGroup` on the pod.
+
+    Order: PERFETTO_GID_FILE on disk → PERFETTO_GROUP_GID default.
+    """
+    try:
+        with open(PERFETTO_GID_FILE) as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, PermissionError, ValueError):
+        return PERFETTO_GROUP_GID
 
 
 def cmd_get_perf_deployment_patch_json(cfg: dict) -> int:
@@ -322,7 +339,7 @@ def cmd_get_perf_deployment_patch_json(cfg: dict) -> int:
         "spec": {
             "template": {
                 "spec": {
-                    "securityContext": {"fsGroup": PERFETTO_GROUP_GID},
+                    "securityContext": {"fsGroup": _resolve_perfetto_gid()},
                     "volumes": volumes,
                     "containers": [
                         {
@@ -1103,7 +1120,7 @@ def _perf_extra_patches(cfg: dict) -> list[dict]:
             "spec": {
                 "template": {
                     "spec": {
-                        "securityContext": {"fsGroup": PERFETTO_GROUP_GID},
+                        "securityContext": {"fsGroup": _resolve_perfetto_gid()},
                         "volumes": [
                             {
                                 "name": "perfetto-producer",

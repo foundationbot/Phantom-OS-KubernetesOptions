@@ -2986,11 +2986,18 @@ EOF
 DMA_ETHERCAT_TEMPLATE="${DMA_ETHERCAT_TEMPLATE:-$REPO_ROOT/manifests/installers/dma-ethercat/base/job.yaml}"
 DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-installer.yaml}"
 
-# Pinned GID for the host-side `perfetto` group. Must stay in lockstep
-# with PERFETTO_GROUP_GID in scripts/lib/host-config.py — the patch
-# generator emits a literal `fsGroup: 2026` into the positronic-control
-# pod spec, and this value is the gid that backs that group on the host.
-PERFETTO_GROUP_GID=2026
+# Default GID for the host-side `perfetto` group. Used ONLY when no
+# `perfetto` group exists on the host — fresh installs land here.
+#
+# Many distros' perfetto package postinst (notably JetPack 6 on Jetson
+# Thor) pre-creates the group at a different GID before bootstrap runs.
+# Rather than fight that and risk groupmod-induced file-ownership
+# breakage, phase 9.5 detects the existing group's actual GID and
+# writes it to /etc/phantomos/perfetto-gid. host-config.py reads that
+# file when emitting `securityContext.fsGroup` so the pod patch
+# matches whatever GID the host actually has.
+PERFETTO_GROUP_GID_DEFAULT=2026
+PERFETTO_GID_FILE="/etc/phantomos/perfetto-gid"
 PHANTOM_TRACING_TEMPLATE="${PHANTOM_TRACING_TEMPLATE:-$REPO_ROOT/manifests/installers/phantom-tracing/base/job.yaml}"
 PHANTOM_TRACING_RENDERED="${PHANTOM_TRACING_RENDERED:-/etc/phantomos/phantom-tracing-installer.yaml}"
 PHANTOM_TRACING_INSTALLER_HOSTDIR="${PHANTOM_TRACING_INSTALLER_HOSTDIR:-/var/lib/phantom-tracing-installer}"
@@ -3063,7 +3070,8 @@ system_backend_tracing() {
     info "DRY-RUN  kubectl apply -f $PHANTOM_TRACING_RENDERED"
     info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/phantom-tracing-installer"
     info "DRY-RUN  dpkg -i $PHANTOM_TRACING_INSTALLER_HOSTDIR/phantom-tracing_*.deb"
-    info "DRY-RUN  groupadd -f -g $PERFETTO_GROUP_GID perfetto"
+    info "DRY-RUN  groupadd -f -g $PERFETTO_GROUP_GID_DEFAULT perfetto (or adopt existing)"
+    info "DRY-RUN  write detected GID to $PERFETTO_GID_FILE"
     info "DRY-RUN  rm -f /tmp/perfetto-producer /tmp/perfetto-consumer  (stale-socket hygiene)"
     info "DRY-RUN  systemctl daemon-reload"
     info "DRY-RUN  systemctl enable --now traced.service traced_probes.service"
@@ -3128,26 +3136,40 @@ system_backend_tracing() {
     return
   fi
 
-  # Host state. Bootstrap owns: pinned-GID group, socket-dir hygiene,
-  # systemctl enable. Doing this here (not in the .deb postinst) keeps
-  # the .deb portable across hosts that may have different group
-  # conventions.
+  # Host state. Bootstrap owns: perfetto group GID capture, socket-dir
+  # hygiene, systemctl enable. Doing this here (not in the .deb
+  # postinst) keeps the .deb portable across hosts that may have
+  # different group conventions.
+  #
+  # GID strategy: many distros (notably JetPack 6 on Jetson Thor)
+  # pre-create the `perfetto` group at a distro-specific GID before
+  # bootstrap runs. Rather than groupmod (which would migrate every
+  # file already owned by that GID — risky), we ADOPT the existing
+  # GID and write it to PERFETTO_GID_FILE for phase 13 to consume.
+  # Only when the group doesn't exist do we create it at our default.
+  local perfetto_gid
   if getent group perfetto >/dev/null; then
-    local gid_current
-    gid_current=$(getent group perfetto | awk -F: '{print $3}')
-    if [ "$gid_current" != "$PERFETTO_GROUP_GID" ]; then
-      fail "group 'perfetto' already exists with gid $gid_current (expected $PERFETTO_GROUP_GID)"
-      info "manually 'groupmod -g $PERFETTO_GROUP_GID perfetto' (caution: file ownerships) or update PERFETTO_GROUP_GID in both bootstrap-robot.sh and scripts/lib/host-config.py"
-      return
-    fi
-    skip "group 'perfetto' already at gid $PERFETTO_GROUP_GID"
+    perfetto_gid=$(getent group perfetto | awk -F: '{print $3}')
+    pass "adopting existing group 'perfetto' at gid $perfetto_gid"
   else
-    if groupadd -f -g "$PERFETTO_GROUP_GID" perfetto; then
-      pass "created group 'perfetto' (gid $PERFETTO_GROUP_GID)"
+    perfetto_gid="$PERFETTO_GROUP_GID_DEFAULT"
+    if groupadd -f -g "$perfetto_gid" perfetto; then
+      pass "created group 'perfetto' (gid $perfetto_gid)"
     else
-      fail "groupadd -f -g $PERFETTO_GROUP_GID perfetto"
+      fail "groupadd -f -g $perfetto_gid perfetto"
       return
     fi
+  fi
+
+  # Persist the GID for phase 13's deployment-patch generator. The
+  # pod's securityContext.fsGroup MUST match this — without the file,
+  # host-config.py falls back to PERFETTO_GROUP_GID (its own default)
+  # and the socket permissions would silently mismatch.
+  if printf '%s\n' "$perfetto_gid" | install -m 0644 /dev/stdin "$PERFETTO_GID_FILE"; then
+    pass "wrote $PERFETTO_GID_FILE ($perfetto_gid)"
+  else
+    fail "could not write $PERFETTO_GID_FILE"
+    return
   fi
 
   # Clean stale sockets — the .deb didn't touch them but a previous
