@@ -108,7 +108,18 @@ $nic_tune_snippet
 echo "NIC tuning applied for \$NIC"
 
 # --- Lock performance governor on all isolated cores --------------------
+# /sys/devices/system/cpu/isolated reflects isolcpus= on the cmdline only.
+# After migrating off plain isolcpus= in favour of cgroup-v2 cpuset
+# partitions, that file is empty even when partitions are active. Fall
+# back to /sys/fs/cgroup/cpuset.cpus.isolated — the cgroup-v2 view that
+# manage_cpusets-managed partitions populate.
 ISOLATED_LIST=\$(cat /sys/devices/system/cpu/isolated 2>/dev/null || true)
+if [[ -z "\$ISOLATED_LIST" && -r /sys/fs/cgroup/cpuset.cpus.isolated ]]; then
+    ISOLATED_LIST=\$(cat /sys/fs/cgroup/cpuset.cpus.isolated 2>/dev/null || true)
+fi
+# Always initialize so later blocks (watchdog, Tegra) can safely
+# reference \$HK_EXPANDED under 'set -u' when isolation is absent.
+HK_EXPANDED=""
 if [[ -n "\$ISOLATED_LIST" ]]; then
     # Expand "10-13,15" into individual cores.
     LOCKED=0
