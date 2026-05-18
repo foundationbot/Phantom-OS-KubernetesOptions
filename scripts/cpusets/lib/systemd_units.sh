@@ -174,6 +174,16 @@ if [[ -n "\$PRESENT" && -n "\$ISOLATED_LIST" ]]; then
     fi
 fi
 
+# --- Disable kernel timer migration ------------------------------------
+# nohz_full already kills the periodic tick on isolated cores, but the
+# timer migrator can still cross CPUs and trip IPIs. Setting this to 0
+# pins hrtimers to the CPU that armed them.
+if [[ -w /proc/sys/kernel/timer_migration ]]; then
+    echo 0 > /proc/sys/kernel/timer_migration 2>/dev/null \\
+      && echo "Disabled kernel.timer_migration" \\
+      || echo "Failed to disable kernel.timer_migration"
+fi
+
 exit 0
 BOOT_EOF
 
