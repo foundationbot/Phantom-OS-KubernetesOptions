@@ -1,7 +1,9 @@
-# dma-video stack — every Deployment here gates on
-# foundation.bot/has-cameras=true via nodeSelector. Robots without
-# cameras opt out by setting foundation.bot/has-cameras: 'false' in
-# host-config.yaml's nodeLabels: block.
+# dma-video stack — Deployments here gate on either
+# foundation.bot/has-cameras=true (camera path) or
+# foundation.bot/has-video-playback=true (recorded-video playback path).
+# The two labels are mutually exclusive; host-config validates this.
+# Robots without cameras opt out of the camera Deployments by setting
+# foundation.bot/has-cameras: 'false' in host-config.yaml's nodeLabels.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -10,5 +12,6 @@ resources:
   - camera-params.yaml
   - mediamtx.yaml
   - producer.yaml
+  - producer-video-playback.yaml
   - rtsp-streamer.yaml
   - viewer.yaml

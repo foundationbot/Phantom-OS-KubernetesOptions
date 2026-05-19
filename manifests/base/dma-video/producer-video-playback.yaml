@@ -1,0 +1,61 @@
+# Recorded-video playback producer — sibling of producer.yaml.
+#
+# Mirrors the existing producer Deployment but runs the
+# foundationbot/dma-video:playback image (ENTRYPOINT is
+# video_file_producer.py, not multi_camera_producer.py) and is gated
+# by the foundation.bot/has-video-playback node label. The label
+# defaults to "false" so the Pod sits Pending on every robot until
+# host-config.yaml opts in via dmaVideo.producer.mode: video.
+#
+# host-config strategic-merge patch supplies:
+#   - args: [--video /videos/<basename>, --num-cameras N, --fps F, ...]
+#   - volumes/volumeMounts: hostPath(<dirname of file>) → /videos
+#   - image: optional override from dmaVideo.producer.image
+#
+# CLI flag names are owned jointly with `video_file_producer.py` in
+# the DMA.video repo. See VIDEO_FILE_PLAYBACK.md there.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: producer-video-playback
+  namespace: dma-video
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: producer-video-playback
+  template:
+    metadata:
+      labels:
+        app: producer-video-playback
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-video-playback: "true"
+      containers:
+        - name: producer
+          image: foundationbot/dma-video:playback
+          imagePullPolicy: IfNotPresent
+          # args populated by host-config patch when mode:video; empty
+          # by default so an accidentally-labeled robot doesn't run with
+          # stale defaults.
+          args: []
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+      volumes:
+        - name: shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
