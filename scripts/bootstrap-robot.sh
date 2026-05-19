@@ -2783,14 +2783,19 @@ EOF
 # Caps journald + rsyslog disk usage via drop-in config files. Real
 # incident: a Thor robot filled its 937 GB root partition with a single
 # 793 GB /var/log/syslog because the stock /etc/logrotate.d/rsyslog
-# specifies `weekly` rotation with no `maxsize`. Bootstrap writes:
+# specifies `weekly` rotation with no `maxsize`. A second incident
+# (hw-thor01, 745 GB syslog) was caused by logrotate not being
+# installed at all — the drop-in below is inert without the binary.
+# Bootstrap writes:
 #
 #   /etc/systemd/journald.conf.d/phantomos.conf  (SystemMaxUse, SystemMaxFileSize)
 #   /etc/logrotate.d/phantomos-syslog            (sorts after rsyslog → wins)
+#   /etc/systemd/system/logrotate.timer.d/override.conf  (hourly, not daily)
 #
-# The upstream files are left untouched so dpkg upgrades don't trigger
-# 'modified config' prompts. logManagement.enabled: false removes our
-# drop-ins and leaves the host on stock behavior.
+# `apt-get install logrotate` runs first so the package is guaranteed
+# present. The upstream config files are left untouched so dpkg upgrades
+# don't trigger 'modified config' prompts. logManagement.enabled: false
+# removes our drop-ins and leaves the host on stock behavior.
 
 log_management() {
   if [ "${SKIP_LOG_MANAGEMENT:-0}" = 1 ]; then
@@ -2869,6 +2874,7 @@ EOF
   # script. Writing a logrotate stanza referencing those would just
   # noise up `logrotate --debug`. Detect and skip cleanly.
   local lr_target="/etc/logrotate.d/phantomos-syslog"
+  local lr_timer_override="/etc/systemd/system/logrotate.timer.d/override.conf"
   local rsyslog_present=0
   if [ -f /usr/lib/rsyslog/rsyslog-rotate ] || command -v rsyslogd >/dev/null 2>&1; then
     rsyslog_present=1
@@ -2883,7 +2889,29 @@ EOF
     else
       info "rsyslog not installed; skipping logrotate drop-in (journald handles all logs here)"
     fi
+    if [ "$DRY_RUN" = 0 ] && [ -f "$lr_timer_override" ]; then
+      rm -f "$lr_timer_override"
+      systemctl daemon-reload
+      systemctl restart logrotate.timer 2>/dev/null || true
+      info "removed stale $lr_timer_override (rsyslog no longer installed)"
+    fi
   else
+    # Ensure the logrotate package is actually installed. The drop-in
+    # we write here is inert without the logrotate binary + its systemd
+    # timer; we have seen a host with rsyslog present but logrotate
+    # absent, where /var/log/syslog grew to 745 GB before the disk filled.
+    if ! command -v logrotate >/dev/null 2>&1; then
+      if [ "$DRY_RUN" = 1 ]; then
+        info "DRY-RUN  would apt-get install logrotate (missing)"
+      else
+        info "logrotate not installed — installing"
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y logrotate >/dev/null 2>&1; then
+          fail "apt-get install logrotate"
+          return
+        fi
+      fi
+    fi
+
     local lr_tmp; lr_tmp=$(mktemp)
     local compress_block
     if [ "$rs_compress" = "true" ]; then
@@ -2918,6 +2946,35 @@ EOF
       install -D -m 0644 "$lr_tmp" "$lr_target"
       rm -f "$lr_tmp"
       info "logrotate drop-in installed (maxsize=$rs_size rotate=$rs_rot $rs_freq)"
+    fi
+
+    # Override the upstream daily logrotate timer to fire hourly. The
+    # ${rs_size} maxsize cap only takes effect when logrotate actually
+    # runs — and /var/log/syslog can grow many GB/hour under a warning
+    # storm. Hourly gives the cap a chance to enforce before the disk
+    # fills. Idempotent: drop-in is rewritten only if its content changed.
+    local lr_timer_tmp; lr_timer_tmp=$(mktemp)
+    cat >"$lr_timer_tmp" <<'EOF'
+# Managed by scripts/bootstrap-robot.sh phase log-management.
+# Override the upstream daily schedule so the rsyslog `maxsize` cap can
+# actually enforce under high-rate log spam.
+[Timer]
+OnCalendar=
+OnCalendar=hourly
+AccuracySec=5min
+EOF
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  would install $lr_timer_override (hourly)"
+      rm -f "$lr_timer_tmp"
+    elif [ -f "$lr_timer_override" ] && cmp -s "$lr_timer_tmp" "$lr_timer_override"; then
+      info "logrotate.timer override unchanged"
+      rm -f "$lr_timer_tmp"
+    else
+      install -D -m 0644 "$lr_timer_tmp" "$lr_timer_override"
+      rm -f "$lr_timer_tmp"
+      systemctl daemon-reload
+      systemctl restart logrotate.timer 2>/dev/null || true
+      info "logrotate.timer override installed (hourly)"
     fi
   fi
 
