@@ -298,21 +298,31 @@ validate_requested_cpus() {
     fi
 }
 
-# Shrink the MANAGED_SLICES to a given cpu range. Idempotent.
+# Shrink the MANAGED_SLICES to a given cpu range. Idempotent. Also
+# clears any cpuset.cpus.exclusive claim on those siblings — otherwise
+# an existing exclusive claim on a sibling (kubelet's kubepods is the
+# common offender) blocks our partition's cpus.exclusive write with
+# "Cpu list in cpuset.cpus not exclusive".
 shrink_sibling_slices() {
     local housekeeping="$1"
-    local slice slice_path cpus_file
+    local slice slice_path cpus_file exc_file
     for slice in "${MANAGED_SLICES[@]}"; do
         slice_path="$CGROUP_ROOT/$slice"
-        cpus_file="$slice_path/cpuset.cpus"
         [[ ! -d "$slice_path" ]] && continue
-        [[ ! -f "$cpus_file" ]] && continue
-
-        local current
-        current=$(cat "$cpus_file" 2>/dev/null || echo "")
-        # Writing the same value again is cheap; always write to stay consistent.
-        if ! echo "$housekeeping" | $SUDO tee "$cpus_file" > /dev/null 2>&1; then
-            warn "  Could not shrink $slice/cpuset.cpus (was: '$current')"
+        cpus_file="$slice_path/cpuset.cpus"
+        exc_file="$slice_path/cpuset.cpus.exclusive"
+        if [[ -f "$cpus_file" ]]; then
+            local current
+            current=$(cat "$cpus_file" 2>/dev/null || echo "")
+            # Writing the same value again is cheap; always write to stay consistent.
+            if ! echo "$housekeeping" | $SUDO tee "$cpus_file" > /dev/null 2>&1; then
+                warn "  Could not shrink $slice/cpuset.cpus (was: '$current')"
+            fi
+        fi
+        if [[ -f "$exc_file" ]]; then
+            # Empty value clears any existing exclusive claim. Tolerated
+            # by all kernels with the cpus.exclusive file.
+            : | $SUDO tee "$exc_file" > /dev/null 2>&1 || true
         fi
     done
 }
@@ -438,6 +448,21 @@ activate_partition() {
 
     # If a pre-Option-C standalone cgroup exists, tear it down first.
     teardown_legacy_partition "$name"
+
+    # Shrink the MANAGED_SLICES (system.slice, user.slice, init.scope,
+    # docker.slice, kubepods, kubepods.slice) off the isolated cpus
+    # *before* the partition activates. Systemd's own slices do react
+    # to the partition flag's exclusivity cascade once it's set, but
+    # kubelet's kubepods is a cgroupfs cgroup (not a systemd slice)
+    # that doesn't react — its cpuset.cpus=0-13 (and possibly a
+    # cpuset.cpus.exclusive=0-13) blocks the partition's exclusivity
+    # check with "Cpu list in cpuset.cpus not exclusive". Compute the
+    # housekeeping set including this new partition and shrink.
+    local new_total new_housekeeping
+    new_total=$(cpu_list_union "$(compute_all_managed_cpus)" "$cpus")
+    new_housekeeping=$(cpu_list_diff "$(get_present_cpus)" "$new_total")
+    info "Shrinking sibling slices to $new_housekeeping..."
+    shrink_sibling_slices "$new_housekeeping"
 
     info "Rendering slice unit $(partition_slice_unit_path "$name") (AllowedCPUs=$cpus)..."
     render_partition_slice_unit "$name" "$cpus" || die "failed to render slice unit"
