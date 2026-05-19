@@ -7,7 +7,9 @@ __pycache__/
 # part of the canonical repo. Anything authored under these paths stays
 # off the remote.
 docs/plans/
+docs/internal/plans/
 docs/research/
+docs/internal/rfcs/0009-rt-isolation-layered-stack.md
 .claude/worktrees/
 
 # Local deb-builder output (scripts/build-deb.sh)
