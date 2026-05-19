@@ -327,14 +327,16 @@ nodeLabels:
 #       - {name: phantom-scripts,  host: /opt/phantom/scripts,
 #                                  container: /opt/phantom/scripts}
 #
-#   # variant: mk1 | mk2 — picks the bundled URDF for the DMA.streams
-#   # workloads. Supported on:
+#   # variant: mk1 | mk2 | mk2_lowerbody — picks the bundled URDF for
+#   # the DMA.streams workloads. Supported on:
 #   #   - rerun-streamer: live viewer auto-loads
 #   #     /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf
 #   #   - dma-recorder:   embeds the same URDF + meshes into each .rrd
 #   #     so the file is self-contained when opened off-robot.
-#   # Both URDFs are baked into the image — purely an argv override, no
-#   # mount needed. Set on every mk2 host:
+#   # All URDFs are baked into the image — purely an argv override, no
+#   # mount needed. Use mk2_lowerbody on robots with only the
+#   # locomotion chain populated (no Neck/Spine/Arms). Set on every
+#   # mk2 host:
 #   dma-recorder:
 #     variant: mk2
 #   rerun-streamer:
