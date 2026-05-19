@@ -279,6 +279,10 @@ nodeLabels:
   # every run. Edit a value to (de)schedule the workload on this host.
   # dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)
   foundation.bot/has-cameras: 'true'
+  # dma-video producer-video-playback Deployment (mutually exclusive with has-cameras).
+  # host-config sets this implicitly when dmaVideo.producer.mode=video — don't
+  # set it directly unless you know what you're doing.
+  foundation.bot/has-video-playback: 'false'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
   # positronic-control Deployment
@@ -416,12 +420,20 @@ nodeLabels:
 #   targetNodes: [fossil_encoder]
 
 # ----------------------------------------------------------------------
-# dmaVideo: optional dma-video producer mode override. The base
-# manifest runs the producer in OAK camera-capture mode. Set
-# `dmaVideo.producer.mode: video` to patch the Deployment into
-# replaying a video file via `multi_camera_producer.py video` —
-# matches the recorded-video benchmark flow SOF-877 used on
-# docker-compose. See docs/optimization/PERFETTO_K0S.md.
+# dmaVideo: optional dma-video producer mode override.
+#
+# Two Deployments coexist in the dma-video namespace:
+#   producer                  → foundationbot/dma-video:main
+#                                (camera; gated by has-cameras=true)
+#   producer-video-playback   → foundationbot/dma-video:playback
+#                                (video file replay; gated by
+#                                 has-video-playback=true)
+#
+# Setting `dmaVideo.producer.mode: video` flips this node's labels
+# (has-cameras → false, has-video-playback → true) and supplies the
+# per-host --video/--num-cameras/--fps/--format args to the playback
+# Deployment. See docs/optimization/PERFETTO_K0S.md §5 for the full
+# operator workflow.
 #
 # Schema:
 #   producer.mode          "camera" (default) | "video"
@@ -435,6 +447,11 @@ nodeLabels:
 #   producer.format        nv12 (default) | gray8 | gray | bgr | mjpeg
 #   producer.width         Frame width (default 1280)
 #   producer.height        Frame height (default 800)
+#   producer.image         Optional. Pin a specific image tag/digest
+#                          instead of riding the rolling :main /
+#                          :playback channel. Applies to the camera
+#                          Deployment when mode==camera, or the
+#                          playback Deployment when mode==video.
 #
 # Example (recorded-video benchmark on ch4):
 #
@@ -445,3 +462,11 @@ nodeLabels:
 #     numCameras: 1
 #     fps: 25
 #     format: nv12
+#     # image: foundationbot/dma-video:playback-main-20260518T100912  # optional pin
+#
+# Example (pin the camera image without changing mode):
+#
+# dmaVideo:
+#   producer:
+#     mode: camera
+#     image: foundationbot/dma-video:main-20260430T120000
