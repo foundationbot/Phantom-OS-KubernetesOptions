@@ -617,9 +617,9 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
     },
     # DMA.streams recorder DaemonSet — patches go to the `recorder` container
     # (not the `janitor` sidecar). Override channels:
-    #   * variant: mk1 | mk2 — picks the bundled URDF the recorder embeds
-    #     into each .rrd via log_file_from_path. Required for the recorded
-    #     file to render a robot when opened off-robot.
+    #   * variant: mk1 | mk2 | mk2_lowerbody — picks the bundled URDF the
+    #     recorder embeds into each .rrd via log_file_from_path. Required
+    #     for the recorded file to render a robot when opened off-robot.
     #   * mounts: host-path overlays (e.g. redirect /recordings to /data2).
     "dma-recorder": {
         "stack": "core",
@@ -629,9 +629,10 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
     },
     # DMA.streams live web visualization. Deployed but inert by default
     # (foundation.bot/has-streamer label not set). Override channels:
-    #   * variant: mk1 | mk2 — picks the bundled URDF rerun_streamer loads.
-    #     The image ships /usr/local/share/dma-streams/urdf/phantom_<v>.urdf
-    #     for both variants; this knob just flips the --variant argv.
+    #   * variant: mk1 | mk2 | mk2_lowerbody — picks the bundled URDF
+    #     rerun_streamer loads. The image ships
+    #     /usr/local/share/dma-streams/urdf/phantom_<v>.urdf for every
+    #     variant; this knob just flips the --variant argv.
     #   * queueMemoryLimitMb: hard cap on the streamer's in-process
     #     AsyncLogQueue (drops oldest when over budget). Tight cap is
     #     the OOM-prevention knob.
@@ -670,11 +671,20 @@ DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
 }
 
 # Allowlist for deployments.{rerun-streamer,dma-recorder}.variant. Add
-# new mk-N entries as new robot generations ship with bundled URDFs in
-# the image. The streamer auto-loads phantom_<variant>.urdf for live
-# rendering; the recorder embeds the same URDF + meshes into each .rrd
-# so the file is self-contained when opened off-robot.
-ROBOT_VARIANTS: frozenset[str] = frozenset({"mk1", "mk2"})
+# new entries as new URDFs ship in the DMA.streams image at
+# /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf.
+#
+#   mk1            — full-body mk1 URDF
+#   mk2            — full-body mk2 URDF
+#   mk2_lowerbody  — locomotion-only mk2 URDF (no Neck/Spine/Arms)
+#                    Useful when only the lowerbody is relevant for the
+#                    deployment, or when the upper body isn't physically
+#                    populated yet. See foundationbot/DMA.streams FIR-320.
+#
+# The streamer auto-loads phantom_<variant>.urdf for live rendering;
+# the recorder embeds the same URDF + meshes into each .rrd so the
+# file is self-contained when opened off-robot.
+ROBOT_VARIANTS: frozenset[str] = frozenset({"mk1", "mk2", "mk2_lowerbody"})
 VARIANT_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"rerun-streamer", "dma-recorder"})
 
 
