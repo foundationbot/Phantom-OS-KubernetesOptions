@@ -114,6 +114,9 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-cameras",
      "true",
      "dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)"),
+    ("foundation.bot/has-video-playback",
+     "false",
+     "dma-video producer-video-playback Deployment (mutually exclusive with has-cameras)"),
     ("foundation.bot/has-locomotion",
      "false",
      "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
@@ -827,11 +830,23 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "container": "streamer",
     },
     # dma-video producer Deployment. Default args run the OAK camera
-    # capture path; override via host-config dmaVideo.producer.mode=video
-    # flips to video-file playback for recorded-video benchmarks (the
-    # SOF-877 docker-compose test flow, adapted to k0s). See
-    # _dma_video_producer_patch().
+    # capture path. When host-config sets dmaVideo.producer.image (with
+    # mode:camera), this Deployment receives an image-only override.
+    # When mode:video, the sibling producer-video-playback Deployment
+    # is patched instead (see dma-video-producer-video-playback below).
     "dma-video-producer": {
+        "stack": "core",
+        "kind": "Deployment",
+        "namespace": "dma-video",
+        "container": "producer",
+    },
+    # dma-video playback producer Deployment. Sibling of producer; runs
+    # foundationbot/dma-video:playback (video_file_producer.py
+    # ENTRYPOINT) and is gated by the foundation.bot/has-video-playback
+    # node label. host-config dmaVideo.producer.mode:video patches this
+    # Deployment with the per-host --video/--num-cameras/--fps/--format
+    # args and the /videos hostPath volume.
+    "dma-video-producer-video-playback": {
         "stack": "core",
         "kind": "Deployment",
         "namespace": "dma-video",
@@ -1174,37 +1189,87 @@ def _perf_extra_patches(cfg: dict) -> list[dict]:
 # format, add it here so the validator accepts it.
 DMA_VIDEO_FORMATS = frozenset({"nv12", "gray8", "gray", "bgr", "mjpeg"})
 
+# Default image for the playback Deployment. Operator can override via
+# host-config dmaVideo.producer.image. CI publishes :playback on every
+# DMA.video main merge (multi-arch amd64+arm64).
+DMA_VIDEO_PLAYBACK_IMAGE_DEFAULT = "foundationbot/dma-video:playback"
+
 
 def _dma_video_extra_patches(cfg: dict) -> list[dict]:
-    """Build the dma-video producer patch when host-config requests
-    video-playback mode.
+    """Build dma-video producer patches from the host-config dmaVideo block.
+
+    Two distinct patches are possible:
+
+    * **mode:video** → one patch on ``Deployment/producer-video-playback``
+      with the per-host ``args`` (``--video /videos/<basename>
+      --num-cameras N --fps F --format FMT [--width W] [--height H]``),
+      the ``videos`` hostPath volume + ``/videos`` mount, and the
+      ``image`` set to ``dmaVideo.producer.image`` or
+      :data:`DMA_VIDEO_PLAYBACK_IMAGE_DEFAULT`.
+      The camera Deployment (``producer``) is left untouched; the node
+      label ``foundation.bot/has-video-playback`` decides which one's
+      Pod actually schedules.
+
+    * **mode:camera** (or unset) **with image override** → one image-only
+      patch on ``Deployment/producer``. No args/volumes change.
+
+    * **mode:camera (or unset), no image override** → no patches.
 
     Returns:
-        Zero or one patch entries with the same ``{target, patch}``
-        shape ``cmd_get_deployment_patches_json`` consumes. Emits
-        nothing when ``dmaVideo`` is absent or ``producer.mode`` is
-        not ``"video"``.
+        Zero, one patch entries with the same ``{target, patch}``
+        shape ``cmd_get_deployment_patches_json`` consumes.
 
-    The patch:
-      * Replaces ``args`` on the producer container with the
-        ``multi_camera_producer.py video ...`` invocation matching the
-        host-config fields.
-      * Adds a ``hostPath`` volume + mount for the directory containing
-        the video file, exposed at ``/videos`` inside the container.
-        (The file's basename gets joined into ``/videos/<name>`` for
-        the ``--video`` arg.)
-
-    The default camera-mode args remain in the base manifest; this
-    patch overrides them via strategic merge.
+    Joint-ownership: the ``args`` list below mirrors the CLI flags on
+    ``video_file_producer.py``'s argparse in the DMA.video repo. If a
+    flag is renamed on either side, both PRs ship together — no
+    exceptions. See ``VIDEO_FILE_PLAYBACK.md`` for the contract.
     """
     block = cfg.get("dmaVideo") or {}
     if not isinstance(block, dict):
         return []
     producer = block.get("producer") or {}
-    if not isinstance(producer, dict) or producer.get("mode") != "video":
+    if not isinstance(producer, dict):
         return []
 
-    target = DEPLOYMENT_TARGETS["dma-video-producer"]
+    mode = producer.get("mode")
+    image_override = producer.get("image")
+
+    # mode:camera (or unset) with an image override → image-only patch.
+    if mode != "video":
+        if not image_override:
+            return []
+        target = DEPLOYMENT_TARGETS["dma-video-producer"]
+        patch = {
+            "apiVersion": "apps/v1",
+            "kind": target["kind"],
+            "metadata": {
+                "name": "producer",
+                "namespace": target["namespace"],
+            },
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": target["container"],
+                                "image": image_override,
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+        return [{
+            "target": {
+                "kind": target["kind"],
+                "name": "producer",
+                "namespace": target["namespace"],
+            },
+            "patch": yaml.safe_dump(patch, sort_keys=False),
+        }]
+
+    # mode:video → patch the playback Deployment with the per-host args.
+    target = DEPLOYMENT_TARGETS["dma-video-producer-video-playback"]
     file_path = producer["file"]
     file_path_obj = Path(file_path)
     host_dir = str(file_path_obj.parent)
@@ -1218,7 +1283,6 @@ def _dma_video_extra_patches(cfg: dict) -> list[dict]:
     height = producer.get("height")
 
     args: list[str] = [
-        "video",
         "--video",
         container_path,
         "--num-cameras",
@@ -1233,11 +1297,13 @@ def _dma_video_extra_patches(cfg: dict) -> list[dict]:
     if height is not None:
         args += ["--height", str(height)]
 
+    image = image_override or DMA_VIDEO_PLAYBACK_IMAGE_DEFAULT
+
     patch = {
         "apiVersion": "apps/v1",
         "kind": target["kind"],
         "metadata": {
-            "name": "producer",
+            "name": "producer-video-playback",
             "namespace": target["namespace"],
         },
         "spec": {
@@ -1255,6 +1321,7 @@ def _dma_video_extra_patches(cfg: dict) -> list[dict]:
                     "containers": [
                         {
                             "name": target["container"],
+                            "image": image,
                             "args": args,
                             "volumeMounts": [
                                 {"name": "videos", "mountPath": "/videos"},
@@ -1268,7 +1335,7 @@ def _dma_video_extra_patches(cfg: dict) -> list[dict]:
     return [{
         "target": {
             "kind": target["kind"],
-            "name": "producer",
+            "name": "producer-video-playback",
             "namespace": target["namespace"],
         },
         "patch": yaml.safe_dump(patch, sort_keys=False),
@@ -2134,6 +2201,47 @@ def cmd_validate(cfg: dict) -> int:
                         "exclusive — only one may be \"true\""
                     )
 
+            # Mutual exclusion: dma-video camera producer and the
+            # playback producer both write to /dev/shm/video_frames_cam*
+            # and would collide if both ran on the same node. has-cameras
+            # defaults to "true" (existing fleet behaviour).
+            #
+            # Additionally, dmaVideo.producer.mode:video implies
+            # has-video-playback:true (and has-cameras:false). If the
+            # operator explicitly sets a contradicting label value,
+            # fail validation rather than silently overriding their
+            # intent.
+            dv = cfg.get("dmaVideo")
+            mode = None
+            if isinstance(dv, dict):
+                dv_prod = dv.get("producer")
+                if isinstance(dv_prod, dict):
+                    mode = dv_prod.get("mode")
+
+            effective_cam = nl.get("foundation.bot/has-cameras", "true")
+            effective_vp = nl.get("foundation.bot/has-video-playback", "false")
+
+            if mode == "video":
+                if nl.get("foundation.bot/has-cameras") == "true":
+                    errors.append(
+                        "nodeLabels: foundation.bot/has-cameras=\"true\" "
+                        "conflicts with dmaVideo.producer.mode=video "
+                        "(video mode implies has-video-playback=true and "
+                        "has-cameras=false; these are mutually exclusive)"
+                    )
+                if nl.get("foundation.bot/has-video-playback") == "false":
+                    errors.append(
+                        "nodeLabels: foundation.bot/has-video-playback="
+                        "\"false\" contradicts dmaVideo.producer.mode="
+                        "video — drop the explicit label or change mode"
+                    )
+            elif effective_cam == "true" and effective_vp == "true":
+                errors.append(
+                    "nodeLabels: foundation.bot/has-cameras and "
+                    "foundation.bot/has-video-playback are mutually "
+                    "exclusive — only one may be \"true\""
+                )
+
     # phantomLocomotion is optional; .policy must be a non-empty string
     # if present (a known policy name from the phantom-dma-inference
     # image's built-in registry — bootstrap doesn't enumerate them, the
@@ -2182,6 +2290,19 @@ def cmd_validate(cfg: dict) -> int:
                             f"dmaVideo.producer.format={fmt!r}: must be "
                             f"one of {sorted(DMA_VIDEO_FORMATS)}"
                         )
+                    image = producer.get("image")
+                    if image is not None:
+                        if not isinstance(image, str) or not image:
+                            errors.append(
+                                f"dmaVideo.producer.image: must be a "
+                                f"non-empty string (got {image!r})"
+                            )
+                        elif ":" not in image and "@" not in image:
+                            errors.append(
+                                f"dmaVideo.producer.image={image!r}: must "
+                                f"be a tagged (':<tag>') or digested "
+                                f"('@sha256:<hex>') image reference"
+                            )
 
     # perf: optional block of operator-facing perfetto + optimization
     # toggles. Renders into the positronic-perf ConfigMap (env vars)

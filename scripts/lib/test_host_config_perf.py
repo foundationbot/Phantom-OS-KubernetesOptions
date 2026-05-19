@@ -350,48 +350,106 @@ def cfg_video_playback() -> dict:
     }
 
 
-def test_video_producer_patch_emits_video_args(cfg_video_playback, capsys):
+def _dma_video_patches(data, name):
+    """Return the patches targeting Deployment ``name`` in dma-video ns."""
+    core = next(e for e in data if e["stack"] == "core")
+    return [
+        p for p in core["patches"]
+        if p["target"]["name"] == name
+        and p["target"]["namespace"] == "dma-video"
+    ]
+
+
+def test_video_mode_patches_producer_video_playback(cfg_video_playback, capsys):
+    """mode:video targets the sibling Deployment, not the camera one."""
     rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    core = next(e for e in data if e["stack"] == "core")
-    prod = [
-        p for p in core["patches"]
-        if p["target"]["name"] == "producer"
-        and p["target"]["namespace"] == "dma-video"
-    ]
-    assert len(prod) == 1, (
-        f"expected exactly one dma-video producer patch; got {len(prod)}"
+    assert _dma_video_patches(data, "producer") == []
+    pvp = _dma_video_patches(data, "producer-video-playback")
+    assert len(pvp) == 1, (
+        f"expected one producer-video-playback patch; got {len(pvp)}"
     )
-    patch = prod[0]["patch"]
-    # Args switch to the `video` subcommand. The container sees the
-    # video at /videos/<basename>; the host directory is bind-mounted
-    # at /videos via a hostPath volume (see the mount test below).
-    assert "- video" in patch
+
+
+def test_video_mode_args_have_no_subcommand_keyword(cfg_video_playback, capsys):
+    """The playback image's ENTRYPOINT is video_file_producer.py, so the
+    args list starts with --video, not the old `video` subcommand."""
+    rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    patch = _dma_video_patches(data, "producer-video-playback")[0]["patch"]
     assert "/videos/test.mp4" in patch
     assert "--num-cameras" in patch
     assert "--fps" in patch
     assert "--format" in patch
     assert "nv12" in patch
+    args_idx = patch.find("args:")
+    assert args_idx >= 0
+    args_block = patch[args_idx:args_idx + 60]
+    assert "- --video" in args_block, (
+        f"expected args block to start with `- --video`, got:\n{args_block}"
+    )
 
 
-def test_video_producer_patch_mounts_video_file(cfg_video_playback, capsys):
-    """The video file's parent directory must be mounted into the pod."""
+def test_video_mode_default_image_is_playback(cfg_video_playback, capsys):
+    """When dmaVideo.producer.image is unset, fall back to :playback."""
     rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    core = next(e for e in data if e["stack"] == "core")
-    prod = next(
-        p for p in core["patches"]
-        if p["target"]["name"] == "producer"
-        and p["target"]["namespace"] == "dma-video"
+    patch = _dma_video_patches(data, "producer-video-playback")[0]["patch"]
+    assert "foundationbot/dma-video:playback" in patch
+
+
+def test_video_mode_image_override(cfg_video_playback, capsys):
+    """dmaVideo.producer.image pins a specific tag on the patch."""
+    cfg_video_playback["dmaVideo"]["producer"]["image"] = (
+        "foundationbot/dma-video:playback-main-20260518T100912"
     )
-    patch = prod["patch"]
+    rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    patch = _dma_video_patches(data, "producer-video-playback")[0]["patch"]
+    assert "foundationbot/dma-video:playback-main-20260518T100912" in patch
+
+
+def test_video_mode_mounts_video_directory(cfg_video_playback, capsys):
+    """Host directory containing the video must be bind-mounted at /videos."""
+    rc = hc.cmd_get_deployment_patches_json(cfg_video_playback)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    patch = _dma_video_patches(data, "producer-video-playback")[0]["patch"]
     assert "/home/phantom/foundation/positronic_control/videos" in patch
+    assert "/videos" in patch
 
 
-def test_no_video_producer_patch_when_mode_camera(capsys):
-    """mode != "video" → no producer patch (default camera manifest stands)."""
+def test_camera_mode_with_image_override_patches_camera_producer(capsys):
+    """mode:camera + image override → single image-only patch on
+    the existing producer Deployment; playback Deployment untouched."""
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {
+                "mode": "camera",
+                "image": "foundationbot/dma-video:main-20260430T120000",
+            },
+        },
+    }
+    rc = hc.cmd_get_deployment_patches_json(cfg)
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert _dma_video_patches(data, "producer-video-playback") == []
+    p = _dma_video_patches(data, "producer")
+    assert len(p) == 1
+    patch = p[0]["patch"]
+    assert "foundationbot/dma-video:main-20260430T120000" in patch
+    # No args/volumes — image-only override.
+    assert "args:" not in patch
+    assert "volumes:" not in patch
+
+
+def test_no_patches_when_mode_camera_no_image(capsys):
     cfg = {
         "robot": "ch4",
         "stacks": {"core": {}},
@@ -400,26 +458,124 @@ def test_no_video_producer_patch_when_mode_camera(capsys):
     rc = hc.cmd_get_deployment_patches_json(cfg)
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    core = next(e for e in data if e["stack"] == "core")
-    prod = [
-        p for p in core["patches"]
-        if p["target"]["name"] == "producer"
-        and p["target"]["namespace"] == "dma-video"
-    ]
-    assert prod == []
+    assert _dma_video_patches(data, "producer") == []
+    assert _dma_video_patches(data, "producer-video-playback") == []
 
 
-def test_no_video_producer_patch_when_dmavideo_absent(capsys):
+def test_no_patches_when_dmavideo_absent(capsys):
     rc = hc.cmd_get_deployment_patches_json({"robot": "ch4", "stacks": {"core": {}}})
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    core = next(e for e in data if e["stack"] == "core")
-    prod = [
-        p for p in core["patches"]
-        if p["target"]["name"] == "producer"
-        and p["target"]["namespace"] == "dma-video"
-    ]
-    assert prod == []
+    assert _dma_video_patches(data, "producer") == []
+    assert _dma_video_patches(data, "producer-video-playback") == []
+
+
+def test_validate_rejects_image_without_tag_or_digest(capsys):
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {
+                "mode": "video",
+                "file": "/tmp/x.mp4",
+                "image": "foundationbot/dma-video",
+            },
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "image" in err.lower()
+
+
+def test_validate_rejects_non_string_image(capsys):
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {
+                "mode": "video",
+                "file": "/tmp/x.mp4",
+                "image": 42,
+            },
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "image" in err.lower()
+
+
+def test_validate_rejects_empty_image(capsys):
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {
+                "mode": "video",
+                "file": "/tmp/x.mp4",
+                "image": "",
+            },
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "image" in err.lower()
+
+
+def test_validate_rejects_video_mode_with_has_cameras_true(capsys):
+    """mode:video implies has-video-playback:true. Explicit has-cameras:true
+    in nodeLabels is the mutual-exclusion collision."""
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {"mode": "video", "file": "/tmp/x.mp4"},
+        },
+        "nodeLabels": {
+            "foundation.bot/has-cameras": "true",
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err.lower()
+    assert "has-cameras" in err or "has-video-playback" in err
+
+
+def test_validate_rejects_video_mode_with_has_video_playback_false(capsys):
+    """Operator explicitly disabling has-video-playback while requesting
+    mode:video is contradictory."""
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "dmaVideo": {
+            "producer": {"mode": "video", "file": "/tmp/x.mp4"},
+        },
+        "nodeLabels": {
+            "foundation.bot/has-video-playback": "false",
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err.lower()
+    assert "has-video-playback" in err
+
+
+def test_validate_rejects_both_cameras_and_video_playback_labels(capsys):
+    """Direct mutual-exclusion collision on the labels themselves."""
+    cfg = {
+        "robot": "ch4",
+        "stacks": {"core": {}},
+        "nodeLabels": {
+            "foundation.bot/has-cameras": "true",
+            "foundation.bot/has-video-playback": "true",
+        },
+    }
+    rc = hc.cmd_validate(cfg)
+    assert rc != 0
+    err = capsys.readouterr().err.lower()
+    assert "mutually exclusive" in err
 
 
 def test_validate_rejects_video_mode_without_file(capsys):
