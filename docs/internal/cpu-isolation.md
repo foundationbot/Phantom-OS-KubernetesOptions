@@ -215,11 +215,18 @@ What it does (manage_cpusets.sh:875):
 - Detects bootloader: `/boot/extlinux/extlinux.conf` (Jetson) or
   `/etc/default/grub` (x86 GRUB). Errors out if neither is present.
 - Backs up the config to `<path>.bak.<timestamp>`.
-- Removes every `isolcpus=<…>` token from the cmdline.
+- Removes every plain `isolcpus=<…>` token from the cmdline. Scheduler
+  isolation now comes from cpuset partitions, not legacy `isolcpus=`.
 - With `--add-rt-flags`: also injects `rcu_nocb_poll`, `skew_tick=1`,
-  and `irqaffinity=<housekeeping>` (computed from current partitions).
-  Existing values for any of these keys are stripped first so the
-  replacement is clean.
+  `irqaffinity=<housekeeping>`, and `isolcpus=managed_irq,<rt-cpus>`
+  (computed from current partition state). Existing values for any of
+  these keys are stripped first so the replacement is clean.
+- `isolcpus=managed_irq,<rt-cpus>` is the only knob that excludes a
+  CPU from driver-managed PCIe/MSI-X IRQ allocation (NVMe, modern NICs
+  with `IRQF_MANAGED`). Runtime writes to `/proc/irq/N/smp_affinity`
+  are silently ignored for these vectors, and cpuset partitions cannot
+  influence them either. Without this flag, managed IRQs can land on
+  isolated cores at driver probe time and add jitter to the RT path.
 - Prints the proposed diff and **prompts** before writing.
 - For GRUB, runs `update-grub` after writing.
 
@@ -264,8 +271,9 @@ sudo ./scripts/cpusets/manage_cpusets.sh verify
 sudo ./scripts/cpusets/manage_cpusets.sh status
 
 # Kernel cmdline migrated
-cat /proc/cmdline                     # must NOT contain isolcpus=
-                                       # must contain rcu_nocb_poll, skew_tick=1, irqaffinity=
+cat /proc/cmdline                     # must NOT contain plain isolcpus=
+                                       # must contain rcu_nocb_poll, skew_tick=1, irqaffinity=,
+                                       # and isolcpus=managed_irq,<rt-cpus>
 
 # Sysfs reflects the partition
 cat /sys/devices/system/cpu/isolated  # matches your config CPUs
@@ -274,11 +282,23 @@ cat /sys/devices/system/cpu/isolated  # matches your config CPUs
 grep ecat1 /proc/interrupts           # IRQ counts only on the pinned core
                                        # (use the actual iface name)
 
+# Status surfaces managed_irq state and warns on mismatches
+sudo ./scripts/cpusets/manage_cpusets.sh status
+# Expect: 'isolcpus=managed_irq: <rt-cpus>' matching partition CPUs, no WARN.
+
+# Boot script runtime tweaks (only present after ethercat-rt service ran)
+cat /proc/sys/kernel/timer_migration  # 0 (hrtimers pinned to arming CPU)
+cat /proc/sys/kernel/watchdog_cpumask # housekeeping range (e.g. 0-3,8-15)
+# Note: watchdog_cpumask keeps the soft/hard-lockup safety net active on
+# housekeeping cores while removing the periodic watchdog/N kick on
+# isolated cores. We deliberately do NOT set nosoftlockup or nowatchdog.
+
 # Optional: latency under load (requires rt-tests + stress-ng)
 stress-ng --cpu 10 --taskset 0-9 --timeout 60s &
 sudo ./scripts/cpusets/manage_cpusets.sh run ecat -- \
     cyclictest -p 95 -t 1 -a 13 -i 200 -l 1000000 -q
-# Pass: max < 20 µs on Thor with all three layers active.
+# Pass: max < 20 µs on Thor with all four layers active (cpuset + managed_irq
+# + timer_migration + watchdog_cpumask + Tegra kthread sweep).
 ```
 
 ---
@@ -397,18 +417,110 @@ fields.
 
 1. Validates cgroup v2 is mounted.
 2. Renders `/etc/cpusets.conf` from `cpuIsolation.partitions`.
-3. `manage_cpusets.sh apply --yes` (idempotent — skips matching state).
-4. `manage_cpusets.sh install-service` (boot persistence).
-5. `manage_cpusets.sh install-affinity-defaults` + `daemon-reexec`
-   (skipped only when `installAffinityDefaults: false`).
-6. If `cpuIsolation.nic` is set:
-   `manage_cpusets.sh ethercat-rt <partition> --nic <iface> --rt-core <N>`
-   (the `--rt-core` flag is a Phantom-OS local addition — see
-   [`scripts/cpusets/VENDORED.md`](../scripts/cpusets/VENDORED.md)).
-7. If `migrateCmdline: true`:
-   `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes`, then drop
-   `/etc/phantomos/cpu-isolation.reboot-pending` so the operator
-   knows a reboot is needed.
+3. **Reconciles orphan partitions** — sweeps `/var/lib/manage_cpusets/state`
+   for entries whose names aren't in the rendered conf, removes them via
+   `manage_cpusets.sh remove`. Lets renames (e.g. legacy hardcoded
+   `ecat-cmdline` → host-config `ecat1`) migrate cleanly without overlap
+   errors.
+4. `manage_cpusets.sh apply --yes` does, for each declared partition:
+   a. **Tears down any legacy standalone `/sys/fs/cgroup/<name>` cgroup**
+      from pre-FIR-319 installs (move tasks to root, un-isolate, rmdir).
+   b. Renders `/etc/systemd/system/<name>.slice` with `[Slice]
+      AllowedCPUs=<cpus>`. The slice is a root-child of `-.slice`
+      (sibling of `system.slice`).
+   c. `systemctl daemon-reload` and `systemctl start <name>.slice`.
+   d. Writes `<cpus>` to `/sys/fs/cgroup/<name>.slice/cpuset.cpus.exclusive`
+      and `isolated` to `cpuset.cpus.partition`. **The slice IS the
+      partition** — one cgroup, owned jointly by systemd (lifecycle) and
+      manage_cpusets (kernel partition flag).
+   e. Verifies the partition state is `isolated` (not `isolated invalid`).
+   The kernel's `cpuset.cpus.exclusive` cascade automatically removes
+   isolated cpus from sibling cgroups' effective sets — no manual
+   sibling-slice shrink. Idempotent: skips when the partition is
+   already at the desired state.
+5. `manage_cpusets.sh install-service` (boot persistence — `cpusets.service`
+   re-runs `apply` on every boot before `docker.service` and
+   `k0scontroller.service`).
+6. `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes` — strips
+   legacy `isolcpus=<cpus>` and writes `isolcpus=managed_irq,<cpus>` +
+   `rcu_nocb_poll skew_tick=1 irqaffinity=<housekeeping>` etc. Drops
+   `/etc/phantomos/cpu-isolation.reboot-pending` when the cmdline
+   actually changed. Reports "No change needed." on idempotent re-runs.
+7. `_install_cpuaffinity_dropin` writes
+   `/etc/systemd/system.conf.d/cpuaffinity.conf` with the manager-wide
+   `[Manager] CPUAffinity=<housekeeping>` (skipped only when
+   `installAffinityDefaults: false`).
+8. If `cpuIsolation.nic` is set:
+   `manage_cpusets.sh ethercat-rt <partition-containing-nic.irqCore> --nic <iface> --rt-core <N>`.
+   The partition name is resolved from `cpuIsolation.partitions[]`
+   (whichever entry covers `nic.irqCore`), replacing the historical
+   hardcoded `ecat-cmdline`. The `--rt-core` flag is a Phantom-OS local
+   addition — see [`scripts/cpusets/VENDORED.md`](../scripts/cpusets/VENDORED.md).
+9. (Phase 9, **after dma-ethercat .deb installs**) — renders
+   `/etc/systemd/system/dma-ethercat.service.d/10-slice.conf` with
+   `Slice=<partition-containing-nic.irqCore>.slice` and `CPUAffinity=`
+   (empty, overrides the manager-wide drop-in from step 7). This is the
+   final piece that lets `dma-ethercat.service` actually run on the
+   isolated cores under cgroup-v2.
+
+### Services on isolated cores
+
+Cgroup-v2 enforces `cpuset.cpus` strictly: a service whose cgroup is
+under `system.slice` **cannot reach** the isolated cores. When a partition
+is active, the kernel's `cpuset.cpus.exclusive` cascade removes the
+isolated cpus from `system.slice`'s effective set automatically. Any
+`taskset -c <isolated-cpu>` from inside such a service fails with
+`EINVAL` because the cgroup ceiling is honoured by `sched_setaffinity`.
+The manager-wide `CPUAffinity=` drop-in adds a second constraint at the
+syscall level, but even removing it doesn't help — the cgroup is the
+authoritative ceiling.
+
+The fix is to place the service in the **partition's slice**. That slice
+is `/etc/systemd/system/<name>.slice`, rendered by `manage_cpusets.sh apply`
+in step 4 above. Its cgroup is `/sys/fs/cgroup/<name>.slice/`, the same
+cgroup that carries the kernel partition flag — the slice IS the partition.
+Systemd routes any unit with `Slice=<name>.slice` into that cgroup at
+start time, where the unit gets full access to the isolated cpus.
+
+For `dma-ethercat.service`, phase 9 (`install-dma-ethercat`) writes the
+drop-in that does this. For **any other service** that needs isolated
+cores, you have two options:
+
+**Option A — declare it in the unit (cleanest, requires owning the unit)**:
+```ini
+[Service]
+CPUAffinity=                # override manager-wide drop-in
+Slice=<partition-name>.slice
+```
+
+**Option B — drop-in (when the unit ships from a .deb you don't own)**:
+```bash
+sudo mkdir -p /etc/systemd/system/<your-service>.d
+sudo tee /etc/systemd/system/<your-service>.d/10-slice.conf <<'EOF'
+[Service]
+CPUAffinity=
+Slice=<partition-name>.slice
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart <your-service>
+```
+
+Verify with:
+```bash
+systemctl show <your-service> -p Slice,ControlGroup,CPUAffinity
+# expect: Slice=<partition-name>.slice
+#         ControlGroup=/<partition-name>.slice/<your-service>
+#         CPUAffinity= (empty)
+cat /sys/fs/cgroup/<partition-name>.slice/cpuset.cpus.effective
+# expect: matches the partition's cpus
+taskset -p $(systemctl show <your-service> -p MainPID --value)
+# expect: affinity mask covering the partition's cpus
+```
+
+The slice file is rendered by bootstrap, not by `manage_cpusets.sh` — it
+is a bootstrap-only artifact. If you're setting up isolation entirely by
+hand (the Steps 0-5 procedure above), you also need to write the slice
+unit and drop-ins yourself.
 
 ### Skipping the phase
 

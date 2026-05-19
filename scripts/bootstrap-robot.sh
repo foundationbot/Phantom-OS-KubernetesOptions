@@ -2472,26 +2472,23 @@ cpu_isolation() {
     return
   fi
 
-  # Compute desired kernel cmdline tokens from host-config:
-  #   isolcpus     = union of cpuIsolation.partitions[].cpus
-  #   nohz_full    = cpuIsolation.dmaRtCpu (single core — narrow tick removal)
-  #   rcu_nocbs    = same as isolcpus (offload RCU callbacks for all isolated)
-  #   rcu_nocb_poll, skew_tick=1: bare flags, always
-  #   irqaffinity  = 0 (boot-time IRQ default → cpu 0)
-  local isolcpus nohz_full rcu_nocbs irqaffinity
+  # Validate the host-config has the fields the manage_cpusets subcommands
+  # need before any side-effects. partitions[] populates /etc/cpusets.conf
+  # in Step 1; dmaRtCpu drives nohz_full= in the cmdline migration.
+  local isolcpus
   isolcpus="$(_cpu_isolation_partitions_union "$ci_json")"
-  nohz_full="$_ci_dma_rt"
-  rcu_nocbs="$isolcpus"
-  irqaffinity=0
-  if [ -z "$isolcpus" ] || [ -z "$nohz_full" ]; then
+  if [ -z "$isolcpus" ] || [ -z "$_ci_dma_rt" ]; then
     fail "cpuIsolation.partitions and cpuIsolation.dmaRtCpu are required"
     return
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  ensure kernel cmdline tokens:"
-    info "DRY-RUN    isolcpus=$isolcpus  nohz_full=$nohz_full  rcu_nocbs=$rcu_nocbs"
-    info "DRY-RUN    rcu_nocb_poll  skew_tick=1  irqaffinity=$irqaffinity"
+    info "DRY-RUN  render $CPUSETS_CONF from cpuIsolation.partitions[]"
+    info "DRY-RUN  apply cpuset partitions (cgroup-v2) covering cpus $isolcpus"
+    info "DRY-RUN  install cpusets.service for boot persistence"
+    info "DRY-RUN  migrate-cmdline --add-rt-flags  (adds isolcpus=managed_irq,$isolcpus,"
+    info "DRY-RUN    nohz_full=$_ci_dma_rt, rcu_nocbs=$isolcpus, rcu_nocb_poll,"
+    info "DRY-RUN    skew_tick=1, irqaffinity=<housekeeping>)"
     info "DRY-RUN  write systemd CPUAffinity drop-in (online − partitions − {0})"
     local _nic_iface _nic_irq
     { read -r _nic_iface; read -r _nic_irq; } < <(cpusets_json_nic "$ci_json")
@@ -2502,22 +2499,95 @@ cpu_isolation() {
     return
   fi
 
-  # ---- Step 1: kernel cmdline ----------------------------------------
-  local cmdline_changed=0
-  if _apply_kernel_cmdline \
-        "isolcpus=$isolcpus" \
-        "nohz_full=$nohz_full" \
-        "rcu_nocbs=$rcu_nocbs" \
-        "rcu_nocb_poll" \
-        "skew_tick=1" \
-        "irqaffinity=$irqaffinity"; then
-    cmdline_changed=1
-    pass "kernel cmdline updated (REBOOT REQUIRED for full effect)"
+  # ---- Step 1: render /etc/cpusets.conf from host-config ----------------
+  # Single source of truth for partition layout is cpuIsolation.partitions[]
+  # in host-config.yaml. The lib helper renders [name]/cpus= INI blocks
+  # that manage_cpusets.sh apply consumes verbatim.
+  if cpusets_render_conf "$ci_json" >/dev/null; then
+    pass "rendered $CPUSETS_CONF from cpuIsolation.partitions"
   else
-    skip "kernel cmdline already at desired state"
+    fail "failed to render $CPUSETS_CONF"
+    return
   fi
 
-  # ---- Step 2: systemd CPUAffinity drop-in ---------------------------
+  # ---- Step 2a: reconcile orphan partitions -----------------------------
+  # manage_cpusets.sh apply creates/updates partitions named in the config
+  # but does NOT remove ones absent from it — applied partitions whose
+  # cpus overlap an orphan cause apply to fail. This matters on robots
+  # bootstrapped before the partitions[].name field was honoured: they
+  # carry a legacy "ecat-cmdline" partition that overlaps with whatever
+  # name host-config now declares (e.g. "ecat1"). Sweep any state-file
+  # entry whose name isn't in the desired list before apply runs.
+  local state_file="${MANAGE_CPUSETS_STATE_FILE:-/var/lib/manage_cpusets/state}"
+  if [ -r "$state_file" ]; then
+    local desired_names existing_name
+    desired_names="$(cpusets_json_partition_names "$ci_json")"
+    while IFS='|' read -r existing_name _ _; do
+      [ -z "$existing_name" ] && continue
+      if ! printf '%s\n' "$desired_names" | grep -Fxq -- "$existing_name"; then
+        note "removing orphan partition '$existing_name' (not in cpuIsolation.partitions)..."
+        cpusets_run remove "$existing_name" >/dev/null 2>&1 || \
+          warn "manage_cpusets.sh remove $existing_name failed (continuing)"
+      fi
+    done < "$state_file"
+  fi
+
+  # ---- Step 2: apply cpuset partitions (cgroup-v2) ----------------------
+  # apply creates new partitions and no-ops on already-matching cpus.
+  # --yes skips the isolcpus= overlap prompt; we migrate the cmdline to
+  # the managed_irq form in step 4.
+  note "applying cpuset partitions from $CPUSETS_CONF..."
+  if cpusets_run apply "$CPUSETS_CONF" --yes; then
+    pass "cpuset partitions applied"
+  else
+    fail "manage_cpusets.sh apply failed"
+    return
+  fi
+
+  # ---- Step 3: install cpusets.service for boot persistence -------------
+  # Without this, the cgroup-v2 partition created by 'apply' disappears
+  # at the next reboot. install-service is idempotent (overwrites the
+  # same files on re-run). Redirect verbose stdout — operators don't
+  # need to re-see the install paths on every bootstrap.
+  if cpusets_run install-service "$CPUSETS_CONF" >/dev/null; then
+    pass "cpusets.service installed and enabled"
+  else
+    fail "manage_cpusets.sh install-service failed"
+    return
+  fi
+
+  # Note: per-partition slice units are rendered by `manage_cpusets.sh apply`
+  # in step 2 above (since FIR-319). The slice cgroup IS the partition: the
+  # apply subcommand writes the slice unit, starts it, then sets
+  # cpuset.cpus.exclusive and cpuset.cpus.partition=isolated on the slice's
+  # cgroup. Earlier versions of this phase rendered the slice here
+  # separately, which led to a sibling-cgroup conflict with the partition.
+
+  # ---- Step 4: kernel cmdline migration --------------------------------
+  # Delegates to manage_cpusets.sh migrate-cmdline so the bootstrap and
+  # standalone operator workflows share a single cmdline editor. Adds
+  # rcu_nocb_poll, skew_tick=1, irqaffinity=<housekeeping>, and
+  # isolcpus=managed_irq,<partition-cpus> (the only knob that keeps
+  # driver-managed PCIe/MSI-X vectors off isolated cores). Strips legacy
+  # plain isolcpus=<cpus> if present — scheduler isolation comes from
+  # the cgroup-v2 partition created in step 2, not the cmdline.
+  local cmdline_changed=0
+  local migrate_out migrate_rc
+  migrate_out="$(cpusets_run migrate-cmdline --add-rt-flags --yes 2>&1)"
+  migrate_rc=$?
+  printf '%s\n' "$migrate_out"
+  if [ $migrate_rc -ne 0 ]; then
+    fail "manage_cpusets.sh migrate-cmdline failed"
+    return
+  fi
+  if printf '%s' "$migrate_out" | grep -q "No change needed"; then
+    skip "kernel cmdline already at desired state"
+  else
+    cmdline_changed=1
+    pass "kernel cmdline updated (REBOOT REQUIRED for full effect)"
+  fi
+
+  # ---- Step 5: systemd CPUAffinity drop-in ------------------------------
   # Compute housekeeping = (online cpus) − (partition cpus) − {0}.
   # cpu 0 is dropped explicitly so kernel housekeeping (kworker/0,
   # ksoftirqd/0, RCU callback workers, default IRQs) gets a quiet
@@ -2535,18 +2605,21 @@ cpu_isolation() {
     skip "cpuIsolation.installAffinityDefaults=false — leaving systemd defaults alone"
   fi
 
-  # ---- Step 3: NIC IRQ pin + governor + workqueue + boot service -----
-  # Use a synthetic state-file entry so ethercat-rt's partition lookup
-  # works without a cgroup partition existing. ethercat-rt only reads
-  # the cpus from the state file; it doesn't validate that the cgroup
-  # exists. This keeps us aligned with the vendored library's API.
+  # ---- Step 6: NIC IRQ pin + governor + workqueue + boot service -------
+  # Resolve which declared partition contains nic.irqCore — that's the
+  # partition ethercat-rt anchors to. Replaces the legacy hardcoded
+  # "ecat-cmdline" partition name so partitions[].name in host-config
+  # is the source of truth.
   local nic_iface nic_irq
   { read -r nic_iface; read -r nic_irq; } < <(cpusets_json_nic "$ci_json")
   if [ -n "$nic_iface" ] && [ -n "$nic_irq" ]; then
-    local part_name="ecat-cmdline"
-    mkdir -p /var/lib/manage_cpusets
-    printf '%s|%s|%s\n' "$part_name" "$isolcpus" "$(date +%s)" > /var/lib/manage_cpusets/state
-    note "pinning $nic_iface IRQs to core $nic_irq + governor lock + workqueue mask..."
+    local part_name
+    part_name="$(_cpu_isolation_partition_for_cpu "$ci_json" "$nic_irq")"
+    if [ -z "$part_name" ]; then
+      fail "no cpuIsolation.partitions[] entry covers nic.irqCore=$nic_irq"
+      return
+    fi
+    note "pinning $nic_iface IRQs to core $nic_irq (partition '$part_name')..."
     if cpusets_run ethercat-rt "$part_name" --nic "$nic_iface" --rt-core "$nic_irq"; then
       pass "ethercat-rt configured: $nic_iface IRQs on core $nic_irq"
     else
@@ -2556,7 +2629,7 @@ cpu_isolation() {
     skip "cpuIsolation.nic not set — skipping NIC IRQ pinning"
   fi
 
-  # ---- Step 4: reboot marker -----------------------------------------
+  # ---- Step 7: reboot marker --------------------------------------------
   if [ "$cmdline_changed" = 1 ]; then
     mkdir -p "$(dirname "$CPU_ISOLATION_REBOOT_MARKER")"
     printf 'cmdline updated at %s — reboot to pick it up\n' \
@@ -2568,10 +2641,12 @@ cpu_isolation() {
     info ""
   fi
 
-  # Clear stale reboot marker if the live cmdline already matches.
+  # Clear stale reboot marker if the live cmdline already matches. Check
+  # the new form (isolcpus=managed_irq,<cpus>) since that's what
+  # migrate-cmdline emits now.
   if [ -f "$CPU_ISOLATION_REBOOT_MARKER" ] && \
-     grep -q "isolcpus=$isolcpus" /proc/cmdline 2>/dev/null && \
-     grep -q "nohz_full=$nohz_full" /proc/cmdline 2>/dev/null; then
+     grep -q "isolcpus=managed_irq,$isolcpus" /proc/cmdline 2>/dev/null && \
+     grep -q "nohz_full=$_ci_dma_rt" /proc/cmdline 2>/dev/null; then
     rm -f "$CPU_ISOLATION_REBOOT_MARKER"
     info "cleared stale reboot marker — cmdline already migrated"
   fi
@@ -2605,6 +2680,34 @@ for p in (data.get("partitions") or []):
     cpus = p.get("cpus", "")
     if isinstance(cpus, str): acc |= expand(cpus)
 print(compress(acc))
+PY
+}
+
+# Echo the name of the cpuIsolation.partitions[] entry whose `cpus`
+# range contains the given cpu, or empty string if no entry matches.
+# Used to resolve which partition ethercat-rt should anchor to from
+# cpuIsolation.nic.irqCore, replacing the historical hardcoded
+# "ecat-cmdline" partition name.
+_cpu_isolation_partition_for_cpu() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null || true
+import json, sys
+data = json.loads(sys.argv[1] or "{}")
+try:
+    target = int(sys.argv[2])
+except (ValueError, IndexError):
+    sys.exit(0)
+def expand(spec):
+    out = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1); out.update(range(int(lo), int(hi)+1))
+        else: out.add(int(part))
+    return out
+for p in (data.get("partitions") or []):
+    cpus = p.get("cpus", "")
+    if not isinstance(cpus, str): continue
+    if target in expand(cpus):
+        print(p.get("name", "")); break
 PY
 }
 
@@ -2672,112 +2775,6 @@ EOF
   rm -f "$tmp"
   pass "wrote $dst (CPUAffinity=$value)"
   systemctl daemon-reexec || true
-  return 0
-}
-
-# Ensure each of the given tokens is present in the kernel cmdline.
-# Token forms:
-#   key=value   : strip any existing key=*, then append key=value
-#   bareflag    : strip any existing bare bareflag, then append
-# Detects bootloader (extlinux on Jetson, GRUB on x86), DEFAULT-label
-# scoping for extlinux, atomic write. Returns 0 if the cmdline was
-# changed, 1 if no-op, fails on unknown bootloader.
-_apply_kernel_cmdline() {
-  local tokens=("$@")
-
-  local bootloader config_file line_pattern
-  if [ -f /boot/extlinux/extlinux.conf ]; then
-    bootloader=extlinux
-    config_file=/boot/extlinux/extlinux.conf
-    line_pattern='^[[:space:]]*APPEND[[:space:]]'
-  elif [ -f /etc/default/grub ]; then
-    bootloader=grub
-    config_file=/etc/default/grub
-    line_pattern='^[[:space:]]*GRUB_CMDLINE_LINUX(_DEFAULT)?='
-  else
-    fail "no supported bootloader (/boot/extlinux/extlinux.conf or /etc/default/grub)"
-    return 2
-  fi
-  note "bootloader: $bootloader ($config_file)"
-
-  # Read the active cmdline. extlinux: scope to the DEFAULT label so
-  # we don't touch recovery/fallback labels.
-  local default_label="" current
-  if [ "$bootloader" = "extlinux" ]; then
-    default_label="$(grep -E '^[[:space:]]*DEFAULT[[:space:]]' "$config_file" | head -1 | awk '{print $2}')"
-    if [ -n "$default_label" ]; then
-      current="$(awk -v lbl="$default_label" '
-        /^[[:space:]]*LABEL[[:space:]]/  { in_block = ($2 == lbl) }
-        in_block && /^[[:space:]]*APPEND[[:space:]]/ { print; exit }
-      ' "$config_file")"
-    else
-      current="$(grep -E '^[[:space:]]*APPEND[[:space:]]' "$config_file" | head -1)"
-    fi
-  else
-    current="$(grep -E "$line_pattern" "$config_file" | head -1)"
-  fi
-  [ -z "$current" ] && { fail "no kernel cmdline line found in $config_file"; return 2; }
-
-  # For each token, strip the existing instance, then append the new.
-  local new_line="$current" t key
-  for t in "${tokens[@]}"; do
-    if [[ "$t" == *=* ]]; then
-      key="${t%%=*}"
-      new_line="$(printf '%s' "$new_line" | sed -E "s/[[:space:]]*${key}=[^ \"]*//g")"
-    else
-      key="$t"
-      new_line="$(printf '%s' "$new_line" | sed -E "s/(^|[[:space:]])${key}([[:space:]]|\$|\")/\\1\\2/g")"
-    fi
-    new_line="$(printf '%s' "$new_line" | sed -E 's/[[:space:]]+/ /g')"
-    if [[ "$new_line" =~ \" ]]; then
-      # GRUB-style quoted: insert inside the quotes.
-      new_line="$(printf '%s' "$new_line" | sed -E "s/\"([^\"]*)\"/\"\\1 ${t}\"/")"
-    else
-      new_line="$new_line $t"
-    fi
-  done
-
-  if [ "$current" = "$new_line" ]; then
-    return 1
-  fi
-
-  echo
-  info "current: $current"
-  info "desired: $new_line"
-  echo
-
-  # Atomic write. extlinux: only the DEFAULT label's APPEND. GRUB:
-  # the matching first line.
-  local backup tmp
-  backup="${config_file}.bak.$(date +%Y%m%d-%H%M%S)"
-  cp "$config_file" "$backup"
-  tmp="$(mktemp)"
-  if [ "$bootloader" = "extlinux" ] && [ -n "$default_label" ]; then
-    awk -v pat="$line_pattern" -v repl="$new_line" -v lbl="$default_label" '
-      /^[[:space:]]*LABEL[[:space:]]/ { in_block = ($2 == lbl) }
-      {
-        if (in_block && match($0, pat) && !done) { print repl; done=1 }
-        else { print }
-      }
-    ' "$config_file" > "$tmp"
-  else
-    awk -v pat="$line_pattern" -v repl="$new_line" '
-      {
-        if (match($0, pat) && !done) { print repl; done=1 }
-        else { print }
-      }
-    ' "$config_file" > "$tmp"
-  fi
-  install -m 0644 "$tmp" "$config_file"
-  rm -f "$tmp"
-  pass "backed up to $backup"
-  pass "rewrote $config_file"
-
-  if [ "$bootloader" = "grub" ] && command -v update-grub >/dev/null 2>&1; then
-    note "running update-grub..."
-    update-grub >/dev/null 2>&1 || warn "update-grub failed — check manually"
-  fi
-
   return 0
 }
 
@@ -3108,6 +3105,31 @@ install_dma_ethercat() {
   #        /usr/share/dma-ethercat/config/<robot>/<robot>.json
   #   3. neither -> halt with instructions to set dmaEthercat.configSet.
   configure_dma_ethercat_env "$hc"
+
+  # Place dma-ethercat.service in the cpuset partition's slice (rendered
+  # in phase 8 step 3b) so it can actually run on the isolated cpus.
+  # Without this, the service inherits system.slice's housekeeping
+  # cpuset.cpus ceiling and the unit's ExecStart `taskset -c 11-13`
+  # fails with EINVAL because the cgroup-v2 cpuset ceiling forbids it.
+  # The slice name is resolved from cpuIsolation.partitions[] — find
+  # the partition whose cpus range contains nic.irqCore (matches
+  # ethercat-rt's partition lookup in phase 8 step 6).
+  local _ci_json _nic_irq _slice_name
+  _ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
+  { read -r _ ; read -r _nic_irq; } < <(cpusets_json_nic "$_ci_json")
+  if [ -n "$_nic_irq" ]; then
+    _slice_name="$(_cpu_isolation_partition_for_cpu "$_ci_json" "$_nic_irq")"
+    if [ -n "$_slice_name" ]; then
+      if cpusets_render_service_slice_dropin dma-ethercat.service "$_slice_name" >/dev/null; then
+        systemctl daemon-reload
+        pass "dma-ethercat.service drop-in: Slice=${_slice_name}.slice"
+      else
+        warn "failed to render dma-ethercat slice drop-in (service may fail to start on isolated cpus)"
+      fi
+    else
+      warn "no cpuIsolation.partitions[] entry covers nic.irqCore=$_nic_irq — skipping dma-ethercat slice drop-in"
+    fi
+  fi
 
   # Enable + start. Failed start halts the bootstrap.
   note "enabling + starting dma-ethercat.service..."

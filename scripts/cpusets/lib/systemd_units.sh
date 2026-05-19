@@ -108,7 +108,18 @@ $nic_tune_snippet
 echo "NIC tuning applied for \$NIC"
 
 # --- Lock performance governor on all isolated cores --------------------
+# /sys/devices/system/cpu/isolated reflects isolcpus= on the cmdline only.
+# After migrating off plain isolcpus= in favour of cgroup-v2 cpuset
+# partitions, that file is empty even when partitions are active. Fall
+# back to /sys/fs/cgroup/cpuset.cpus.isolated — the cgroup-v2 view that
+# manage_cpusets-managed partitions populate.
 ISOLATED_LIST=\$(cat /sys/devices/system/cpu/isolated 2>/dev/null || true)
+if [[ -z "\$ISOLATED_LIST" && -r /sys/fs/cgroup/cpuset.cpus.isolated ]]; then
+    ISOLATED_LIST=\$(cat /sys/fs/cgroup/cpuset.cpus.isolated 2>/dev/null || true)
+fi
+# Always initialize so later blocks (watchdog, Tegra) can safely
+# reference \$HK_EXPANDED under 'set -u' when isolation is absent.
+HK_EXPANDED=""
 if [[ -n "\$ISOLATED_LIST" ]]; then
     # Expand "10-13,15" into individual cores.
     LOCKED=0
@@ -171,6 +182,50 @@ if [[ -n "\$PRESENT" && -n "\$ISOLATED_LIST" ]]; then
         printf "%x" "\$HK_MASK" > /sys/devices/virtual/workqueue/cpumask 2>/dev/null \\
           && echo "Set unbound workqueue cpumask to \$(printf '0x%x' \$HK_MASK)" \\
           || echo "Failed to set workqueue cpumask"
+    fi
+fi
+
+# --- Disable kernel timer migration ------------------------------------
+# nohz_full already kills the periodic tick on isolated cores, but the
+# timer migrator can still cross CPUs and trip IPIs. Setting this to 0
+# pins hrtimers to the CPU that armed them.
+if [[ -w /proc/sys/kernel/timer_migration ]]; then
+    echo 0 > /proc/sys/kernel/timer_migration 2>/dev/null \\
+      && echo "Disabled kernel.timer_migration" \\
+      || echo "Failed to disable kernel.timer_migration"
+fi
+
+# --- Restrict soft/hard-lockup watchdog to housekeeping ----------------
+# nohz_full does NOT auto-restrict watchdog_cpumask. Each watched CPU
+# spawns a watchdog/N kthread that wakes every watchdog_thresh seconds;
+# on an isolated core that's a periodic jitter source. Restricting the
+# mask keeps the safety net on housekeeping cores.
+if [[ -w /proc/sys/kernel/watchdog_cpumask && -n "\$HK_EXPANDED" ]]; then
+    HK_LIST_FOR_WD=\$(echo "\$HK_EXPANDED" | tr ' ' ',' | sed 's/^,//;s/,\$//')
+    if echo "\$HK_LIST_FOR_WD" > /proc/sys/kernel/watchdog_cpumask 2>/dev/null; then
+        echo "Restricted watchdog_cpumask to housekeeping (\$HK_LIST_FOR_WD)"
+    else
+        echo "Failed to restrict watchdog_cpumask"
+    fi
+fi
+
+# --- Tegra/NV kthread reaffinity (Thor and other Tegra hosts) ----------
+# Tegra service kthreads (tegra-bpmp, nvgpu_*, nvhost-*, nv-watchdog)
+# spawn early with a wide cpu mask. They aren't per-CPU bound, but
+# without an explicit affinity pass they may run on isolated cores.
+# Per-CPU kthreads have PF_NO_SETAFFINITY — taskset returns non-zero
+# for those. We silently accept failures and only count successes.
+if [[ -r /proc/device-tree/compatible ]] && \\
+   tr -d '\\0' </proc/device-tree/compatible | grep -q 'nvidia,tegra'; then
+    if [[ -n "\$HK_EXPANDED" ]]; then
+        HK_LIST_FOR_TEGRA=\$(echo "\$HK_EXPANDED" | tr ' ' ',' | sed 's/^,//;s/,\$//')
+        MOVED=0
+        for pid in \$(ps -eo pid=,comm= | awk '\$2 ~ /^(nvgpu|nvhost|tegra|nv-|nv_)/ {print \$1}'); do
+            if taskset -pc "\$HK_LIST_FOR_TEGRA" "\$pid" > /dev/null 2>&1; then
+                MOVED=\$((MOVED + 1))
+            fi
+        done
+        echo "Reaffined \$MOVED Tegra/NV kthreads to housekeeping (\$HK_LIST_FOR_TEGRA)"
     fi
 fi
 
