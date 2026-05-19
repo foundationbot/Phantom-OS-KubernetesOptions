@@ -133,7 +133,7 @@ spec:
             # driver libs regardless of base image.
             - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
             - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
-            - { name: ROS_DOMAIN_ID,    value: "101" }
+            - { name: ROS_DOMAIN_ID,    value: "129" }
             - { name: SDL_VIDEODRIVER,  value: "dummy" }
           ports:
             - name: ros-disc
