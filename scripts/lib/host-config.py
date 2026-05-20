@@ -687,6 +687,16 @@ DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
 ROBOT_VARIANTS: frozenset[str] = frozenset({"mk1", "mk2", "mk2_lowerbody"})
 VARIANT_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"rerun-streamer", "dma-recorder"})
 
+# Allowlist for deployments.dma-recorder.explodeJoints. See FIR-329 in
+# foundationbot/DMA.streams: bakes per-joint addressable Rerun entity
+# paths (/joints/<quantity>/<category>/<JointName>) into the recording
+# in addition to the bundled length-N Scalars entities. Without this,
+# operators can't drag a single joint into its own viewer panel.
+# Storage cost is a few MB per joint per minute; the sentinel "all"
+# splits every joint (1.5–2× file growth — opt in deliberately).
+# Only meaningful on dma-recorder.
+EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"})
+
 
 def _build_deployment_patch(
     deployment_name: str, spec: dict
@@ -738,14 +748,15 @@ def _build_deployment_patch(
         )
         container_spec["securityContext"] = {"privileged": True}
 
-    # Argv-overlay fields (variant, queueMemoryLimitMb). When any of these
-    # are set, strategic-merge REPLACES the whole args list, so we
-    # re-emit the base manifest's args from DEPLOYMENT_BASE_ARGS and
-    # append the overlay flags. validate() rejects each field on
-    # deployments where it isn't supported.
+    # Argv-overlay fields (variant, queueMemoryLimitMb, explodeJoints).
+    # When any of these are set, strategic-merge REPLACES the whole args
+    # list, so we re-emit the base manifest's args from
+    # DEPLOYMENT_BASE_ARGS and append the overlay flags. validate()
+    # rejects each field on deployments where it isn't supported.
     variant = spec.get("variant")
     queue_limit_mb = spec.get("queueMemoryLimitMb")
-    if variant is not None or queue_limit_mb is not None:
+    explode_joints = spec.get("explodeJoints")
+    if variant is not None or queue_limit_mb is not None or explode_joints:
         base_args = DEPLOYMENT_BASE_ARGS.get(deployment_name)
         if base_args is None:
             # Defensive — validate() should have caught this. Skip silently
@@ -757,6 +768,11 @@ def _build_deployment_patch(
                 args_out += ["--variant", str(variant)]
             if queue_limit_mb is not None:
                 args_out += ["--queue-memory-limit", str(queue_limit_mb)]
+            if explode_joints:
+                # Recorder's parser expects a single comma-joined string
+                # ("SpineYaw,RightAnklePitch"), so flatten the list here.
+                # The "all" sentinel passes through unchanged.
+                args_out += ["--explode-joints", ",".join(str(n) for n in explode_joints)]
             container_spec["args"] = args_out
 
     api_version = "apps/v1"
@@ -1590,6 +1606,40 @@ def cmd_validate(cfg: dict) -> int:
                             f"variant to ROBOT_VARIANTS and ship the URDF "
                             f"in the dma-streams image first"
                         )
+            # explodeJoints: list of joint names to also write as
+            # per-joint Rerun entity paths (in addition to the bundled
+            # length-N Scalars entities). See FIR-329 in DMA.streams.
+            # The sentinel ["all"] splits every real joint. Only
+            # meaningful on dma-recorder.
+            if "explodeJoints" in spec:
+                if name not in EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS:
+                    errors.append(
+                        f"deployments.{name}.explodeJoints: only "
+                        f"supported on {sorted(EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS)}"
+                    )
+                else:
+                    ej = spec["explodeJoints"]
+                    if not isinstance(ej, list):
+                        errors.append(
+                            f"deployments.{name}.explodeJoints: must be a "
+                            f"list of joint names (or ['all'] to split "
+                            f"every joint)"
+                        )
+                    else:
+                        for k, item in enumerate(ej):
+                            if not isinstance(item, str) or not item.strip():
+                                errors.append(
+                                    f"deployments.{name}.explodeJoints[{k}]:"
+                                    f" must be a non-empty string"
+                                )
+                                break
+                            if "," in item or " " in item:
+                                errors.append(
+                                    f"deployments.{name}.explodeJoints[{k}]:"
+                                    f" {item!r} must not contain ',' or "
+                                    f"whitespace (recorder splits on commas)"
+                                )
+                                break
             # queueMemoryLimitMb: bounds rerun-streamer's in-process
             # AsyncLogQueue (drops oldest frames when over budget).
             # Tight cap is the OOM-prevention knob; only meaningful on
