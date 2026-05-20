@@ -99,6 +99,13 @@ spec:
           # (URDF + meshes are baked into the image). Without this the rrd
           # has no robot to render when opened later. Override per-host
           # through host-config deployments.dma-recorder.variant.
+          #
+          # Per-host argv overlay knobs (mirrored in scripts/lib/host-config.py
+          # DMA_RECORDER_BASE_ARGS — keep in sync if you add/remove a flag):
+          #   variant:       --variant <mk1|mk2|mk2_lowerbody>
+          #   explodeJoints: --explode-joints <name1,name2,...> | all
+          #                  Bakes per-joint Rerun entity paths in addition
+          #                  to the bundled ones (FIR-329). Default: omitted.
           args:
             - --output
             - /recordings

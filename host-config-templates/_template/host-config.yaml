@@ -339,6 +339,17 @@ nodeLabels:
 #   # mk2 host:
 #   dma-recorder:
 #     variant: mk2
+#     # explodeJoints: opt in to per-joint addressable Rerun entity
+#     # paths under /joints/<quantity>/<category>/<JointName> (in
+#     # addition to the bundled length-N Scalars entities). Lets you
+#     # drag a single joint into its own viewer panel and pair actual
+#     # vs desired without bringing along the other 12. Storage grows
+#     # a few MB per joint per minute of recording. Default: omitted
+#     # (bundled-only, byte-identical to past recordings).
+#     #   explodeJoints: [RightAnklePitch, LeftAnklePitch]
+#     # Sentinel ["all"] splits every real joint (1.5-2x file size):
+#     #   explodeJoints: [all]
+#     # See FIR-329 in foundationbot/DMA.streams.
 #   rerun-streamer:
 #     variant: mk2
 #     # queueMemoryLimitMb: integer MB cap on the streamer's in-process
