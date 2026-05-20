@@ -151,21 +151,25 @@ spec:
           env:
             - name: NGINX_ENTRYPOINT_QUIET_LOGS
               value: "1"
-            # CAMERA_SERVER_URL / ROSBRIDGE_URL are per-host. The values
-            # live in the operator-ui-pairing ConfigMap (argus ns), which
-            # bootstrap-robot.sh phase 6 derives from aiPcUrl. The CM is
-            # NOT in the GitOps tree, so ArgoCD doesn't reset per-host
-            # changes.
+            # AI_PC_HOST is the per-host Tailscale IP / FQDN of the AI PC
+            # paired with this robot, sourced from the operator-ui-pairing
+            # ConfigMap that bootstrap-robot.sh phase 6 renders from
+            # /etc/phantomos/host-config.yaml's aiPcUrl. The CM is NOT in
+            # the GitOps tree, so ArgoCD doesn't reset per-host changes.
+            #
+            # CAMERA_SERVER_URL and ROSBRIDGE_URL are composed here via
+            # Kubernetes env-var substitution ($(VAR_NAME)) so the CM
+            # stays single-source — same host drives both endpoints plus
+            # operator-ui's AI_PC_URL.
+            - name: AI_PC_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: AI_PC_HOST
             - name: CAMERA_SERVER_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: operator-ui-pairing
-                  key: CAMERA_SERVER_URL
+              value: "http://$(AI_PC_HOST):8889"
             - name: ROSBRIDGE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: operator-ui-pairing
-                  key: ROSBRIDGE_URL
+              value: "ws://$(AI_PC_HOST):9090"
             # In-cluster Vosk recognizer. vr-web's nginx proxies
             # /api/voice to this so the browser only ever talks to vr-web.
             - name: VOICE_SERVER_URL

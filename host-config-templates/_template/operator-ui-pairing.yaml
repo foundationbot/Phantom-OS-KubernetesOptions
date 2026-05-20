@@ -1,15 +1,23 @@
 # Generic operator-ui pairing template.
-# Copy to /etc/phantomos/operator-ui-pairing.yaml and replace
-# AI_PC_URL with the Tailscale IP:port of the AI PC paired with
-# this robot. bootstrap-robot.sh --ai-pc-url <url> will write
-# this file for you, including the CAMERA_SERVER_URL and
-# ROSBRIDGE_URL keys which are derived from the AI_PC_URL host
-# (port 8889 for the MediaMTX camera server, 9090 for ROS bridge).
-# The vr-web Deployment reads those two keys; operator-ui reads
-# AI_PC_URL only.
 #
-# The vr-web Pod also needs a TLS cert (WebXR requires HTTPS). That's
-# a separate per-host artefact, not part of this ConfigMap:
+# This ConfigMap holds a SINGLE per-robot value: the Tailscale host
+# (IP or FQDN) of the AI PC paired with this robot. The operator-ui
+# and vr-web Deployments compose every URL they need from it via
+# Kubernetes env-var substitution ($(VAR_NAME)):
+#
+#   operator-ui  AI_PC_URL          http://$(AI_PC_HOST):5000
+#   vr-web       CAMERA_SERVER_URL  http://$(AI_PC_HOST):8889
+#   vr-web       ROSBRIDGE_URL      ws://$(AI_PC_HOST):9090
+#
+# So a robot move (new AI PC) is a single-line change here — every
+# downstream URL re-renders automatically on the next pod start.
+#
+# Copy to /etc/phantomos/operator-ui-pairing.yaml and replace
+# REPLACE-WITH-AI-PC-TAILSCALE-IP. bootstrap-robot.sh --ai-pc-url <url>
+# writes this file for you (extracting the host portion of the URL).
+#
+# The vr-web Pod also needs a TLS cert (WebXR requires HTTPS). That's a
+# separate per-host artefact, not part of this ConfigMap:
 #
 #   sudo tailscale cert <robot>.<tailnet>.ts.net
 #   sudo mkdir -p /etc/phantomos/vr-web-tls
@@ -26,6 +34,4 @@ metadata:
   name: operator-ui-pairing
   namespace: argus
 data:
-  AI_PC_URL: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
-  CAMERA_SERVER_URL: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:8889
-  ROSBRIDGE_URL: ws://REPLACE-WITH-AI-PC-TAILSCALE-IP:9090
+  AI_PC_HOST: REPLACE-WITH-AI-PC-TAILSCALE-IP

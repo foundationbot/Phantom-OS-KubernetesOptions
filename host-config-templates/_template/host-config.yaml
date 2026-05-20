@@ -13,9 +13,16 @@ robot: REPLACE-WITH-ROBOT-NAME
 
 # Tailscale URL of the AI PC paired with this robot. Bootstrap renders
 # /etc/phantomos/operator-ui-pairing.yaml from this value. Phase 6
-# derives CAMERA_SERVER_URL (:8889 MediaMTX) and ROSBRIDGE_URL (:9090
-# rosbridge) from the host portion and writes them alongside AI_PC_URL
-# so the vr-web Pod can read them via configMapKeyRef.
+# stores ONLY the host portion as the AI_PC_HOST key in the CM; the
+# operator-ui and vr-web Deployments compose their full URLs from it
+# via Kubernetes env-var substitution ($(AI_PC_HOST)):
+#
+#   operator-ui  AI_PC_URL          http://$(AI_PC_HOST):5000
+#   vr-web       CAMERA_SERVER_URL  http://$(AI_PC_HOST):8889
+#   vr-web       ROSBRIDGE_URL      ws://$(AI_PC_HOST):9090
+#
+# A robot move (new AI PC) is therefore a single-line update — every
+# downstream URL re-renders on the next pod start.
 aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
 
 # vr-web TLS certificate. WebXR (Quest 3) requires HTTPS, and the
