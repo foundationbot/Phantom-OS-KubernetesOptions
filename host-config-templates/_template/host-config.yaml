@@ -12,8 +12,29 @@
 robot: REPLACE-WITH-ROBOT-NAME
 
 # Tailscale URL of the AI PC paired with this robot. Bootstrap renders
-# /etc/phantomos/operator-ui-pairing.yaml from this value.
+# /etc/phantomos/operator-ui-pairing.yaml from this value. Phase 6
+# derives CAMERA_SERVER_URL (:8889 MediaMTX) and ROSBRIDGE_URL (:9090
+# rosbridge) from the host portion and writes them alongside AI_PC_URL
+# so the vr-web Pod can read them via configMapKeyRef.
 aiPcUrl: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
+
+# vr-web TLS certificate. WebXR (Quest 3) requires HTTPS, and the
+# vr-web Pod terminates TLS itself against a per-host Tailscale-issued
+# cert. There is no host-config field — the cert files live at fixed
+# paths so the bootstrap workflow stays a single `tailscale cert` plus
+# two file moves:
+#
+#   sudo tailscale cert <robot>.<tailnet>.ts.net
+#   sudo mkdir -p /etc/phantomos/vr-web-tls
+#   sudo install -m 0644 <fqdn>.crt /etc/phantomos/vr-web-tls/cert.crt
+#   sudo install -m 0600 <fqdn>.key /etc/phantomos/vr-web-tls/cert.key
+#   sudo bash scripts/bootstrap-robot.sh --operator-ui-config
+#
+# Phase 6 reflects those files into a kubernetes.io/tls Secret named
+# argus/vr-web-tls. Missing files leave the vr-web Pod in
+# ContainerCreating until they're populated and the phase is re-run.
+# Renewals work the same way — Tailscale rotates the cert, copy it back
+# into the same paths, re-run the phase.
 
 # Optional. Branch / tag / SHA the per-host ArgoCD Applications should
 # track. Bootstrap substitutes this into every rendered Application CR
@@ -73,6 +94,12 @@ stacks:
 #                          --image phantom-policies --manifest <yaml>`.
 #   operator-ui          operator stack — manifest uses
 #                          foundationbot/argus.operator-ui
+#   vr-web               operator stack — browser-based VR teleop UI
+#                          (Quest 3 / WebXR). manifest uses
+#                          foundationbot/argus.vr.web.react.
+#   voice-server         operator stack — in-cluster Vosk recognizer
+#                          fronting vr-web's /api/voice. manifest uses
+#                          foundationbot/argus.voice-server.
 #   yovariable-server    core stack — yovariable-server DaemonSet.
 #                          manifest uses foundationbot/yovariable-server.
 #   dma-ethercat         NOT stack-routed — bootstrap-managed installer

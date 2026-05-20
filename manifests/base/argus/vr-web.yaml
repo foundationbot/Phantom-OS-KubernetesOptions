@@ -1,0 +1,216 @@
+# vr-web: browser-based VR teleop UI (WebXR / Quest 3) for the paired
+# AI PC. Image entrypoint (argus.vr.web.react) renders /etc/nginx/
+# nginx.conf from the mounted nginx-template.conf, substituting
+# __ROSBRIDGE_PROXY__ / __CAMERA_PROXY__ / __VOICE_PROXY__ from the
+# CAMERA_SERVER_URL / ROSBRIDGE_URL / VOICE_SERVER_URL env vars at pod
+# start, then serves the SPA on :8010 over TLS (WebXR requires HTTPS).
+#
+# Per-host inputs (all live under /etc/phantomos/, NOT in the GitOps
+# tree, so ArgoCD doesn't reset per-host changes):
+#
+#   /etc/phantomos/operator-ui-pairing.yaml
+#       operator-ui-pairing ConfigMap. Holds AI_PC_URL plus derived
+#       CAMERA_SERVER_URL (:8889 MediaMTX) and ROSBRIDGE_URL (:9090
+#       rosbridge_server). Rendered by bootstrap-robot.sh phase 6 from
+#       host-config.yaml's aiPcUrl. The vr-web Pod reads the two derived
+#       keys via configMapKeyRef.
+#
+#   /etc/phantomos/vr-web-tls/{cert.crt,cert.key}
+#       Tailscale-issued TLS cert + key for this robot's Tailscale FQDN
+#       (generated with `sudo tailscale cert <robot>.<tailnet>.ts.net`).
+#       bootstrap-robot.sh phase 6.6 reads these and creates/updates the
+#       vr-web-tls Secret (type kubernetes.io/tls) in the argus namespace.
+#       The Pod mounts the Secret at /etc/nginx/ssl/ so nginx terminates
+#       TLS at the NodePort. If the cert files are missing the phase
+#       fails loud — vr-web's Pod will stay in ContainerCreating until
+#       the Secret is provisioned, same UX as the operator-ui-pairing CM.
+#
+# VOICE_SERVER_URL points at the in-cluster voice-server Service in this
+# namespace. vr-web's nginx proxies /api/voice to that backend so the
+# browser only ever talks to vr-web on the NodePort.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vr-web-nginx-template
+  namespace: argus
+data:
+  # SSL variant of argus.vr.web.react/nginx-test.conf. The vr-web-tls
+  # Secret (type kubernetes.io/tls) is mounted at /etc/nginx/ssl/ — the
+  # Secret's tls.crt / tls.key keys land as the matching filenames here.
+  # WebXR requires HTTPS, so this is non-optional.
+  nginx-template.conf: |
+    worker_processes auto;
+    events { worker_connections 1024; }
+
+    http {
+      include       /etc/nginx/mime.types;
+      default_type  application/octet-stream;
+
+      sendfile on;
+      tcp_nopush on;
+      tcp_nodelay on;
+      keepalive_timeout 65;
+
+      gzip on;
+      gzip_comp_level 6;
+      gzip_min_length 1024;
+      gzip_vary on;
+      gzip_types
+        text/plain text/css application/javascript application/json
+        application/wasm image/svg+xml;
+
+      server {
+        listen 8010 ssl;
+        server_name _;
+
+        ssl_certificate     /etc/nginx/ssl/tls.crt;
+        ssl_certificate_key /etc/nginx/ssl/tls.key;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location ~* ^/rin-[^/]+/ {
+          rewrite ^/rin-[^/]+/(.*)$ /$1 last;
+        }
+
+        location ~* \.(?:js|css|map|png|jpg|jpeg|gif|svg|ico|woff2|wasm|obj|mtl|stl|zip)$ {
+          add_header Cache-Control "public, max-age=31536000, immutable";
+          try_files $uri =404;
+        }
+
+        location ~* \.(?:html|xml)$ {
+          add_header Cache-Control "public, max-age=300";
+          try_files $uri =404;
+        }
+
+        # Same-origin proxy to ROS bridge on the paired AI PC.
+        location /api/rosbridge {
+          proxy_pass __ROSBRIDGE_PROXY__/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_read_timeout 3600;
+        }
+
+        # Same-origin proxy to MediaMTX camera server on the paired AI PC.
+        location /api/camera/ {
+          proxy_pass __CAMERA_PROXY__/;
+          proxy_set_header Host $host;
+        }
+
+        # Same-origin proxy to the in-cluster voice-server (Vosk).
+        location /api/voice {
+          proxy_pass __VOICE_PROXY__/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_read_timeout 3600;
+        }
+
+        location = /config.js {
+          expires -1;
+          add_header Cache-Control "no-store, no-cache, must-revalidate";
+        }
+
+        location = /index.html {
+          expires -1;
+          add_header Cache-Control "no-store, no-cache, must-revalidate";
+        }
+
+        location / {
+          try_files $uri /index.html;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vr-web
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vr-web
+  template:
+    metadata:
+      labels:
+        app: vr-web
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: vr-web
+          image: foundationbot/argus.vr.web.react:qa
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8010
+          env:
+            - name: NGINX_ENTRYPOINT_QUIET_LOGS
+              value: "1"
+            # CAMERA_SERVER_URL / ROSBRIDGE_URL are per-host. The values
+            # live in the operator-ui-pairing ConfigMap (argus ns), which
+            # bootstrap-robot.sh phase 6 derives from aiPcUrl. The CM is
+            # NOT in the GitOps tree, so ArgoCD doesn't reset per-host
+            # changes.
+            - name: CAMERA_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: CAMERA_SERVER_URL
+            - name: ROSBRIDGE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: ROSBRIDGE_URL
+            # In-cluster Vosk recognizer. vr-web's nginx proxies
+            # /api/voice to this so the browser only ever talks to vr-web.
+            - name: VOICE_SERVER_URL
+              value: ws://voice-server:8011
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/nginx-template.conf
+              subPath: nginx-template.conf
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/ssl
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: nginx-template
+          configMap:
+            name: vr-web-nginx-template
+        - name: tls
+          secret:
+            # Provisioned per-host by bootstrap-robot.sh phase 6.6 from
+            # /etc/phantomos/vr-web-tls/{cert.crt,cert.key}. Missing
+            # Secret leaves the Pod in ContainerCreating until
+            # bootstrap is re-run with the cert files in place.
+            secretName: vr-web-tls
+---
+# NodePort exposes vr-web on 30810 from outside the cluster. Quest 3
+# browser connects to https://<robot>.<tailnet>.ts.net:30810. TLS is
+# terminated inside the Pod against the per-host Tailscale cert held in
+# the vr-web-tls Secret.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vr-web
+  namespace: argus
+spec:
+  type: NodePort
+  selector:
+    app: vr-web
+  ports:
+    - port: 8010
+      targetPort: 8010
+      nodePort: 30810

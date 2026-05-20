@@ -2,7 +2,24 @@
 # Copy to /etc/phantomos/operator-ui-pairing.yaml and replace
 # AI_PC_URL with the Tailscale IP:port of the AI PC paired with
 # this robot. bootstrap-robot.sh --ai-pc-url <url> will write
-# this file for you.
+# this file for you, including the CAMERA_SERVER_URL and
+# ROSBRIDGE_URL keys which are derived from the AI_PC_URL host
+# (port 8889 for the MediaMTX camera server, 9090 for ROS bridge).
+# The vr-web Deployment reads those two keys; operator-ui reads
+# AI_PC_URL only.
+#
+# The vr-web Pod also needs a TLS cert (WebXR requires HTTPS). That's
+# a separate per-host artefact, not part of this ConfigMap:
+#
+#   sudo tailscale cert <robot>.<tailnet>.ts.net
+#   sudo mkdir -p /etc/phantomos/vr-web-tls
+#   sudo install -m 0644 <fqdn>.crt /etc/phantomos/vr-web-tls/cert.crt
+#   sudo install -m 0600 <fqdn>.key /etc/phantomos/vr-web-tls/cert.key
+#   sudo bash scripts/bootstrap-robot.sh --operator-ui-config
+#
+# Phase 6 picks the cert files up and applies kubernetes.io/tls Secret
+# argus/vr-web-tls. ArgoCD does NOT manage that Secret — same lifecycle
+# as this ConfigMap.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,3 +27,5 @@ metadata:
   namespace: argus
 data:
   AI_PC_URL: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:5000
+  CAMERA_SERVER_URL: http://REPLACE-WITH-AI-PC-TAILSCALE-IP:8889
+  ROSBRIDGE_URL: ws://REPLACE-WITH-AI-PC-TAILSCALE-IP:9090
