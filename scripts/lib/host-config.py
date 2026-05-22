@@ -285,13 +285,17 @@ ALLOWED_LOCOMOTION_MODES: frozenset[str] = frozenset({"policy", "diagnostic"})
 # Defaults for the diagnostic subblock. Mirror the dma_launch.sh defaults
 # and the node's own argparse defaults so a bare `mode: diagnostic` with
 # no subblock works.
+# Hold defaults are tuned for a real bench fixture: long enough that
+# mechanical drive/linkage transients settle before the analyser's
+# last-25% steady-state window. Override per-host if your fixture
+# settles faster or slower.
 DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     "robot":        "mk2-lower-body",
     "naming":       "mj",
     "bias":         "0.10",
     "masterGain":   "0.3",
-    "holdBiasS":    "1.0",
-    "holdHomeS":    "0.5",
+    "holdBiasS":    "2.0",
+    "holdHomeS":    "1.0",
     "joints":       "all",
     "outPath":      "/dev/shm/diag_report.json",
     # waitForStart gates dma_diagnostic_node on a joystick X-button
