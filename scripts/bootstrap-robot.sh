@@ -2068,75 +2068,172 @@ operator_ui_config() {
   fi
   pass "$PAIRING_CM_NAME applied to $PAIRING_NS"
 
-  # If operator-ui / vr-web are already running, restart them so the
-  # new values take effect. configMapKeyRef does NOT auto-roll on CM
-  # updates — Kubernetes only resolves the value at pod start.
-  # operator-ui consumes AI_PC_URL; vr-web consumes CAMERA_SERVER_URL
-  # + ROSBRIDGE_URL.
-  for dep in operator-ui vr-web; do
-    if "${KUBECTL[@]}" -n "$PAIRING_NS" get deploy "$dep" >/dev/null 2>&1; then
-      if "${KUBECTL[@]}" -n "$PAIRING_NS" rollout restart deploy/"$dep" >/dev/null; then
-        pass "rolled out $dep to pick up new pairing values"
+  # If operator-ui is already running, restart it so the new value
+  # takes effect. configMapKeyRef does NOT auto-roll on CM updates —
+  # Kubernetes only resolves the value at pod start. operator-ui
+  # consumes AI_PC_HOST. vr-web also consumes the CM, but its
+  # rollout-restart is deferred to the TLS sub-phase below so the
+  # restart happens after /opt/certs is populated (otherwise the
+  # discover-tls init container would CrashLoopBackOff).
+  if "${KUBECTL[@]}" -n "$PAIRING_NS" get deploy operator-ui >/dev/null 2>&1; then
+    if "${KUBECTL[@]}" -n "$PAIRING_NS" rollout restart deploy/operator-ui >/dev/null; then
+      pass "rolled out operator-ui to pick up new pairing values"
+    else
+      fail "rollout restart deploy/operator-ui"
+    fi
+  else
+    info "deploy/operator-ui not present yet — gitops phase will create it with the new CM in scope"
+  fi
+
+  # ---- sub-phase: vr-web TLS cert (Tailscale-issued, /opt/certs/) -----
+  #
+  # WebXR (Quest 3) requires HTTPS. The vr-web Pod's discover-tls init
+  # container reads /opt/certs/*.{crt,key} on the host via hostPath, so
+  # the cert pair must exist on disk before vr-web rolls out. We issue
+  # (or re-issue) a per-host Tailscale cert here so the operator
+  # doesn't have to remember the `tailscale cert` invocation.
+  #
+  #   1. If /opt/certs already has a *.crt + *.key pair, prompts the
+  #      operator (interactive only) to wipe and re-issue. Default
+  #      answer is N (preserve) — `tailscale cert` is rate-limited
+  #      against Let's Encrypt and a working cert needs no churn.
+  #      In non-interactive runs (-y or no TTY) the pair is
+  #      preserved; set VR_WEB_TLS_RENEW=1 to force re-issue.
+  #   2. If /opt/certs is empty (or operator chose to wipe), runs
+  #      `tailscale cert <FQDN>` inside /opt/certs/ so <FQDN>.crt
+  #      and <FQDN>.key land directly under the hostPath. FQDN is
+  #      derived from `tailscale status --json` (Self.DNSName) so we
+  #      don't hard-code the tailnet suffix; override with
+  #      VR_WEB_TLS_FQDN=<fqdn>.
+  #   3. chowns the resulting pair to $SUDO_USER (matches the
+  #      operator's manual workflow), then rolls vr-web so the
+  #      Pod's discover-tls init container picks up the new pair.
+  #
+  # Soft-fails if the host has no `tailscale` CLI / not Running; the
+  # vr-web Pod will stay in init CrashLoopBackOff with a "no cert/key
+  # in /opt/certs" message until the operator drops a pair in by hand.
+  VR_WEB_TLS_DIR="${VR_WEB_TLS_DIR:-/opt/certs}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  ensure $VR_WEB_TLS_DIR has a Tailscale-issued cert pair"
+    info "DRY-RUN  (prompt to wipe + re-issue if present; issue from tailscale if absent)"
+    info "DRY-RUN  rollout restart deploy/vr-web in $PAIRING_NS"
+    return
+  fi
+
+  local fqdn issued=0 reply existing
+  fqdn=$(_vr_web_tls_resolve_fqdn)
+  info "vr-web TLS FQDN: $fqdn  (override via VR_WEB_TLS_FQDN)"
+
+  if _vr_web_tls_pair_present "$VR_WEB_TLS_DIR"; then
+    existing=$(ls "$VR_WEB_TLS_DIR"/*.crt 2>/dev/null | head -1)
+    if [ "$YES" = 1 ] || [ ! -t 0 ]; then
+      if [ "${VR_WEB_TLS_RENEW:-0}" = 1 ]; then
+        info "VR_WEB_TLS_RENEW=1; wiping $VR_WEB_TLS_DIR and re-issuing"
+        rm -f "$VR_WEB_TLS_DIR"/*.crt "$VR_WEB_TLS_DIR"/*.key
+        _vr_web_tls_issue "$fqdn" "$VR_WEB_TLS_DIR" && issued=1
       else
-        fail "rollout restart deploy/$dep"
+        skip "cert pair present in $VR_WEB_TLS_DIR ($(basename "$existing")); preserving (VR_WEB_TLS_RENEW=1 to force)"
       fi
     else
-      info "deploy/$dep not present yet — gitops phase will create it with the new CM in scope"
-    fi
-  done
-
-  # ---- sub-phase: vr-web TLS Secret ------------------------------------
-  #
-  # WebXR (Quest 3) requires HTTPS. The vr-web Pod terminates TLS itself
-  # against a per-host Tailscale-issued cert. Operator workflow:
-  #
-  #   sudo tailscale cert <robot>.<tailnet>.ts.net
-  #   sudo mkdir -p /etc/phantomos/vr-web-tls
-  #   sudo mv <robot>.<tailnet>.ts.net.crt /etc/phantomos/vr-web-tls/cert.crt
-  #   sudo mv <robot>.<tailnet>.ts.net.key /etc/phantomos/vr-web-tls/cert.key
-  #   sudo bash scripts/bootstrap-robot.sh --operator-ui-config
-  #
-  # Bootstrap reflects those files into a kubernetes.io/tls Secret named
-  # vr-web-tls in the argus namespace. The vr-web Deployment mounts it
-  # at /etc/nginx/ssl/ so tls.crt / tls.key appear under the nginx
-  # ssl_certificate paths. Missing cert files leave the vr-web Pod in
-  # ContainerCreating — same UX as a missing operator-ui-pairing.yaml.
-  #
-  # ArgoCD doesn't manage the Secret (it lives in the per-host path and
-  # is applied directly by bootstrap), so `tailscale cert` renewals are
-  # picked up by re-running this phase. The vr-web Deployment also
-  # gets a rollout restart so nginx re-reads the cert files.
-  VR_WEB_TLS_DIR="${VR_WEB_TLS_DIR:-/etc/phantomos/vr-web-tls}"
-  VR_WEB_TLS_SECRET="vr-web-tls"
-
-  if [ -r "$VR_WEB_TLS_DIR/cert.crt" ] && [ -r "$VR_WEB_TLS_DIR/cert.key" ]; then
-    info "found vr-web TLS cert at $VR_WEB_TLS_DIR/cert.crt"
-    if ! "${KUBECTL[@]}" -n "$PAIRING_NS" create secret tls "$VR_WEB_TLS_SECRET" \
-        --cert="$VR_WEB_TLS_DIR/cert.crt" \
-        --key="$VR_WEB_TLS_DIR/cert.key" \
-        --dry-run=client -o yaml \
-        | "${KUBECTL[@]}" apply -f - >/dev/null; then
-      fail "apply secret/$VR_WEB_TLS_SECRET"
-      return
-    fi
-    pass "secret/$VR_WEB_TLS_SECRET applied to $PAIRING_NS"
-
-    if "${KUBECTL[@]}" -n "$PAIRING_NS" get deploy vr-web >/dev/null 2>&1; then
-      if "${KUBECTL[@]}" -n "$PAIRING_NS" rollout restart deploy/vr-web >/dev/null; then
-        pass "rolled out vr-web to pick up new TLS cert"
+      printf 'cert pair already present in %s (%s).\nWipe and re-issue from tailscale? [y/N] ' \
+        "$VR_WEB_TLS_DIR" "$(basename "$existing")"
+      read -r reply || true
+      if [[ "$reply" =~ ^[Yy] ]]; then
+        rm -f "$VR_WEB_TLS_DIR"/*.crt "$VR_WEB_TLS_DIR"/*.key
+        _vr_web_tls_issue "$fqdn" "$VR_WEB_TLS_DIR" && issued=1
       else
-        fail "rollout restart deploy/vr-web"
+        skip "preserving existing $VR_WEB_TLS_DIR cert pair"
       fi
     fi
   else
-    # Soft-fail: missing certs is a common state on first bringup. The
-    # operator can re-run --operator-ui-config once the cert files land.
-    info "no $VR_WEB_TLS_DIR/cert.{crt,key} on disk — skipping vr-web TLS"
-    info "  run: sudo tailscale cert <robot>.<tailnet>.ts.net"
-    info "       sudo install -m 0644 <fqdn>.crt $VR_WEB_TLS_DIR/cert.crt"
-    info "       sudo install -m 0600 <fqdn>.key $VR_WEB_TLS_DIR/cert.key"
-    info "       sudo bash $0 --operator-ui-config"
+    info "no cert pair in $VR_WEB_TLS_DIR; issuing from tailscale"
+    _vr_web_tls_issue "$fqdn" "$VR_WEB_TLS_DIR" && issued=1
   fi
+
+  if [ "$issued" = 1 ]; then
+    pass "issued $fqdn.crt + $fqdn.key in $VR_WEB_TLS_DIR"
+  fi
+
+  # Always rollout-restart vr-web so it picks up either the new
+  # pairing CM, the new cert pair, or both. No-op if vr-web hasn't
+  # been created yet by the gitops phase.
+  if "${KUBECTL[@]}" -n "$PAIRING_NS" get deploy vr-web >/dev/null 2>&1; then
+    if "${KUBECTL[@]}" -n "$PAIRING_NS" rollout restart deploy/vr-web >/dev/null; then
+      pass "rolled out vr-web (pairing CM + /opt/certs)"
+    else
+      fail "rollout restart deploy/vr-web"
+    fi
+  else
+    info "deploy/vr-web not present yet — gitops phase will create it with cert + CM in scope"
+  fi
+}
+
+# Resolve the FQDN to request a Tailscale cert for. Preference:
+#   1. VR_WEB_TLS_FQDN env override (e.g. set by a CI harness).
+#   2. `tailscale status --json` Self.DNSName — this is the canonical
+#      name the admin console signs certs for, so it can't drift from
+#      the tailnet suffix configured upstream.
+#   3. Hardcoded foundation-bot.ts.net fallback for hosts where
+#      tailscaled isn't reachable but the operator still wants to
+#      kick the cert flow (rare; the issue step will fail loudly).
+_vr_web_tls_resolve_fqdn() {
+  if [ -n "${VR_WEB_TLS_FQDN:-}" ]; then
+    printf '%s\n' "$VR_WEB_TLS_FQDN"
+    return 0
+  fi
+  if command -v tailscale >/dev/null 2>&1; then
+    local dns
+    dns=$(tailscale status --json 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("DNSName",""))' 2>/dev/null \
+      | sed 's/\.$//')
+    if [ -n "$dns" ]; then
+      printf '%s\n' "$dns"
+      return 0
+    fi
+  fi
+  printf '%s.foundation-bot.ts.net\n' "$(hostname)"
+}
+
+# Returns 0 if $1/{*.crt,*.key} both have at least one matching file.
+# Uses nullglob so empty directories don't return the literal "*.crt"
+# pattern as a false positive.
+_vr_web_tls_pair_present() {
+  local dir="${1:?_vr_web_tls_pair_present: dir required}"
+  [ -d "$dir" ] || return 1
+  local crt key
+  shopt -s nullglob
+  crt=( "$dir"/*.crt )
+  key=( "$dir"/*.key )
+  shopt -u nullglob
+  [ "${#crt[@]}" -gt 0 ] && [ "${#key[@]}" -gt 0 ]
+}
+
+# Issue a Tailscale cert for $fqdn into $dir. `tailscale cert` writes
+# <fqdn>.crt + <fqdn>.key to cwd, so we run it in a subshell with cwd
+# pinned to $dir; the script's own cwd is unaffected. chowns the pair
+# to $SUDO_USER so the operator can inspect/copy without sudo.
+_vr_web_tls_issue() {
+  local fqdn="${1:?_vr_web_tls_issue: fqdn required}"
+  local dir="${2:?_vr_web_tls_issue: dir required}"
+  if ! command -v tailscale >/dev/null 2>&1; then
+    fail "tailscale CLI not installed; cannot issue $dir cert"
+    info "  install tailscale, sign in, then re-run: sudo bash $0 --operator-ui-config"
+    return 1
+  fi
+  mkdir -p "$dir"
+  if ! ( cd "$dir" && tailscale cert "$fqdn" ); then
+    fail "tailscale cert $fqdn"
+    info "  ensure the machine is signed in (\`tailscale status\`) and HTTPS"
+    info "  is enabled for this tailnet in the admin console."
+    return 1
+  fi
+  if [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" >/dev/null 2>&1; then
+    local grp
+    grp=$(id -gn "$SUDO_USER")
+    chown "$SUDO_USER:$grp" "$dir"/*.crt "$dir"/*.key 2>/dev/null || true
+  fi
+  return 0
 }
 
 # ---- phase 6.5: locomotion-config (LOCOMOTION_POLICY ConfigMap) -----
