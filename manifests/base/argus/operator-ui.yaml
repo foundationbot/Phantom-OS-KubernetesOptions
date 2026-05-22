@@ -33,8 +33,13 @@ spec:
             # operator-ui-pairing ConfigMap. Keeping the operator-ui
             # pod stateless w.r.t. those IPs means a re-pairing only
             # bounces nginx, not this Deployment.
+            # Temporary: this robot has no separate AI PC, so the
+            # "AI PC Stats" card on the Command Center is repointed
+            # at the robot's own phantomos-api-server (same backend
+            # CONTROL_PC_URL uses). Flip AI_PC_URL back to /api/ai
+            # once an AI PC at AI_PC_HOST:5000 is reachable.
             - name: AI_PC_URL
-              value: /api/ai
+              value: /api/control
             - name: CONTROL_PC_URL
               value: /api/control
             - name: RERUN_URL
