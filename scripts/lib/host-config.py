@@ -294,20 +294,35 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     "holdHomeS":    "0.5",
     "joints":       "all",
     "outPath":      "/dev/shm/diag_report.json",
+    # waitForStart gates dma_diagnostic_node on a joystick X-button
+    # press (publishes /phantom/start_startup), same OFF->STARTUP
+    # semantics as the policy node. Default "true" mirrors the
+    # bench-operator workflow; set to "false" for headless / CI runs
+    # where no joystick is attached. Stored as lowercase string so the
+    # bash check `[ "$X" = "true" ]` in dma_launch.sh matches directly.
+    "waitForStart": "true",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
 # consumed by docker/dma_launch.sh.
 DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
-    "robot":      "LOCOMOTION_DIAGNOSTIC_ROBOT",
-    "naming":     "LOCOMOTION_DIAGNOSTIC_NAMING",
-    "bias":       "LOCOMOTION_DIAGNOSTIC_BIAS",
-    "masterGain": "LOCOMOTION_DIAGNOSTIC_MASTER_GAIN",
-    "holdBiasS":  "LOCOMOTION_DIAGNOSTIC_HOLD_BIAS_S",
-    "holdHomeS":  "LOCOMOTION_DIAGNOSTIC_HOLD_HOME_S",
-    "joints":     "LOCOMOTION_DIAGNOSTIC_JOINTS",
-    "outPath":    "LOCOMOTION_DIAGNOSTIC_OUT_PATH",
+    "robot":        "LOCOMOTION_DIAGNOSTIC_ROBOT",
+    "naming":       "LOCOMOTION_DIAGNOSTIC_NAMING",
+    "bias":         "LOCOMOTION_DIAGNOSTIC_BIAS",
+    "masterGain":   "LOCOMOTION_DIAGNOSTIC_MASTER_GAIN",
+    "holdBiasS":    "LOCOMOTION_DIAGNOSTIC_HOLD_BIAS_S",
+    "holdHomeS":    "LOCOMOTION_DIAGNOSTIC_HOLD_HOME_S",
+    "joints":       "LOCOMOTION_DIAGNOSTIC_JOINTS",
+    "outPath":      "LOCOMOTION_DIAGNOSTIC_OUT_PATH",
+    "waitForStart": "LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START",
 }
+
+# Diagnostic fields whose rendered ConfigMap value must be the
+# lowercase string "true"/"false" so the in-pod bash check
+# `[ "$X" = "true" ]` in dma_launch.sh matches directly. YAML scalar
+# `true`/`false` parses to Python bool, which str()s to "True"/"False"
+# (wrong); coerce here at the single emit site instead.
+DIAGNOSTIC_BOOL_FIELDS: frozenset[str] = frozenset({"waitForStart"})
 
 
 def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
@@ -382,7 +397,15 @@ def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
         # rendered ConfigMap diffs cleanly when one field changes.
         for field in DEFAULT_LOCOMOTION_DIAGNOSTIC.keys():
             env_name = DIAGNOSTIC_FIELD_TO_ENV[field]
-            lines.append(f"{env_name}={str(merged[field])}")
+            raw = merged[field]
+            # YAML bool -> Python bool; coerce to lowercase "true"/"false"
+            # for fields whose in-pod consumer is a bash equality check.
+            # All other scalar types (str/int/float) pass through str().
+            if field in DIAGNOSTIC_BOOL_FIELDS and isinstance(raw, bool):
+                value = "true" if raw else "false"
+            else:
+                value = str(raw)
+            lines.append(f"{env_name}={value}")
 
     print("\n".join(lines))
     return 0

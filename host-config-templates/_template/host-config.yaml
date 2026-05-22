@@ -234,6 +234,14 @@ images:
 #   holdHomeS:    0.5
 #   joints:       all
 #   outPath:      /dev/shm/diag_report.json
+#   waitForStart: true                  # default
+#
+# waitForStart: when `true` (default), the diagnostic subscribes to
+# /phantom/start_startup (Bool) and blocks until the operator presses
+# the joystick X button — same OFF->STARTUP gate as the policy node.
+# Set to `false` for headless / CI runs where no joystick is attached
+# and the sweep should begin immediately. Maps to the env var
+# LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START consumed by dma_launch.sh.
 #
 # The default outPath lives on the DaemonSet's existing /dev/shm
 # hostPath mount, so the JSON report appears on the host without any
@@ -253,6 +261,7 @@ images:
 #     bias: 0.10
 #     masterGain: 0.3
 #     outPath: /dev/shm/diag_report.json
+#     waitForStart: true
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
