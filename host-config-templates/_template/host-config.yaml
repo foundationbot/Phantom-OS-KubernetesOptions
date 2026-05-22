@@ -236,6 +236,7 @@ images:
 #   outPath:      /dev/shm/diag_report.json
 #   waitForStart: true                  # default
 #   jointBiasOverrides: ""              # see below
+#   iterations:   1                     # repeat the sweep N times
 #
 # waitForStart: when `true` (default), the diagnostic subscribes to
 # /phantom/start_startup (Bool) and blocks until the operator presses
@@ -253,6 +254,13 @@ images:
 #   jointBiasOverrides: "RightHipRoll=-0.10"
 # Default empty (use the global `bias` for every joint). Maps to env
 # LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES. FIR-339.
+#
+# iterations: repeat the joint sweep N times back-to-back per run.
+# Each iteration writes its own timestamped report under outPath's
+# directory; the `outPath` itself becomes a symlink to the latest.
+# `waitForStart` only fires on iteration 1 — the operator presses X
+# once and the rest run consecutively. Default 1. Maps to env
+# LOCOMOTION_DIAGNOSTIC_ITERATIONS.
 #
 # The default outPath lives on the DaemonSet's existing /dev/shm
 # hostPath mount, so the JSON report appears on the host without any
