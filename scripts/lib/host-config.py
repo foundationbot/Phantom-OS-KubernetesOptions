@@ -19,6 +19,7 @@ Usage:
   host-config.py <path> get-node-labels-json
   host-config.py <path> get-node-label-defaults       # TSV: key\tdefault\tdescription
   host-config.py <path> get-phantom-locomotion-policy
+  host-config.py <path> get-phantom-locomotion-config-kv
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -274,6 +275,59 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
 
 DEFAULT_LOCOMOTION_POLICY: str = "mk2-walking-lower-body-1imu"
 
+# Locomotion modes. 'policy' (default) runs the normal dma_policy_node
+# stack; 'diagnostic' flips dma_launch.sh to exec the wire-integrity
+# diagnostic (inference.dma_diagnostic_node) introduced in
+# foundationbot/phantom-locomotion#5 (FIR-337).
+DEFAULT_LOCOMOTION_MODE: str = "policy"
+ALLOWED_LOCOMOTION_MODES: frozenset[str] = frozenset({"policy", "diagnostic"})
+
+# Defaults for the diagnostic subblock. Mirror the dma_launch.sh defaults
+# and the node's own argparse defaults so a bare `mode: diagnostic` with
+# no subblock works.
+# Hold defaults are tuned for a real bench fixture: long enough that
+# mechanical drive/linkage transients settle before the analyser's
+# last-25% steady-state window. Override per-host if your fixture
+# settles faster or slower.
+DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
+    "robot":        "mk2-lower-body",
+    "naming":       "mj",
+    "bias":         "0.10",
+    "masterGain":   "0.3",
+    "holdBiasS":    "2.0",
+    "holdHomeS":    "1.0",
+    "joints":       "all",
+    "outPath":      "/dev/shm/diag_report.json",
+    # waitForStart gates dma_diagnostic_node on a joystick X-button
+    # press (publishes /phantom/start_startup), same OFF->STARTUP
+    # semantics as the policy node. Default "true" mirrors the
+    # bench-operator workflow; set to "false" for headless / CI runs
+    # where no joystick is attached. Stored as lowercase string so the
+    # bash check `[ "$X" = "true" ]` in dma_launch.sh matches directly.
+    "waitForStart": "true",
+}
+
+# Map host-config camelCase field names -> environment-variable name set
+# consumed by docker/dma_launch.sh.
+DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
+    "robot":        "LOCOMOTION_DIAGNOSTIC_ROBOT",
+    "naming":       "LOCOMOTION_DIAGNOSTIC_NAMING",
+    "bias":         "LOCOMOTION_DIAGNOSTIC_BIAS",
+    "masterGain":   "LOCOMOTION_DIAGNOSTIC_MASTER_GAIN",
+    "holdBiasS":    "LOCOMOTION_DIAGNOSTIC_HOLD_BIAS_S",
+    "holdHomeS":    "LOCOMOTION_DIAGNOSTIC_HOLD_HOME_S",
+    "joints":       "LOCOMOTION_DIAGNOSTIC_JOINTS",
+    "outPath":      "LOCOMOTION_DIAGNOSTIC_OUT_PATH",
+    "waitForStart": "LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START",
+}
+
+# Diagnostic fields whose rendered ConfigMap value must be the
+# lowercase string "true"/"false" so the in-pod bash check
+# `[ "$X" = "true" ]` in dma_launch.sh matches directly. YAML scalar
+# `true`/`false` parses to Python bool, which str()s to "True"/"False"
+# (wrong); coerce here at the single emit site instead.
+DIAGNOSTIC_BOOL_FIELDS: frozenset[str] = frozenset({"waitForStart"})
+
 
 def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
     """Print phantomLocomotion.policy or the documented default.
@@ -287,6 +341,77 @@ def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
     if not policy:
         policy = DEFAULT_LOCOMOTION_POLICY
     print(policy)
+    return 0
+
+
+def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
+    """Emit KEY=VALUE lines for the phantom-locomotion-config ConfigMap.
+
+    Always emits LOCOMOTION_MODE and LOCOMOTION_POLICY. When
+    mode == 'diagnostic', also emits one LOCOMOTION_DIAGNOSTIC_* line per
+    field of the diagnostic subblock, with operator overrides merged on
+    top of DEFAULT_LOCOMOTION_DIAGNOSTIC so the pod always has a complete
+    set of knobs. Bootstrap's locomotion-config phase consumes this and
+    renders one ConfigMap data: entry per line.
+
+    Output is ASCII, no shell quoting, no comments — caller is expected
+    to drop each line straight into a YAML-quoted `KEY: "VALUE"` entry.
+    """
+    block = cfg.get("phantomLocomotion") or {}
+    if not isinstance(block, dict):
+        print("error: 'phantomLocomotion' must be a mapping", file=sys.stderr)
+        return 2
+
+    mode = block.get("mode") or DEFAULT_LOCOMOTION_MODE
+    if mode not in ALLOWED_LOCOMOTION_MODES:
+        print(
+            "error: phantomLocomotion.mode: must be one of "
+            f"{sorted(ALLOWED_LOCOMOTION_MODES)} (got {mode!r})",
+            file=sys.stderr,
+        )
+        return 2
+
+    policy = block.get("policy") or DEFAULT_LOCOMOTION_POLICY
+
+    lines: list[str] = [
+        f"LOCOMOTION_MODE={mode}",
+        f"LOCOMOTION_POLICY={policy}",
+    ]
+
+    if mode == "diagnostic":
+        diag_override = block.get("diagnostic") or {}
+        if not isinstance(diag_override, dict):
+            print(
+                "error: 'phantomLocomotion.diagnostic' must be a mapping",
+                file=sys.stderr,
+            )
+            return 2
+        merged: dict[str, str] = dict(DEFAULT_LOCOMOTION_DIAGNOSTIC)
+        for k, v in diag_override.items():
+            if k not in DEFAULT_LOCOMOTION_DIAGNOSTIC:
+                print(
+                    f"error: phantomLocomotion.diagnostic: unknown field "
+                    f"{k!r} (permitted: "
+                    f"{sorted(DEFAULT_LOCOMOTION_DIAGNOSTIC.keys())})",
+                    file=sys.stderr,
+                )
+                return 2
+            merged[k] = v
+        # Emit in the stable order of DEFAULT_LOCOMOTION_DIAGNOSTIC so the
+        # rendered ConfigMap diffs cleanly when one field changes.
+        for field in DEFAULT_LOCOMOTION_DIAGNOSTIC.keys():
+            env_name = DIAGNOSTIC_FIELD_TO_ENV[field]
+            raw = merged[field]
+            # YAML bool -> Python bool; coerce to lowercase "true"/"false"
+            # for fields whose in-pod consumer is a bash equality check.
+            # All other scalar types (str/int/float) pass through str().
+            if field in DIAGNOSTIC_BOOL_FIELDS and isinstance(raw, bool):
+                value = "true" if raw else "false"
+            else:
+                value = str(raw)
+            lines.append(f"{env_name}={value}")
+
+    print("\n".join(lines))
     return 0
 
 
@@ -1755,6 +1880,9 @@ def cmd_validate(cfg: dict) -> int:
     # if present (a known policy name from the phantom-dma-inference
     # image's built-in registry — bootstrap doesn't enumerate them, the
     # in-pod dma_launch.sh fails loud if the value is unrecognized).
+    # .mode is optional and gates between dma_policy_node ('policy') and
+    # the wire-integrity diagnostic node ('diagnostic'); the diagnostic:
+    # subblock supplies tunables for the latter (see FIR-337).
     pl = cfg.get("phantomLocomotion")
     if pl is not None:
         if not isinstance(pl, dict):
@@ -1766,6 +1894,36 @@ def cmd_validate(cfg: dict) -> int:
                     f"phantomLocomotion.policy: must be a non-empty string "
                     f"(got {policy!r})"
                 )
+            mode = pl.get("mode")
+            if mode is not None:
+                if not isinstance(mode, str) or mode not in ALLOWED_LOCOMOTION_MODES:
+                    errors.append(
+                        f"phantomLocomotion.mode: must be one of "
+                        f"{sorted(ALLOWED_LOCOMOTION_MODES)} (got {mode!r})"
+                    )
+            diag = pl.get("diagnostic")
+            if diag is not None:
+                if not isinstance(diag, dict):
+                    errors.append(
+                        "phantomLocomotion.diagnostic: must be a mapping"
+                    )
+                else:
+                    permitted = sorted(DEFAULT_LOCOMOTION_DIAGNOSTIC.keys())
+                    for k, v in diag.items():
+                        if k not in DEFAULT_LOCOMOTION_DIAGNOSTIC:
+                            errors.append(
+                                f"phantomLocomotion.diagnostic: unknown "
+                                f"field {k!r} (permitted: {permitted})"
+                            )
+                            continue
+                        # Scalars only — dict / list / None can't render
+                        # cleanly into a ConfigMap data: entry.
+                        if isinstance(v, bool) or isinstance(v, (str, int, float)):
+                            continue
+                        errors.append(
+                            f"phantomLocomotion.diagnostic.{k}: must be a "
+                            f"scalar (str/int/float/bool), got {type(v).__name__}"
+                        )
 
     # Notes are purely informational (e.g. host-config drift from bundle
     # sidecar). They're printed regardless of error/success — operators
@@ -1802,6 +1960,8 @@ def main() -> int:
         return cmd_get_node_labels_json(cfg)
     if cmd == "get-phantom-locomotion-policy":
         return cmd_get_phantom_locomotion_policy(cfg)
+    if cmd == "get-phantom-locomotion-config-kv":
+        return cmd_get_phantom_locomotion_config_kv(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":
