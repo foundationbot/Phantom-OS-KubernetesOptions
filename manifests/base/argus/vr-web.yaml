@@ -182,7 +182,22 @@ spec:
           image: foundationbot/argus.vr.web.react:qa
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8010
+            # hostPort:8010 maps the container's port directly onto
+            # the node's :8010. This is the URL the Quest 3 browser
+            # hits: https://<robot-fqdn>:8010/ . Same convention as
+            # registry (5443), rerun-streamer (9788), yovariable-
+            # server (8008/8080), phantom-locomotion (7400).
+            #
+            # Why not a NodePort Service? NodePort range is restricted
+            # to 30000-32767 by default; using :8010 externally would
+            # require expanding the cluster's --service-node-port-range
+            # cluster-wide. hostPort is the cleaner per-service knob
+            # when (as here) the only consumer is an external browser
+            # and no in-cluster pod talks to the Service.
+            - name: https
+              containerPort: 8010
+              hostPort: 8010
+              protocol: TCP
           env:
             - name: NGINX_ENTRYPOINT_QUIET_LOGS
               value: "1"
@@ -242,20 +257,22 @@ spec:
         - name: tls
           emptyDir: {}
 ---
-# NodePort exposes vr-web on 30810 from outside the cluster. Quest 3
-# browser connects to https://<robot>.<tailnet>.ts.net:30810. TLS is
-# terminated inside the Pod against the per-host Tailscale cert pair
-# discovered out of /opt/certs/ on the host (see discover-tls above).
+# ClusterIP Service kept for in-cluster addressability (e.g. if a
+# future pod wants to dial vr-web). External access is via hostPort
+# on the container: https://<robot-fqdn>:8010 . TLS is terminated
+# inside the Pod against the per-host Tailscale cert pair discovered
+# out of /opt/certs/ on the host (see discover-tls above).
 apiVersion: v1
 kind: Service
 metadata:
   name: vr-web
   namespace: argus
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: vr-web
   ports:
-    - port: 8010
+    - name: https
+      port: 8010
       targetPort: 8010
-      nodePort: 30810
+      protocol: TCP
