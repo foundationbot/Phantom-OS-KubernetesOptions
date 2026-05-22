@@ -313,6 +313,12 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     #   jointBiasOverrides: "RightHipRoll=-0.10"
     # FIR-339.
     "jointBiasOverrides": "",
+    # Number of times to repeat the joint sweep back-to-back per run.
+    # Each iteration writes its own timestamped report; the stable
+    # `outPath` symlink always points at the latest. The joystick
+    # `waitForStart` gate fires only on iteration 1, so the operator
+    # presses X once and the remaining iterations run consecutively.
+    "iterations": "1",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -328,6 +334,7 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "outPath":      "LOCOMOTION_DIAGNOSTIC_OUT_PATH",
     "waitForStart": "LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START",
     "jointBiasOverrides": "LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES",
+    "iterations":         "LOCOMOTION_DIAGNOSTIC_ITERATIONS",
 }
 
 # Diagnostic fields whose rendered ConfigMap value should be omitted
