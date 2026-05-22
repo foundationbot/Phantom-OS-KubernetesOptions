@@ -250,3 +250,30 @@ spec:
         # models entry that handles positronic).
         - name: phantom-models
           emptyDir: {}
+---
+# In-cluster Service so other pods (notably argus-nginx in the argus
+# namespace) can reach phantomos-api-server via stable DNS rather than
+# templating the node's external IP into config. The pod is
+# hostNetwork, so kubelet populates Endpoints with the node IP; kube-
+# proxy then routes Service traffic to <node-ip>:5000 where the pod is
+# actually bound. The DaemonSet keeps it node-local; the Service makes
+# it pod-addressable.
+#
+# Browser traffic still goes the other way (operator's tablet
+# -> robot:30080 -> argus-nginx -> THIS Service -> node:5000),
+# so the Service replaces the per-host IP indirection cleanly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: phantomos-api-server
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: phantomos-api-server
+spec:
+  selector:
+    app.kubernetes.io/name: phantomos-api-server
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      protocol: TCP
