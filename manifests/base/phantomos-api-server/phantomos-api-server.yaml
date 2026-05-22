@@ -121,7 +121,7 @@ spec:
           # CircleCI publishes this image to DockerHub on every push to
           # the default branch as foundationbot/phantomos-api-server:V-<ver>-<ts>
           # (and also retags :latest). Bump this tag when a new build needs to roll.
-          image: foundationbot/phantomos-api-server:V-1-0-1-20260430-001713
+          image: foundationbot/phantomos-api-server:V-1-0-2-20260522-203810
           imagePullPolicy: IfNotPresent
 
           ports:
@@ -168,12 +168,24 @@ spec:
             # bootstrap will inject them via kustomize.patches.
             - name: PHANTOM_MODELS
               value: /home/operator/models
-            # Override these in host-config.yaml as ConfigMap fields if
-            # you have on-disk compose project trees to expose:
+            # phantomos-api-server's internal/config/config.go defaults
+            # these to /home/gaurav/... — a developer's home from the
+            # original docker-compose era. On a production robot that
+            # path doesn't exist, so /phantom/slave-info,
+            # /positronic/* and friends fail with bash "No such file"
+            # errors. Pin them to /home/operator/... here so the base
+            # manifest carries the install convention; per-host
+            # overrides can still come through
+            # deployments.phantomos-api-server.env via
+            # host-config.yaml's kustomize.patches.
+            - name: PHANTOM_SCRIPT_DIRECTORY
+              value: /home/operator/foundation/ai-nix-phantom-apps
+            - name: POSITRONIC_CONTROL_PATH
+              value: /home/operator/foundation/positronic_control
+            # Override in host-config.yaml only if you have an on-disk
+            # docker-compose tree to expose:
             # - name: OPERATOR_UI_COMPOSE_PATH
             #   value: /home/operator/repos/argus/operator_ui
-            # - name: PHANTOM_SCRIPT_DIRECTORY
-            #   value: /home/operator/scripts
 
           securityContext:
             # nsenter into PID 1 needs CAP_SYS_ADMIN + CAP_SYS_PTRACE.
