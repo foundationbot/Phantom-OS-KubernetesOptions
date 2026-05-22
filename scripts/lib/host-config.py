@@ -305,6 +305,14 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     # where no joystick is attached. Stored as lowercase string so the
     # bash check `[ "$X" = "true" ]` in dma_launch.sh matches directly.
     "waitForStart": "true",
+    # Per-joint bias overrides. Comma-separated NAME=VALUE list that
+    # gets forwarded to the diagnostic node as one --joint-bias arg per
+    # entry. Default empty (use the global --bias for every joint).
+    # Example for mk2-lower-body where +RightHipRoll collides with the
+    # left leg on the bench fixture:
+    #   jointBiasOverrides: "RightHipRoll=-0.10"
+    # FIR-339.
+    "jointBiasOverrides": "",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -319,7 +327,14 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "joints":       "LOCOMOTION_DIAGNOSTIC_JOINTS",
     "outPath":      "LOCOMOTION_DIAGNOSTIC_OUT_PATH",
     "waitForStart": "LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START",
+    "jointBiasOverrides": "LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES",
 }
+
+# Diagnostic fields whose rendered ConfigMap value should be omitted
+# entirely when the field is empty/blank, instead of emitting "KEY=".
+# Avoids polluting the env with empty vars that the bash script then
+# has to special-case.
+DIAGNOSTIC_OMIT_IF_EMPTY: frozenset[str] = frozenset({"jointBiasOverrides"})
 
 # Diagnostic fields whose rendered ConfigMap value must be the
 # lowercase string "true"/"false" so the in-pod bash check
@@ -409,6 +424,11 @@ def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
                 value = "true" if raw else "false"
             else:
                 value = str(raw)
+            # Skip empty-valued fields whose in-pod consumer treats
+            # "missing" and "empty" identically — keeps the ConfigMap
+            # tidy in the common case where no overrides are set.
+            if field in DIAGNOSTIC_OMIT_IF_EMPTY and value == "":
+                continue
             lines.append(f"{env_name}={value}")
 
     print("\n".join(lines))

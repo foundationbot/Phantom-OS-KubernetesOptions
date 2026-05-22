@@ -230,11 +230,12 @@ images:
 #   naming:       mj                    # mj | wire
 #   bias:         0.10                  # rad
 #   masterGain:   0.3
-#   holdBiasS:    1.0
-#   holdHomeS:    0.5
+#   holdBiasS:    2.0
+#   holdHomeS:    1.0
 #   joints:       all
 #   outPath:      /dev/shm/diag_report.json
 #   waitForStart: true                  # default
+#   jointBiasOverrides: ""              # see below
 #
 # waitForStart: when `true` (default), the diagnostic subscribes to
 # /phantom/start_startup (Bool) and blocks until the operator presses
@@ -242,6 +243,16 @@ images:
 # Set to `false` for headless / CI runs where no joystick is attached
 # and the sweep should begin immediately. Maps to the env var
 # LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START consumed by dma_launch.sh.
+#
+# jointBiasOverrides: comma-separated NAME=VALUE list. Each entry is
+# forwarded to dma_diagnostic_node as `--joint-bias NAME=VALUE`, which
+# overrides the global `bias` for that joint (sign AND magnitude). Use
+# when one joint's positive direction would collide with another link
+# on the bench fixture, e.g. for mk2 +RightHipRoll moves the right leg
+# inward toward the left:
+#   jointBiasOverrides: "RightHipRoll=-0.10"
+# Default empty (use the global `bias` for every joint). Maps to env
+# LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES. FIR-339.
 #
 # The default outPath lives on the DaemonSet's existing /dev/shm
 # hostPath mount, so the JSON report appears on the host without any
@@ -252,7 +263,8 @@ images:
 # phantomLocomotion:
 #   policy: mk2-walking-lower-body-1imu
 #
-# Example — wire-integrity sweep:
+# Example — wire-integrity sweep with RightHipRoll commanded inward
+# so the right leg doesn't collide with the left:
 # phantomLocomotion:
 #   mode: diagnostic
 #   policy: mk2-walking-lower-body-1imu   # ignored when mode==diagnostic
@@ -260,8 +272,11 @@ images:
 #     naming: mj
 #     bias: 0.10
 #     masterGain: 0.3
+#     holdBiasS: 2.0
+#     holdHomeS: 1.0
 #     outPath: /dev/shm/diag_report.json
 #     waitForStart: true
+#     jointBiasOverrides: "RightHipRoll=-0.10"
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
