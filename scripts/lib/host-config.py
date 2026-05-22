@@ -319,6 +319,44 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     # `waitForStart` gate fires only on iteration 1, so the operator
     # presses X once and the remaining iterations run consecutively.
     "iterations": "1",
+    # ── Ramp mode (FIR-342). `rampS=0.0` (default) keeps step mode
+    # bit-for-bit identical to the pre-FIR-342 behaviour. When `rampS
+    # > 0` the diagnostic ramps the bias position linearly over `rampS`
+    # seconds, plateaus for `holdBiasS` (same field used in step mode),
+    # then ramps back over `returnRampS` — exposing the analytic desired
+    # velocity to the new vel-tracking verdict.
+    # Default `returnRampS` ("") leaves the field unset so the
+    # diagnostic node's argparse falls back to `rampS` for a symmetric
+    # ramp; override only when you want asymmetric ramp down (e.g. a
+    # gentler return on a heavy linkage).
+    "rampS":               "0.0",
+    "returnRampS":         "",
+    # ±band around 1.0 for the vel_tracking_ratio PASS verdict. 0.30 →
+    # [0.70, 1.30]. Host-config emits the expanded band as two env
+    # vars consumed by dma_launch.sh (kept as a single op-facing knob).
+    "velTrackingRatioTol": "0.30",
+    "velTrackingLagMaxMs": "60.0",
+    # ── IMU integrity tests (FIR-341). Defaults match the analyzer's
+    # built-in thresholds; operators only override per-fixture if noise
+    # floors or mechanical mounting differ from the design doc. Set
+    # `skipImuTests: true` to disable Tests A-D entirely (joint-side
+    # verdicts continue running).
+    "skipImuTests":      "false",
+    "gravityTol":        "0.05",
+    # ±band around 1.0 for |proj_gravity| magnitude. 0.05 → [0.95, 1.05].
+    "gravityMagTol":     "0.05",
+    "gravityDriftTol":   "0.02",
+    "imuProjGXyTol":     "0.10",
+    "imuPelvisYawTol":   "0.30",
+    "imuQuatDeltaTol":   "0.30",
+    "imuGyroNoiseFloor": "0.10",
+    "imuIdleGyroTol":    "0.30",
+    "imuIdleProjGTol":   "0.05",
+    # ±band around 1.0 for the ShinUpperIMU proj_g_ratio PASS verdict.
+    # 0.30 → [0.7, 1.3]. Host-config emits the expanded band as two
+    # env vars consumed by dma_launch.sh.
+    "imuPitchRatioTol":  "0.30",
+    "imuPairDeltaTol":   "0.20",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -335,20 +373,69 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "waitForStart": "LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START",
     "jointBiasOverrides": "LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES",
     "iterations":         "LOCOMOTION_DIAGNOSTIC_ITERATIONS",
+    # FIR-342 ramp + velocity tracking. The two band Lo/Hi env vars
+    # consumed by dma_launch.sh are EMITTED from the single
+    # `velTrackingRatioTol` field (see special handling below).
+    "rampS":               "LOCOMOTION_DIAGNOSTIC_RAMP_S",
+    "returnRampS":         "LOCOMOTION_DIAGNOSTIC_RETURN_RAMP_S",
+    "velTrackingLagMaxMs": "LOCOMOTION_DIAGNOSTIC_VEL_TRACKING_LAG_MAX_MS",
+    # FIR-341 IMU integrity tests. As with velTrackingRatioTol, the
+    # `gravityMagTol` and `imuPitchRatioTol` fields each emit a
+    # synthesized BAND_LO/BAND_HI env pair (see DIAGNOSTIC_TOL_TO_BAND).
+    "skipImuTests":      "LOCOMOTION_DIAGNOSTIC_SKIP_IMU_TESTS",
+    "gravityTol":        "LOCOMOTION_DIAGNOSTIC_GRAVITY_TOL",
+    "gravityDriftTol":   "LOCOMOTION_DIAGNOSTIC_GRAVITY_DRIFT_TOL",
+    "imuProjGXyTol":     "LOCOMOTION_DIAGNOSTIC_IMU_PROJ_G_XY_TOL",
+    "imuPelvisYawTol":   "LOCOMOTION_DIAGNOSTIC_IMU_PELVIS_YAW_TOL",
+    "imuQuatDeltaTol":   "LOCOMOTION_DIAGNOSTIC_IMU_QUAT_DELTA_TOL",
+    "imuGyroNoiseFloor": "LOCOMOTION_DIAGNOSTIC_IMU_GYRO_NOISE_FLOOR",
+    "imuIdleGyroTol":    "LOCOMOTION_DIAGNOSTIC_IMU_IDLE_GYRO_TOL",
+    "imuIdleProjGTol":   "LOCOMOTION_DIAGNOSTIC_IMU_IDLE_PROJ_G_TOL",
+    "imuPairDeltaTol":   "LOCOMOTION_DIAGNOSTIC_IMU_PAIR_DELTA_TOL",
+}
+
+# Fields that expand from a single `tol` value into a (BAND_LO, BAND_HI)
+# env pair: lo = 1 - tol, hi = 1 + tol. Keeps the host-config schema
+# small while still letting the diagnostic node's argparse take an
+# asymmetric pair. Operators almost always tune symmetrically; if you
+# need asymmetric, edit dma_launch.sh defaults instead.
+DIAGNOSTIC_TOL_TO_BAND: dict[str, tuple[str, str]] = {
+    "velTrackingRatioTol": (
+        "LOCOMOTION_DIAGNOSTIC_VEL_TRACKING_RATIO_BAND_LO",
+        "LOCOMOTION_DIAGNOSTIC_VEL_TRACKING_RATIO_BAND_HI",
+    ),
+    "gravityMagTol": (
+        "LOCOMOTION_DIAGNOSTIC_GRAVITY_MAG_BAND_LO",
+        "LOCOMOTION_DIAGNOSTIC_GRAVITY_MAG_BAND_HI",
+    ),
+    "imuPitchRatioTol": (
+        "LOCOMOTION_DIAGNOSTIC_IMU_PITCH_RATIO_BAND_LO",
+        "LOCOMOTION_DIAGNOSTIC_IMU_PITCH_RATIO_BAND_HI",
+    ),
 }
 
 # Diagnostic fields whose rendered ConfigMap value should be omitted
 # entirely when the field is empty/blank, instead of emitting "KEY=".
 # Avoids polluting the env with empty vars that the bash script then
 # has to special-case.
-DIAGNOSTIC_OMIT_IF_EMPTY: frozenset[str] = frozenset({"jointBiasOverrides"})
+DIAGNOSTIC_OMIT_IF_EMPTY: frozenset[str] = frozenset({
+    "jointBiasOverrides",
+    # FIR-342: when returnRampS is empty, dma_launch.sh lets the
+    # diagnostic node's argparse default kick in (defaults to rampS,
+    # symmetric ramp). Avoids forcing an explicit value in every
+    # host-config when the symmetric default is fine.
+    "returnRampS",
+})
 
 # Diagnostic fields whose rendered ConfigMap value must be the
 # lowercase string "true"/"false" so the in-pod bash check
 # `[ "$X" = "true" ]` in dma_launch.sh matches directly. YAML scalar
 # `true`/`false` parses to Python bool, which str()s to "True"/"False"
 # (wrong); coerce here at the single emit site instead.
-DIAGNOSTIC_BOOL_FIELDS: frozenset[str] = frozenset({"waitForStart"})
+DIAGNOSTIC_BOOL_FIELDS: frozenset[str] = frozenset({
+    "waitForStart",
+    "skipImuTests",   # FIR-341 — gates the IMU verdict block on/off
+})
 
 
 def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
@@ -422,7 +509,6 @@ def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
         # Emit in the stable order of DEFAULT_LOCOMOTION_DIAGNOSTIC so the
         # rendered ConfigMap diffs cleanly when one field changes.
         for field in DEFAULT_LOCOMOTION_DIAGNOSTIC.keys():
-            env_name = DIAGNOSTIC_FIELD_TO_ENV[field]
             raw = merged[field]
             # YAML bool -> Python bool; coerce to lowercase "true"/"false"
             # for fields whose in-pod consumer is a bash equality check.
@@ -436,6 +522,25 @@ def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
             # tidy in the common case where no overrides are set.
             if field in DIAGNOSTIC_OMIT_IF_EMPTY and value == "":
                 continue
+            # Tol fields synthesize a (BAND_LO, BAND_HI) env pair instead
+            # of a single env. lo = 1 - tol, hi = 1 + tol. Single op-facing
+            # knob; two-field operator-side API kept compatible with the
+            # diagnostic node's argparse.
+            if field in DIAGNOSTIC_TOL_TO_BAND:
+                lo_env, hi_env = DIAGNOSTIC_TOL_TO_BAND[field]
+                try:
+                    tol = float(value)
+                except ValueError:
+                    print(
+                        f"error: phantomLocomotion.diagnostic.{field}: "
+                        f"expected float, got {value!r}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                lines.append(f"{lo_env}={1.0 - tol:g}")
+                lines.append(f"{hi_env}={1.0 + tol:g}")
+                continue
+            env_name = DIAGNOSTIC_FIELD_TO_ENV[field]
             lines.append(f"{env_name}={value}")
 
     print("\n".join(lines))

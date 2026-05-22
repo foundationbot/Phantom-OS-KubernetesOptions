@@ -226,17 +226,41 @@ images:
 # with no subblock works). Hard-caps on `bias` (0.30) and `masterGain`
 # (1.0) are enforced inside the node, not here.
 #
-#   robot:        mk2-lower-body
-#   naming:       mj                    # mj | wire
-#   bias:         0.10                  # rad
-#   masterGain:   0.3
-#   holdBiasS:    2.0
-#   holdHomeS:    1.0
-#   joints:       all
-#   outPath:      /dev/shm/diag_report.json
-#   waitForStart: true                  # default
-#   jointBiasOverrides: ""              # see below
-#   iterations:   1                     # repeat the sweep N times
+# Complete default set (all fields shown explicitly so future
+# maintainers can see the available knobs at a glance — copy-paste
+# any subset into your override):
+#
+#   robot:                mk2-lower-body
+#   naming:               mj                    # mj | wire
+#   bias:                 0.10                  # rad
+#   masterGain:           0.3
+#   holdBiasS:            2.0                   # plateau hold (both modes)
+#   holdHomeS:            1.0                   # home hold between joints
+#   joints:               all
+#   outPath:              /dev/shm/diag_report.json
+#   waitForStart:         true
+#   jointBiasOverrides:   ""                    # see "Per-joint bias overrides"
+#   iterations:           1                     # repeat the sweep N times
+#
+#   # ── Ramp mode (FIR-342): set rampS>0 to enable. See "Ramp mode" below.
+#   rampS:                0.0                   # 0 == step (legacy)
+#   returnRampS:          ""                    # "" defaults to rampS
+#   velTrackingRatioTol:  0.30                  # ±band for PASS verdict
+#   velTrackingLagMaxMs:  60.0                  # LAGGY_VELOCITY warn threshold
+#
+#   # ── IMU integrity tests (FIR-341). See "IMU integrity tests" below.
+#   skipImuTests:         false
+#   gravityTol:           0.05                  # static |proj_g_xy| FAIL
+#   gravityMagTol:        0.05                  # |proj_g| ±band -> WARN
+#   gravityDriftTol:      0.02                  # window-to-window drift
+#   imuProjGXyTol:        0.10                  # yaw-invariance FAIL threshold
+#   imuPelvisYawTol:      0.30                  # below-spine gyro_z PASS
+#   imuQuatDeltaTol:      0.30                  # quat-yaw vs encoder
+#   imuGyroNoiseFloor:    0.10                  # active-IMU rise threshold
+#   imuIdleGyroTol:       0.30                  # idle-IMU PASS limit
+#   imuIdleProjGTol:      0.05                  # idle-IMU proj_g delta limit
+#   imuPitchRatioTol:     0.30                  # active proj_g_ratio ±band
+#   imuPairDeltaTol:      0.20                  # L/R pair asymmetry threshold
 #
 # waitForStart: when `true` (default), the diagnostic subscribes to
 # /phantom/start_startup (Bool) and blocks until the operator presses
@@ -262,6 +286,40 @@ images:
 # once and the rest run consecutively. Default 1. Maps to env
 # LOCOMOTION_DIAGNOSTIC_ITERATIONS.
 #
+# Ramp mode (FIR-342): with `rampS > 0` the diagnostic ramps the
+# bias position linearly over `rampS` seconds, holds at the plateau
+# for `holdBiasS` seconds (same field used in step mode), then ramps
+# back over `returnRampS` (defaults to `rampS` when empty). The
+# constant analytic desired velocity during RAMP_UP is
+#     desired_v = bias / rampS    (e.g. 0.10 rad / 0.6 s ≈ 0.167 rad/s)
+# which lets the analyzer score the actual filtered velocity against
+# a known reference. `velTrackingRatioTol = 0.30` means the
+# joint PASSes when mean(actual_v)/desired_v lands in [0.7, 1.3].
+# `velTrackingLagMaxMs` is warn-only (LAGGY_VELOCITY) — never
+# downgrades PASS; the position-side rise verdict already covers
+# engagement latency.
+# `rampS = 0` (default) keeps the original step-mode behavior
+# bit-for-bit; the new vel_tracking_* JSON fields are reported as
+# "n/a" in step mode.
+# Maps to LOCOMOTION_DIAGNOSTIC_RAMP_S / _RETURN_RAMP_S /
+# _VEL_TRACKING_RATIO_BAND_LO + _HI / _VEL_TRACKING_LAG_MAX_MS.
+#
+# IMU integrity tests (FIR-341): four passive tests run on the IMU
+# data already recorded during the joint sweep — no extra motion,
+# no state-machine changes. Test A checks `proj_gravity ≈ [0, 0, -1]`
+# at home (catches off-axis mounting, wire mismaps). Test B verifies
+# yaw invariance during SpineYaw (gold-standard regression for the
+# FIR-318 proj_gravity fix). Tests C/D check that the active
+# ShinUpperIMU tilts predictably during HipPitch / HipRoll and idle
+# IMUs stay still; L/R pair-asymmetry threshold is `imuPairDeltaTol`.
+# All thresholds default to the analyzer's built-in values; override
+# only if a particular bench fixture's noise floor or mounting
+# differs from the design doc. Set `skipImuTests: true` to disable
+# all four tests (joint-side verdicts continue running).
+# The `Tol` fields (`gravityMagTol`, `imuPitchRatioTol`,
+# `velTrackingRatioTol`) each expand to a (LO, HI) env-var pair
+# consumed by dma_launch.sh: lo = 1 - tol, hi = 1 + tol.
+#
 # The default outPath lives on the DaemonSet's existing /dev/shm
 # hostPath mount, so the JSON report appears on the host without any
 # manifest edits — operators can `kubectl cp` it from the pod (or
@@ -272,7 +330,7 @@ images:
 #   policy: mk2-walking-lower-body-1imu
 #
 # Example — wire-integrity sweep with RightHipRoll commanded inward
-# so the right leg doesn't collide with the left:
+# so the right leg doesn't collide with the left (step mode):
 # phantomLocomotion:
 #   mode: diagnostic
 #   policy: mk2-walking-lower-body-1imu   # ignored when mode==diagnostic
@@ -284,6 +342,17 @@ images:
 #     holdHomeS: 1.0
 #     outPath: /dev/shm/diag_report.json
 #     waitForStart: true
+#     jointBiasOverrides: "RightHipRoll=-0.10"
+#
+# Example — ramped command + velocity tracking + IMU tests, repeated
+# 5 times for noise averaging (recommended modern profile):
+# phantomLocomotion:
+#   mode: diagnostic
+#   diagnostic:
+#     bias: 0.10
+#     rampS: 0.6                          # 0.10 / 0.6 ≈ 0.167 rad/s desired
+#     holdBiasS: 0.5                      # shorter plateau OK in ramp mode
+#     iterations: 5
 #     jointBiasOverrides: "RightHipRoll=-0.10"
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
