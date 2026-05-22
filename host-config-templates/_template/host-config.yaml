@@ -190,14 +190,29 @@ images:
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
 
-# Per-host phantom-locomotion policy. Bootstrap phase locomotion-config
+# Per-host phantom-locomotion config. Bootstrap phase locomotion-config
 # renders /etc/phantomos/phantom-locomotion-config.yaml from this
-# block — a ConfigMap whose LOCOMOTION_POLICY key drives the
-# DaemonSet's `dma_launch.sh <policy>` invocation. Same lifecycle as
+# block — a ConfigMap whose keys drive the DaemonSet's dma_launch.sh
+# invocation via envFrom: configMapRef:. Same lifecycle as
 # operator-ui-pairing: lives on the host (not in git), --reset
 # preserves it, ArgoCD doesn't reconcile it.
 #
-# Default (applied when phantomLocomotion is absent or .policy unset):
+# Two operating modes (FIR-337):
+#
+#   mode: policy     (default) — runs inference.dma_policy_node with
+#                    `policy:` (the trained-policy + joystick stack
+#                    the robot uses for normal locomotion).
+#
+#   mode: diagnostic — runs inference.dma_diagnostic_node (the wire-
+#                    integrity diagnostic introduced in
+#                    foundationbot/phantom-locomotion#5). The
+#                    DaemonSet's container exits when the sweep
+#                    completes and then sleeps forever so the operator
+#                    can `kubectl cp` the JSON report off the pod.
+#                    `policy:` is ignored in this mode.
+#
+# Default (applied when phantomLocomotion is absent):
+#   mode:   policy
 #   policy: mk2-walking-lower-body-1imu
 #
 # Known policies (defined inside the phantom-dma-inference image's
@@ -206,8 +221,38 @@ images:
 #   mk2-walking-lower-body         hot-jute,        13 joints, 3 IMUs
 #   mk2-walking-lower-body-1imu    aware-motorcar,  13 joints, 1 IMU
 #
+# diagnostic: subblock fields (all optional; defaults mirror the
+# dma_diagnostic_node argparse defaults so a bare `mode: diagnostic`
+# with no subblock works). Hard-caps on `bias` (0.30) and `masterGain`
+# (1.0) are enforced inside the node, not here.
+#
+#   robot:        mk2-lower-body
+#   naming:       mj                    # mj | wire
+#   bias:         0.10                  # rad
+#   masterGain:   0.3
+#   holdBiasS:    1.0
+#   holdHomeS:    0.5
+#   joints:       all
+#   outPath:      /dev/shm/diag_report.json
+#
+# The default outPath lives on the DaemonSet's existing /dev/shm
+# hostPath mount, so the JSON report appears on the host without any
+# manifest edits — operators can `kubectl cp` it from the pod (or
+# read it directly from /dev/shm on the node).
+#
+# Example — normal locomotion (default):
 # phantomLocomotion:
 #   policy: mk2-walking-lower-body-1imu
+#
+# Example — wire-integrity sweep:
+# phantomLocomotion:
+#   mode: diagnostic
+#   policy: mk2-walking-lower-body-1imu   # ignored when mode==diagnostic
+#   diagnostic:
+#     naming: mj
+#     bias: 0.10
+#     masterGain: 0.3
+#     outPath: /dev/shm/diag_report.json
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
