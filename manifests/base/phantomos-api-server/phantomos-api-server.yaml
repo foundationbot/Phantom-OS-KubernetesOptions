@@ -49,13 +49,26 @@ spec:
         - operator: Exists
           effect: NoSchedule
 
-      # /proc/net/route only makes sense in the host's network namespace,
-      # the operator-UI dials the robot's real IP, and the TCP probe
-      # to 8.8.8.8:53 should exit via the host's stack.
-      hostNetwork: true
+      # Cluster-native networking. The pod gets a normal cluster IP;
+      # other pods reach it via the phantomos-api-server Service in
+      # this namespace. External access (operator's PC / browser)
+      # still works through the hostPort:5000 declared on the
+      # container — kubelet's portmap CNI plugin sets up DNAT from
+      # node:5000 to the pod IP.
+      #
+      # Trade-off: any endpoint that reads network state out of
+      # /proc/net/* now reflects the POD's net namespace, not the
+      # host's. The api server must either:
+      #   (a) read /proc/1/net/route (host PID 1 stays in host net ns
+      #       because hostPID is still true), or
+      #   (b) invoke the read via HOST_EXEC_PREFIX (nsenter -t 1 -a),
+      #       which already brings net+pid+mount namespaces along.
+      # The internet-reachability probe (TCP 8.8.8.8:53) likewise
+      # must run under HOST_EXEC_PREFIX to test the robot's uplink
+      # rather than the pod's CNI bridge.
+      hostNetwork: false
       # Required so `nsenter -t 1 -a` can reach host PID 1.
       hostPID: true
-      dnsPolicy: ClusterFirstWithHostNet
 
       # Host-level singleton — no point starting a second copy.
       terminationGracePeriodSeconds: 15
@@ -112,9 +125,23 @@ spec:
           imagePullPolicy: IfNotPresent
 
           ports:
+            # containerPort only — no hostPort. Single entry point
+            # into this service is the phantomos-api-server Service
+            # in this namespace. External clients (operator's PC,
+            # browser) reach it through argus-nginx (NodePort 30080
+            # in the argus ns), which proxies /api/control/ -> this
+            # Service. Anything pod-side uses cluster DNS directly.
+            #
+            # Why not hostPort:5000 too? It creates a second,
+            # node-pinned path (node:5000 -> pod) that bypasses the
+            # Service, breaks under multi-replica, and silently
+            # diverges from the proxied path during debugging.
+            # If you need raw :5000 for a one-off probe, use
+            #   kubectl -n phantom port-forward svc/phantomos-api-server 5000:5000
+            # — same on-the-wire result, no manifest carrying a
+            # second routing concept it doesn't need.
             - name: http
               containerPort: 5000
-              hostPort: 5000
 
           env:
             - name: API_HOST
