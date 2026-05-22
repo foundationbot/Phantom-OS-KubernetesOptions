@@ -26,25 +26,17 @@ spec:
               value: qa
             - name: GATEWAY_URL
               value: /api
-            - name: CONTROL_PC_URL
-              value: http://172.16.67.100:5000
-            # AI_PC_HOST is the per-host Tailscale IP / FQDN of the AI PC
-            # paired with this robot. The value lives in the
-            # operator-ui-pairing ConfigMap (argus ns), which
-            # bootstrap-robot.sh creates from
-            # /etc/phantomos/operator-ui-pairing.yaml. The CM is NOT in
-            # the GitOps tree, so ArgoCD doesn't reset per-host changes.
-            # AI_PC_URL is composed here via Kubernetes env-var
-            # substitution ($(VAR_NAME)) so the CM stays single-source —
-            # the same host drives the vr-web Pod's camera + ros bridge
-            # URLs without repeating the IP three times in the CM.
-            - name: AI_PC_HOST
-              valueFrom:
-                configMapKeyRef:
-                  name: operator-ui-pairing
-                  key: AI_PC_HOST
+            # AI_PC_URL and CONTROL_PC_URL are same-origin relative
+            # paths. argus-nginx proxies them to the AI PC and the
+            # robot's phantomos-api-server respectively, using the
+            # AI_PC_HOST / CONTROL_PC_HOST keys from the per-host
+            # operator-ui-pairing ConfigMap. Keeping the operator-ui
+            # pod stateless w.r.t. those IPs means a re-pairing only
+            # bounces nginx, not this Deployment.
             - name: AI_PC_URL
-              value: "http://$(AI_PC_HOST):5000"
+              value: /api/ai
+            - name: CONTROL_PC_URL
+              value: /api/control
             - name: RERUN_URL
               value: rerun+http://nitrogen:9876/proxy
           resources:
