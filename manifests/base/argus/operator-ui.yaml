@@ -26,6 +26,19 @@ spec:
               value: qa
             - name: GATEWAY_URL
               value: /api
+            # ROBOT is the per-host robot identifier (e.g. "mk11000009")
+            # — operator-ui's robotConfig.ts looks it up to derive the
+            # camera server URL (http://${aiPcIp}:8889) used by the
+            # Camera Hub. Without ROBOT, getCameraServerUrl() falls
+            # back to http://localhost:8889 (the operator's own
+            # browser machine) and every camera shows "offline".
+            # Sourced from the per-host operator-ui-pairing CM,
+            # populated by bootstrap-robot.sh from $(hostname).
+            - name: ROBOT
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: ROBOT
             # AI_PC_URL and CONTROL_PC_URL are same-origin relative
             # paths. argus-nginx proxies them to the AI PC and the
             # robot's phantomos-api-server respectively, using the
