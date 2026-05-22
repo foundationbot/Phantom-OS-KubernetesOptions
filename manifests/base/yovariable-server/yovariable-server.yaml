@@ -59,7 +59,7 @@ spec:
           # Built and pushed by .circleci/config.yml. The pipeline tags
           # images as foundationbot/yovariable-server:V-<ver>-<ts> (and
           # retags :latest). Bump this tag when a new build needs to roll.
-          image: foundationbot/yovariable-server:V-1-0-9-20260429-200257
+          image: foundationbot/yovariable-server:V-1-0-18-20260521-231830
           imagePullPolicy: IfNotPresent
 
           # Disable the JSON WebSocket bridge so the server doesn't try
