@@ -138,6 +138,14 @@ images:
     image: foundationbot/argus.operator-ui:REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
   dma-ethercat:
     image: foundationbot/dma-ethercat:main-latest-aarch64
+  # phantom-tracing: source for the Perfetto tracebox .deb installed
+  # by bootstrap phase 4.5 when perf.tracing.backend == "system". Tag
+  # picks the upstream tracebox version (vN.0) bundled in the image.
+  # -aarch64 on Jetson Thor, plain on x86. Optional — when absent and
+  # perf.tracing.backend is "in_process" (or unset), phase 4.5 is a
+  # no-op.
+  phantom-tracing:
+    image: foundationbot/phantom-tracing:main-latest-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -524,6 +532,10 @@ nodeLabels:
   # every run. Edit a value to (de)schedule the workload on this host.
   # dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)
   foundation.bot/has-cameras: 'true'
+  # dma-video producer-video-playback Deployment (mutually exclusive with has-cameras).
+  # host-config sets this implicitly when dmaVideo.producer.mode=video — don't
+  # set it directly unless you know what you're doing.
+  foundation.bot/has-video-playback: 'false'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
   # positronic-control Deployment
@@ -622,3 +634,116 @@ nodeLabels:
 #     # Raise only if frame loss during transient viewer stalls is a
 #     # bigger problem than RSS growth.
 #     queueMemoryLimitMb: 8
+
+# ----------------------------------------------------------------------
+# perf: optional perfetto-tracing + optimization-preset toggles for
+# the positronic-control workload.
+#
+# Bootstrap phase 13 (deployments) reads this and:
+#   1. Renders a ConfigMap override patch (PERF_* env vars) over
+#      manifests/base/positronic/perf-config.yaml.
+#   2. When perf.tracing.backend == "system": also injects /tmp/
+#      perfetto-{producer,consumer} hostPath socket mounts and
+#      ``securityContext.fsGroup: 2026`` into positronic-control
+#      so the pod can talk to the host's traced daemon. Bootstrap
+#      phase 4.5 (system_backend_tracing) installs that daemon via
+#      the phantom-tracing .deb when this backend is selected.
+#
+# Schema:
+#   preset            string — name of a YAML preset shipped in the
+#                     positronic-control image at
+#                     /etc/positronic/perf-presets/<preset>.yaml.
+#                     Defaults to "none" (no behaviour change).
+#                     Known: none, inductor, inductor-cudagraphs,
+#                     inductor-tf32, inductor-tome25, …,
+#                     tensorrt, tensorrt-fp8, tensorrt-int8,
+#                     tensorrt-nvfp4, torchao-int8, torchao-float8,
+#                     aot-inductor, eager-bf16. See
+#                     positronic_control/config/optimization/*.yaml
+#                     for the full list.
+#   tracing.enabled   bool — turn perfetto.init() on at node startup.
+#                     Default false. When false, all probe call sites
+#                     compile to no-ops.
+#   tracing.backend   "system" | "in_process". Default "system" to
+#                     match SOF-877 production. "in_process" writes
+#                     trace to tracing.output and doesn't need a host
+#                     daemon (useful for dev/CI).
+#   tracing.output    Path inside the pod for the in_process trace
+#                     file. Ignored when backend=system.
+#   targetNodes       List of node names the optimization preset
+#                     applies to. Default ["fossil_encoder",
+#                     "dma_policy"]. Examples: ["fossil_encoder"]
+#                     compiles only vision; ["dma_policy"] compiles
+#                     only locomotion.
+#
+# Example (vision + locomotion both running through TensorRT-fp16,
+# system-backend tracing enabled — production setup):
+#
+# perf:
+#   preset: tensorrt-fp16
+#   tracing:
+#     enabled: true
+#     backend: system
+#   targetNodes: [fossil_encoder, dma_policy]
+#
+# Example (dev box without host traced daemon — pin trace to a file):
+#
+# perf:
+#   preset: inductor
+#   tracing:
+#     enabled: true
+#     backend: in_process
+#     output: /tmp/positronic.perfetto-trace
+#   targetNodes: [fossil_encoder]
+
+# ----------------------------------------------------------------------
+# dmaVideo: optional dma-video producer mode override.
+#
+# Two Deployments coexist in the dma-video namespace:
+#   producer                  → foundationbot/dma-video:main
+#                                (camera; gated by has-cameras=true)
+#   producer-video-playback   → foundationbot/dma-video:playback
+#                                (video file replay; gated by
+#                                 has-video-playback=true)
+#
+# Setting `dmaVideo.producer.mode: video` flips this node's labels
+# (has-cameras → false, has-video-playback → true) and supplies the
+# per-host --video/--num-cameras/--fps/--format args to the playback
+# Deployment. See docs/optimization/PERFETTO_K0S.md §5 for the full
+# operator workflow.
+#
+# Schema:
+#   producer.mode          "camera" (default) | "video"
+#   producer.file          Required when mode==video. Absolute host
+#                          path to the video file. The parent directory
+#                          is hostPath-mounted at /videos inside the
+#                          container; the file appears at /videos/<name>.
+#   producer.numCameras    Replay the same video as N virtual cameras
+#                          (default 1).
+#   producer.fps           Playback FPS (default 25).
+#   producer.format        nv12 (default) | gray8 | gray | bgr | mjpeg
+#   producer.width         Frame width (default 1280)
+#   producer.height        Frame height (default 800)
+#   producer.image         Optional. Pin a specific image tag/digest
+#                          instead of riding the rolling :main /
+#                          :playback channel. Applies to the camera
+#                          Deployment when mode==camera, or the
+#                          playback Deployment when mode==video.
+#
+# Example (recorded-video benchmark on ch4):
+#
+# dmaVideo:
+#   producer:
+#     mode: video
+#     file: /home/phantom/foundation/positronic_control/videos/test.mp4
+#     numCameras: 1
+#     fps: 25
+#     format: nv12
+#     # image: foundationbot/dma-video:playback-main-20260518T100912  # optional pin
+#
+# Example (pin the camera image without changing mode):
+#
+# dmaVideo:
+#   producer:
+#     mode: camera
+#     image: foundationbot/dma-video:main-20260430T120000

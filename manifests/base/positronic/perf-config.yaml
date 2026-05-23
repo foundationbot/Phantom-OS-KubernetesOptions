@@ -1,0 +1,40 @@
+# In-image defaults for the perfetto-tracing / optimization-preset
+# env-var contract that workspace/positronic_control/positronic/utils/
+# perf_config.py reads at node startup. Operators override per-robot
+# via host-config.yaml:perf — bootstrap phase 13 (deployments) renders
+# an override patch onto this ConfigMap using
+# `scripts/lib/host-config.py <hc> get-perf-configmap-json`.
+#
+# Defaults below match SOF-877 production behaviour (no tracing, no
+# compile, no TRT, no quantization) so the unconfigured path is a
+# behavioural no-op — operators opt-in.
+#
+# Knobs (full surface — see workspace/positronic_control/positronic/
+# utils/perf_config.py docstring):
+#
+#   PERF_PRESET            none | inductor* | tensorrt* | torchao* | ...
+#                          Names a YAML under config/optimization/ (the
+#                          phantom-cuda image COPYs them to
+#                          /etc/positronic/perf-presets/).
+#   PERF_TRACING_ENABLED   "0" | "1" — gates perfetto.init() at node
+#                          startup.
+#   PERF_TRACING_BACKEND   "system" | "in_process". system requires
+#                          /tmp/perfetto-{producer,consumer} sockets
+#                          mounted from the host (bootstrap phase 4.5
+#                          auto-injects the hostPath mounts +
+#                          fsGroup: 2026 when host-config.yaml has
+#                          perf.tracing.backend: system).
+#   PERF_TRACING_OUTPUT    Only used when backend=in_process.
+#   PERF_TARGET_NODES      Comma list. Selects which nodes apply the
+#                          optimization preset.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: positronic-perf
+  namespace: positronic
+data:
+  PERF_PRESET: "none"
+  PERF_TRACING_ENABLED: "0"
+  PERF_TRACING_BACKEND: "system"
+  PERF_TRACING_OUTPUT: "/tmp/positronic.perfetto-trace"
+  PERF_TARGET_NODES: "fossil_encoder,dma_policy"

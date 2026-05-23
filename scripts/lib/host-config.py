@@ -115,6 +115,9 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-cameras",
      "true",
      "dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)"),
+    ("foundation.bot/has-video-playback",
+     "false",
+     "dma-video producer-video-playback Deployment (mutually exclusive with has-cameras)"),
     ("foundation.bot/has-locomotion",
      "false",
      "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
@@ -186,6 +189,181 @@ def cmd_get(cfg: dict, field: str) -> int:
     if value is None or value == "":
         return 1
     print(value)
+    return 0
+
+
+def cmd_get_perf(cfg: dict, field: str) -> int:
+    """Print one perf-block field (dotted path) or exit 1 if unset.
+
+    The field is a dotted path under ``perf:`` — e.g.
+
+        cmd_get_perf(cfg, "preset")          # → "tensorrt-fp16"
+        cmd_get_perf(cfg, "tracing.backend") # → "system"
+        cmd_get_perf(cfg, "tracing.enabled") # → "1" | "0"
+
+    Booleans are stringified as ``"1"`` / ``"0"`` so the shell consumer
+    can match against PERF_* env-var conventions without case-folding.
+    Lists are emitted as a comma-joined string (e.g. ``fossil_encoder,
+    dma_policy``).
+
+    The plan's "active ID alignment" rule applies to ``targetNodes``:
+    if you rename anything here, scripts/perfetto-pivot.py reads the
+    same comma-list and breaks the same way.
+    """
+    block = cfg.get("perf")
+    if not isinstance(block, dict):
+        return 1
+    node: object = block
+    for part in field.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return 1
+        node = node[part]
+    if node is None or node == "":
+        return 1
+    if isinstance(node, bool):
+        print("1" if node else "0")
+    elif isinstance(node, list):
+        print(",".join(str(x) for x in node))
+    else:
+        print(node)
+    return 0
+
+
+def cmd_get_perf_configmap_json(cfg: dict) -> int:
+    """Emit the ``positronic-perf`` ConfigMap data overlay as JSON.
+
+    Returns an object mapping the PERF_* env-var names that operators
+    customised in host-config.yaml to their string values. Keys absent
+    from host-config are NOT emitted — bootstrap merges this onto the
+    in-image defaults at manifests/base/positronic/perf-config.yaml so
+    missing keys keep their default.
+
+    Empty object when there is no ``perf:`` block (or it's empty), so
+    bootstrap can blindly merge regardless of host-config shape.
+    """
+    block = cfg.get("perf") or {}
+    if not isinstance(block, dict):
+        print("error: 'perf' must be a mapping", file=sys.stderr)
+        return 2
+
+    out: dict[str, str] = {}
+    if "preset" in block and block["preset"] is not None:
+        out["PERF_PRESET"] = str(block["preset"])
+    tracing = block.get("tracing") or {}
+    if not isinstance(tracing, dict):
+        print("error: 'perf.tracing' must be a mapping", file=sys.stderr)
+        return 2
+    if "enabled" in tracing and tracing["enabled"] is not None:
+        out["PERF_TRACING_ENABLED"] = "1" if tracing["enabled"] else "0"
+    if "backend" in tracing and tracing["backend"]:
+        out["PERF_TRACING_BACKEND"] = str(tracing["backend"])
+    if "output" in tracing and tracing["output"]:
+        out["PERF_TRACING_OUTPUT"] = str(tracing["output"])
+    target_nodes = block.get("targetNodes")
+    if target_nodes:
+        if not isinstance(target_nodes, list):
+            print(
+                "error: 'perf.targetNodes' must be a list",
+                file=sys.stderr,
+            )
+            return 2
+        out["PERF_TARGET_NODES"] = ",".join(str(x) for x in target_nodes)
+    print(json.dumps(out))
+    return 0
+
+
+# Default GID for the host-side `perfetto` group. Used ONLY when no
+# /etc/phantomos/perfetto-gid file is present.
+#
+# Many distros (notably JetPack 6 on Jetson Thor) pre-create the
+# perfetto group at a distro-specific GID before bootstrap runs.
+# Bootstrap phase 9.5 detects the actual GID and writes it to
+# PERFETTO_GID_FILE; this loader prefers that file so the pod's
+# `securityContext.fsGroup` always matches whatever GID the host's
+# group is at. The 2026 default is what gets used for fresh installs
+# where no `perfetto` group exists yet.
+PERFETTO_GROUP_GID = 2026
+PERFETTO_GID_FILE = "/etc/phantomos/perfetto-gid"
+
+
+def _resolve_perfetto_gid() -> int:
+    """Return the GID to use for `securityContext.fsGroup` on the pod.
+
+    Order: PERFETTO_GID_FILE on disk → PERFETTO_GROUP_GID default.
+    """
+    try:
+        with open(PERFETTO_GID_FILE) as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, PermissionError, ValueError):
+        return PERFETTO_GROUP_GID
+
+
+def cmd_get_perf_deployment_patch_json(cfg: dict) -> int:
+    """Emit the strategic-merge patch for positronic-control needed
+    when ``perf.tracing.backend == "system"``: hostPath mounts for
+    /tmp/perfetto-{producer,consumer} plus ``fsGroup: 2026`` so the
+    container can read/write the group-writable sockets.
+
+    When tracing is disabled, in_process, or the perf block is
+    absent: emits an empty JSON object so bootstrap can blindly
+    consume it without branching.
+
+    Output shape mirrors cmd_get_deployment_patches_json entries:
+        {"target": {kind, name, namespace}, "patch": "<yaml>"}
+    """
+    block = cfg.get("perf") or {}
+    tracing = block.get("tracing") or {}
+    backend = tracing.get("backend")
+    if backend != "system":
+        print(json.dumps({}))
+        return 0
+
+    target = DEPLOYMENT_TARGETS["positronic-control"]
+    volumes = [
+        {
+            "name": "perfetto-producer",
+            "hostPath": {"path": "/tmp/perfetto-producer", "type": "Socket"},
+        },
+        {
+            "name": "perfetto-consumer",
+            "hostPath": {"path": "/tmp/perfetto-consumer", "type": "Socket"},
+        },
+    ]
+    volume_mounts = [
+        {"name": "perfetto-producer", "mountPath": "/tmp/perfetto-producer"},
+        {"name": "perfetto-consumer", "mountPath": "/tmp/perfetto-consumer"},
+    ]
+    patch = {
+        "apiVersion": "apps/v1",
+        "kind": target["kind"],
+        "metadata": {
+            "name": "positronic-control",
+            "namespace": target["namespace"],
+        },
+        "spec": {
+            "template": {
+                "spec": {
+                    "securityContext": {"fsGroup": _resolve_perfetto_gid()},
+                    "volumes": volumes,
+                    "containers": [
+                        {
+                            "name": target["container"],
+                            "volumeMounts": volume_mounts,
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    out = {
+        "target": {
+            "kind": target["kind"],
+            "name": "positronic-control",
+            "namespace": target["namespace"],
+        },
+        "patch": yaml.safe_dump(patch, sort_keys=False),
+    }
+    print(json.dumps(out))
     return 0
 
 
@@ -770,6 +948,15 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": None,
         "manifest_image": "foundationbot/dma-ethercat",
     },
+    "phantom-tracing": {
+        # Not stack-routed. Phase 4.5 (system_backend_tracing) reads
+        # images.phantom-tracing.image directly to render the
+        # bootstrap-managed installer Job that extracts the upstream
+        # tracebox .deb to the host. CI publishes <branch>-latest +
+        # <branch>-latest-aarch64 variants.
+        "stack": None,
+        "manifest_image": "foundationbot/phantom-tracing",
+    },
     "phantom-locomotion": {
         # phantom-locomotion DaemonSet (foundation.bot/has-locomotion gated).
         # Container key tracks the workload name (matches DaemonSet name and
@@ -973,6 +1160,29 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "kind": "DaemonSet",
         "namespace": "phantom",
         "container": "streamer",
+    },
+    # dma-video producer Deployment. Default args run the OAK camera
+    # capture path. When host-config sets dmaVideo.producer.image (with
+    # mode:camera), this Deployment receives an image-only override.
+    # When mode:video, the sibling producer-video-playback Deployment
+    # is patched instead (see dma-video-producer-video-playback below).
+    "dma-video-producer": {
+        "stack": "core",
+        "kind": "Deployment",
+        "namespace": "dma-video",
+        "container": "producer",
+    },
+    # dma-video playback producer Deployment. Sibling of producer; runs
+    # foundationbot/dma-video:playback (video_file_producer.py
+    # ENTRYPOINT) and is gated by the foundation.bot/has-video-playback
+    # node label. host-config dmaVideo.producer.mode:video patches this
+    # Deployment with the per-host --video/--num-cameras/--fps/--format
+    # args and the /videos hostPath volume.
+    "dma-video-producer-video-playback": {
+        "stack": "core",
+        "kind": "Deployment",
+        "namespace": "dma-video",
+        "container": "producer",
     },
 }
 
@@ -1179,6 +1389,27 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
 
     for w in all_warnings:
         print(f"warning: {w}", file=sys.stderr)
+
+    # Fold in the perf-block patches (ConfigMap data overlay + optional
+    # positronic-control hostPath socket mounts when backend=system).
+    # Both belong on the "core" stack since positronic is core. They are
+    # additive — when host-config also has a `deployments.positronic-
+    # control.mounts` block, the existing patch goes first and the perf
+    # patch second; Kustomize applies both in order, with the volumes
+    # lists merging on the `name` strategic-merge key.
+    perf_extras = _perf_extra_patches(cfg)
+    for entry in perf_extras:
+        by_stack.setdefault("core", []).append(entry)
+
+    # dmaVideo: optional dma-video producer mode switch. When
+    # dmaVideo.producer.mode == "video", emit a Deployment patch that
+    # replaces args + mounts a video file. Used for recorded-video
+    # benchmarks (the FIR-315/k0s adaptation of SOF-877's
+    # docker-compose-based recorded-video test).
+    video_extras = _dma_video_extra_patches(cfg)
+    for entry in video_extras:
+        by_stack.setdefault("core", []).append(entry)
+
     # Emit as a stable list-of-{stack,patches} so bash callers can
     # iterate predictably.
     out = [
@@ -1187,6 +1418,285 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
     ]
     print(json.dumps(out))
     return 0
+
+
+def _perf_extra_patches(cfg: dict) -> list[dict]:
+    """Build the perf-block patch entries that fold into the core stack
+    list.
+
+    Returns up to two entries:
+      1. A ConfigMap patch overlaying positronic-perf data with the
+         operator-selected PERF_* env-var values (only emitted when
+         the perf block has at least one value to set).
+      2. A positronic-control Deployment patch adding /tmp/perfetto-
+         {producer,consumer} hostPath socket mounts + fsGroup: 2026
+         (only emitted when perf.tracing.backend == "system").
+
+    Each entry has the same {target, patch} shape used by the rest of
+    cmd_get_deployment_patches_json so bash callers don't have to
+    special-case perf.
+    """
+    block = cfg.get("perf") or {}
+    if not isinstance(block, dict) or not block:
+        return []
+
+    out: list[dict] = []
+
+    # ConfigMap overlay. Build the data dict via the same logic as
+    # cmd_get_perf_configmap_json, but inline (we already validated the
+    # block in cmd_validate, and re-rendering here keeps the data
+    # source single-sourced).
+    data: dict[str, str] = {}
+    if block.get("preset") is not None:
+        data["PERF_PRESET"] = str(block["preset"])
+    tracing = block.get("tracing") or {}
+    if isinstance(tracing, dict):
+        if tracing.get("enabled") is not None:
+            data["PERF_TRACING_ENABLED"] = "1" if tracing["enabled"] else "0"
+        if tracing.get("backend"):
+            data["PERF_TRACING_BACKEND"] = str(tracing["backend"])
+        if tracing.get("output"):
+            data["PERF_TRACING_OUTPUT"] = str(tracing["output"])
+    tn = block.get("targetNodes")
+    if isinstance(tn, list) and tn:
+        data["PERF_TARGET_NODES"] = ",".join(str(x) for x in tn)
+    if data:
+        cm_patch = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "positronic-perf",
+                "namespace": "positronic",
+            },
+            "data": data,
+        }
+        out.append({
+            "target": {
+                "kind": "ConfigMap",
+                "name": "positronic-perf",
+                "namespace": "positronic",
+            },
+            "patch": yaml.safe_dump(cm_patch, sort_keys=False),
+        })
+
+    # Deployment hostPath / fsGroup patch — only when backend=system.
+    if isinstance(tracing, dict) and tracing.get("backend") == "system":
+        target = DEPLOYMENT_TARGETS["positronic-control"]
+        dep_patch = {
+            "apiVersion": "apps/v1",
+            "kind": target["kind"],
+            "metadata": {
+                "name": "positronic-control",
+                "namespace": target["namespace"],
+            },
+            "spec": {
+                "template": {
+                    "spec": {
+                        "securityContext": {"fsGroup": _resolve_perfetto_gid()},
+                        "volumes": [
+                            {
+                                "name": "perfetto-producer",
+                                "hostPath": {
+                                    "path": "/tmp/perfetto-producer",
+                                    "type": "Socket",
+                                },
+                            },
+                            {
+                                "name": "perfetto-consumer",
+                                "hostPath": {
+                                    "path": "/tmp/perfetto-consumer",
+                                    "type": "Socket",
+                                },
+                            },
+                        ],
+                        "containers": [
+                            {
+                                "name": target["container"],
+                                "volumeMounts": [
+                                    {
+                                        "name": "perfetto-producer",
+                                        "mountPath": "/tmp/perfetto-producer",
+                                    },
+                                    {
+                                        "name": "perfetto-consumer",
+                                        "mountPath": "/tmp/perfetto-consumer",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+        out.append({
+            "target": {
+                "kind": target["kind"],
+                "name": "positronic-control",
+                "namespace": target["namespace"],
+            },
+            "patch": yaml.safe_dump(dep_patch, sort_keys=False),
+        })
+
+    return out
+
+
+# DMA.video formats supported by multi_camera_producer.py's `video`
+# subcommand (mirror of the argparse `choices=` list in
+# DMA.video/src/multi_camera_producer.py). If upstream gains a new
+# format, add it here so the validator accepts it.
+DMA_VIDEO_FORMATS = frozenset({"nv12", "gray8", "gray", "bgr", "mjpeg"})
+
+# Default image for the playback Deployment. Operator can override via
+# host-config dmaVideo.producer.image. CI publishes :playback on every
+# DMA.video main merge (multi-arch amd64+arm64).
+DMA_VIDEO_PLAYBACK_IMAGE_DEFAULT = "foundationbot/dma-video:playback"
+
+
+def _dma_video_extra_patches(cfg: dict) -> list[dict]:
+    """Build dma-video producer patches from the host-config dmaVideo block.
+
+    Two distinct patches are possible:
+
+    * **mode:video** → one patch on ``Deployment/producer-video-playback``
+      with the per-host ``args`` (``--video /videos/<basename>
+      --num-cameras N --fps F --format FMT [--width W] [--height H]``),
+      the ``videos`` hostPath volume + ``/videos`` mount, and the
+      ``image`` set to ``dmaVideo.producer.image`` or
+      :data:`DMA_VIDEO_PLAYBACK_IMAGE_DEFAULT`.
+      The camera Deployment (``producer``) is left untouched; the node
+      label ``foundation.bot/has-video-playback`` decides which one's
+      Pod actually schedules.
+
+    * **mode:camera** (or unset) **with image override** → one image-only
+      patch on ``Deployment/producer``. No args/volumes change.
+
+    * **mode:camera (or unset), no image override** → no patches.
+
+    Returns:
+        Zero, one patch entries with the same ``{target, patch}``
+        shape ``cmd_get_deployment_patches_json`` consumes.
+
+    Joint-ownership: the ``args`` list below mirrors the CLI flags on
+    ``video_file_producer.py``'s argparse in the DMA.video repo. If a
+    flag is renamed on either side, both PRs ship together — no
+    exceptions. See ``VIDEO_FILE_PLAYBACK.md`` for the contract.
+    """
+    block = cfg.get("dmaVideo") or {}
+    if not isinstance(block, dict):
+        return []
+    producer = block.get("producer") or {}
+    if not isinstance(producer, dict):
+        return []
+
+    mode = producer.get("mode")
+    image_override = producer.get("image")
+
+    # mode:camera (or unset) with an image override → image-only patch.
+    if mode != "video":
+        if not image_override:
+            return []
+        target = DEPLOYMENT_TARGETS["dma-video-producer"]
+        patch = {
+            "apiVersion": "apps/v1",
+            "kind": target["kind"],
+            "metadata": {
+                "name": "producer",
+                "namespace": target["namespace"],
+            },
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": target["container"],
+                                "image": image_override,
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+        return [{
+            "target": {
+                "kind": target["kind"],
+                "name": "producer",
+                "namespace": target["namespace"],
+            },
+            "patch": yaml.safe_dump(patch, sort_keys=False),
+        }]
+
+    # mode:video → patch the playback Deployment with the per-host args.
+    target = DEPLOYMENT_TARGETS["dma-video-producer-video-playback"]
+    file_path = producer["file"]
+    file_path_obj = Path(file_path)
+    host_dir = str(file_path_obj.parent)
+    file_basename = file_path_obj.name
+    container_path = f"/videos/{file_basename}"
+
+    num_cameras = int(producer.get("numCameras", 1))
+    fps = producer.get("fps", 25)
+    fmt = producer.get("format", "nv12")
+    width = producer.get("width")
+    height = producer.get("height")
+
+    args: list[str] = [
+        "--video",
+        container_path,
+        "--num-cameras",
+        str(num_cameras),
+        "--fps",
+        str(fps),
+        "--format",
+        str(fmt),
+    ]
+    if width is not None:
+        args += ["--width", str(width)]
+    if height is not None:
+        args += ["--height", str(height)]
+
+    image = image_override or DMA_VIDEO_PLAYBACK_IMAGE_DEFAULT
+
+    patch = {
+        "apiVersion": "apps/v1",
+        "kind": target["kind"],
+        "metadata": {
+            "name": "producer-video-playback",
+            "namespace": target["namespace"],
+        },
+        "spec": {
+            "template": {
+                "spec": {
+                    "volumes": [
+                        {
+                            "name": "videos",
+                            "hostPath": {
+                                "path": host_dir,
+                                "type": "Directory",
+                            },
+                        },
+                    ],
+                    "containers": [
+                        {
+                            "name": target["container"],
+                            "image": image,
+                            "args": args,
+                            "volumeMounts": [
+                                {"name": "videos", "mountPath": "/videos"},
+                            ],
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    return [{
+        "target": {
+            "kind": target["kind"],
+            "name": "producer-video-playback",
+            "namespace": target["namespace"],
+        },
+        "patch": yaml.safe_dump(patch, sort_keys=False),
+    }]
 
 
 def cmd_get_enabled_stacks(cfg: dict) -> int:
@@ -2082,6 +2592,47 @@ def cmd_validate(cfg: dict) -> int:
                         "exclusive — only one may be \"true\""
                     )
 
+            # Mutual exclusion: dma-video camera producer and the
+            # playback producer both write to /dev/shm/video_frames_cam*
+            # and would collide if both ran on the same node. has-cameras
+            # defaults to "true" (existing fleet behaviour).
+            #
+            # Additionally, dmaVideo.producer.mode:video implies
+            # has-video-playback:true (and has-cameras:false). If the
+            # operator explicitly sets a contradicting label value,
+            # fail validation rather than silently overriding their
+            # intent.
+            dv = cfg.get("dmaVideo")
+            mode = None
+            if isinstance(dv, dict):
+                dv_prod = dv.get("producer")
+                if isinstance(dv_prod, dict):
+                    mode = dv_prod.get("mode")
+
+            effective_cam = nl.get("foundation.bot/has-cameras", "true")
+            effective_vp = nl.get("foundation.bot/has-video-playback", "false")
+
+            if mode == "video":
+                if nl.get("foundation.bot/has-cameras") == "true":
+                    errors.append(
+                        "nodeLabels: foundation.bot/has-cameras=\"true\" "
+                        "conflicts with dmaVideo.producer.mode=video "
+                        "(video mode implies has-video-playback=true and "
+                        "has-cameras=false; these are mutually exclusive)"
+                    )
+                if nl.get("foundation.bot/has-video-playback") == "false":
+                    errors.append(
+                        "nodeLabels: foundation.bot/has-video-playback="
+                        "\"false\" contradicts dmaVideo.producer.mode="
+                        "video — drop the explicit label or change mode"
+                    )
+            elif effective_cam == "true" and effective_vp == "true":
+                errors.append(
+                    "nodeLabels: foundation.bot/has-cameras and "
+                    "foundation.bot/has-video-playback are mutually "
+                    "exclusive — only one may be \"true\""
+                )
+
     # phantomLocomotion is optional; .policy must be a non-empty string
     # if present (a known policy name from the phantom-dma-inference
     # image's built-in registry — bootstrap doesn't enumerate them, the
@@ -2130,6 +2681,101 @@ def cmd_validate(cfg: dict) -> int:
                             f"phantomLocomotion.diagnostic.{k}: must be a "
                             f"scalar (str/int/float/bool), got {type(v).__name__}"
                         )
+
+    # dmaVideo: optional dma-video producer mode switch. When
+    # producer.mode == "video", bootstrap phase 13 patches the producer
+    # Deployment's args to replay a video file through
+    # multi_camera_producer.py. Used for recorded-video benchmarks.
+    dma_video = cfg.get("dmaVideo")
+    if dma_video is not None:
+        if not isinstance(dma_video, dict):
+            errors.append("'dmaVideo' must be a mapping")
+        else:
+            producer = dma_video.get("producer")
+            if producer is not None:
+                if not isinstance(producer, dict):
+                    errors.append("dmaVideo.producer: must be a mapping")
+                else:
+                    mode = producer.get("mode")
+                    if mode is not None and mode not in ("camera", "video"):
+                        errors.append(
+                            f"dmaVideo.producer.mode={mode!r}: must be "
+                            f"'camera' or 'video'"
+                        )
+                    if mode == "video":
+                        if not producer.get("file"):
+                            errors.append(
+                                "dmaVideo.producer.mode=video requires "
+                                "a 'file' field naming the video path"
+                            )
+                    fmt = producer.get("format")
+                    if fmt is not None and fmt not in DMA_VIDEO_FORMATS:
+                        errors.append(
+                            f"dmaVideo.producer.format={fmt!r}: must be "
+                            f"one of {sorted(DMA_VIDEO_FORMATS)}"
+                        )
+                    image = producer.get("image")
+                    if image is not None:
+                        if not isinstance(image, str) or not image:
+                            errors.append(
+                                f"dmaVideo.producer.image: must be a "
+                                f"non-empty string (got {image!r})"
+                            )
+                        elif ":" not in image and "@" not in image:
+                            errors.append(
+                                f"dmaVideo.producer.image={image!r}: must "
+                                f"be a tagged (':<tag>') or digested "
+                                f"('@sha256:<hex>') image reference"
+                            )
+
+    # perf: optional block of operator-facing perfetto + optimization
+    # toggles. Renders into the positronic-perf ConfigMap (env vars)
+    # plus a positronic-control deployment patch when backend=system.
+    perf = cfg.get("perf")
+    if perf is not None:
+        if not isinstance(perf, dict):
+            errors.append("'perf' must be a mapping")
+        else:
+            preset = perf.get("preset")
+            if preset is not None and not isinstance(preset, str):
+                errors.append(
+                    f"perf.preset: must be a string (got: {preset!r})"
+                )
+            tracing = perf.get("tracing")
+            if tracing is not None:
+                if not isinstance(tracing, dict):
+                    errors.append("perf.tracing: must be a mapping")
+                else:
+                    if "enabled" in tracing and not isinstance(
+                        tracing["enabled"], bool
+                    ):
+                        errors.append(
+                            "perf.tracing.enabled: must be true or false "
+                            f"(got: {tracing['enabled']!r})"
+                        )
+                    backend = tracing.get("backend")
+                    if backend is not None and backend not in (
+                        "system",
+                        "in_process",
+                    ):
+                        errors.append(
+                            f"perf.tracing.backend={backend!r}: must be "
+                            f"'system' or 'in_process'"
+                        )
+                    if "output" in tracing and not isinstance(
+                        tracing["output"], str
+                    ):
+                        errors.append(
+                            "perf.tracing.output: must be a string path"
+                        )
+            target_nodes = perf.get("targetNodes")
+            if target_nodes is not None and not isinstance(
+                target_nodes, list
+            ):
+                errors.append(
+                    "perf.targetNodes: must be a list of node names "
+                    f"(got: {type(target_nodes).__name__})"
+                )
 
     # Notes are purely informational (e.g. host-config drift from bundle
     # sidecar). They're printed regardless of error/success — operators
@@ -2202,6 +2848,18 @@ def main() -> int:
         return cmd_set_dma_ethercat_config_path(path, sys.argv[3])
     if cmd == "get-deployment-patches-json":
         return cmd_get_deployment_patches_json(cfg)
+    if cmd == "get-perf":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> get-perf <field>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_get_perf(cfg, sys.argv[3])
+    if cmd == "get-perf-configmap-json":
+        return cmd_get_perf_configmap_json(cfg)
+    if cmd == "get-perf-deployment-patch-json":
+        return cmd_get_perf_deployment_patch_json(cfg)
     if cmd == "get-enabled-stacks":
         return cmd_get_enabled_stacks(cfg)
     if cmd == "get-stack-selfheal":

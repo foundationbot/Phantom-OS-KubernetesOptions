@@ -1,0 +1,60 @@
+# phantom-tracing-installer Job — exposes the phantom-tracing .deb (baked
+# into the foundationbot/phantom-tracing image at /dist/) on the host so
+# scripts/bootstrap-robot.sh's phase 4.5 (system_backend_tracing) can
+# dpkg -i it. The .deb ships the upstream Perfetto tracebox binary
+# (pinned to v53.0 to match positronic_control's vendored SDK) plus the
+# traced + traced_probes symlinks and systemd unit files.
+#
+# This Job is managed by bootstrap-robot.sh via `kubectl apply -f`, NOT
+# by ArgoCD — same pattern as dma-ethercat's installer Job: lives under
+# manifests/installers/ specifically so Argo's Application
+# (manifests/robots/<robot>/) never sees it. Bootstrap forces a fresh
+# extract on every run by delete + apply.
+#
+# Host state (perfetto group with pinned GID 2026, socket-dir hygiene,
+# systemctl enable) is OWNED BY BOOTSTRAP, not by the .deb postinst —
+# keeps the .deb portable and host state declarative under
+# host-config.yaml. See scripts/bootstrap-robot.sh:system_backend_tracing.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: phantom-tracing-installer
+  namespace: phantom
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 30
+  template:
+    metadata:
+      labels:
+        app: phantom-tracing-installer
+    spec:
+      restartPolicy: OnFailure
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: extract
+          # Tag is sed-substituted at apply time by bootstrap-robot.sh's
+          # system_backend_tracing phase using the
+          # foundationbot/phantom-tracing entry from host-config.yaml's
+          # images: list.
+          image: foundationbot/phantom-tracing:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "==> contents of /dist:"
+              ls -la /dist/
+              mkdir -p /host-out
+              rm -f /host-out/*.deb /host-out/.ready
+              cp /dist/phantom-tracing_*.deb /host-out/
+              touch /host-out/.ready
+              echo "==> wrote $(ls /host-out/phantom-tracing_*.deb)"
+          volumeMounts:
+            - name: host-out
+              mountPath: /host-out
+      volumes:
+        - name: host-out
+          hostPath:
+            path: /var/lib/phantom-tracing-installer
+            type: DirectoryOrCreate
