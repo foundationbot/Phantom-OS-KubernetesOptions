@@ -296,6 +296,20 @@ images:
 #   imuPitchRatioTol:     0.30                  # active proj_g_ratio ±band
 #   imuPairDeltaTol:      0.20                  # L/R pair asymmetry threshold
 #
+#   # ── Chirp test mode (FIR-345). See "Chirp test mode" below.
+#   testMode:                 joint-sweep       # joint-sweep | chirp
+#   chirpAmplitudeRad:        0.05              # sine-wave amplitude
+#   chirpAmplitudeHardCapRad: 0.30              # safety cap on amplitude
+#   chirpFreqMinHz:           0.05              # log sweep lower bound
+#   chirpFreqMaxHz:           15.0              # log sweep upper bound
+#   chirpDurationS:           60.0              # per (joint, gain) sweep length
+#   chirpEnvelopeS:           0.5               # pre/post-ramp fade-in
+#   chirpGainMultipliers:     "0.5,0.7,0.9,1.1,1.3,1.5"   # x masterGain
+#   chirpSettleVelTolRadS:    0.02              # settle-quiet velocity tol
+#   chirpSettleQuietS:        0.5               # quiet duration before next gain
+#   chirpSettleMaxS:          10.0              # FATAL abort if joint won't quiet
+#   chirpRrdDir:              /dev/shm          # per-(joint, gain) .rrd output dir
+#
 # waitForStart: when `true` (default), the diagnostic subscribes to
 # /phantom/start_startup (Bool) and blocks until the operator presses
 # the joystick X button — same OFF->STARTUP gate as the policy node.
@@ -354,6 +368,27 @@ images:
 # `velTrackingRatioTol`) each expand to a (LO, HI) env-var pair
 # consumed by dma_launch.sh: lo = 1 - tol, hi = 1 + tol.
 #
+# Chirp test mode (FIR-345): when `testMode: chirp`, the diagnostic
+# stops doing the per-joint step/ramp sweep and instead drives each
+# joint with a log-frequency sine wave (chirpFreqMinHz → chirpFreqMaxHz
+# over chirpDurationS) at a ladder of masterGain multipliers
+# (chirpGainMultipliers). Per (joint, gain) the runner writes a .rrd
+# under chirpRrdDir that the operator post-processes with
+# `phantom-locomotion/scripts/tools/chirp_to_bode.py` to get Bode plots
+# + a stability/bandwidth recommendation via `recommend_gain.py`.
+# Total runtime ≈ N_joints × N_gains × (chirpDurationS + chirpEnvelopeS
+# + settle), which is ≈ 80-90 min at defaults across all 13 mk2-lower-
+# body joints; subset via `joints:` while characterising one fixture.
+# Between gain steps the runner waits for the joint to mechanically
+# quiet (|v| < chirpSettleVelTolRadS for chirpSettleQuietS continuous
+# seconds); if it can't quiet within chirpSettleMaxS the entire sweep
+# aborts FATALLY — that joint just went unstable at the previous gain
+# and continuing would risk the actuator. Inspect the .rrd from the
+# unstable step before re-running.
+# All chirp* fields are inert when testMode is `joint-sweep` (default).
+# Requires master-side dma-main clamp raised to 2.0 (FIR-348) for
+# multipliers > 1.0 to take effect.
+#
 # The default outPath lives on the DaemonSet's /recordings hostPath
 # mount (host /root/recordings, same path dma-recorder writes .rrd
 # files to). Reports survive pod restarts and are reachable from the
@@ -391,6 +426,31 @@ images:
 #     holdBiasS: 0.5                      # shorter plateau OK in ramp mode
 #     iterations: 5
 #     jointBiasOverrides: "RightHipRoll=-0.10"
+#
+# Example — quick chirp validation on one joint, one gain (~15 s on the
+# bench). Use this to validate the chirp toolchain end-to-end before
+# committing to the ~80-min full sweep.
+# phantomLocomotion:
+#   mode: diagnostic
+#   diagnostic:
+#     testMode: chirp
+#     masterGain: 0.3                     # nominal; multipliers scale this
+#     joints: SpineYaw
+#     chirpDurationS: 10                  # short sweep for smoke test
+#     chirpGainMultipliers: "1.0"         # single gain — bypass the ladder
+#     chirpRrdDir: /recordings/chirp      # .rrd files survive pod restarts
+#
+# Example — full chirp/bode sweep across all joints + default gain
+# ladder. Plan for ~80-90 min runtime; the launcher exits when done
+# and the operator pulls the .rrd files off via `kubectl cp` before
+# running chirp_to_bode.py + recommend_gain.py locally.
+# phantomLocomotion:
+#   mode: diagnostic
+#   diagnostic:
+#     testMode: chirp
+#     masterGain: 0.3
+#     chirpRrdDir: /recordings/chirp
+#     # everything else defaults: full 13-joint sweep at 0.5,0.7,...,1.5×
 #
 # Example — host /data2 partition holds recordings instead of the
 # default /root/recordings. The phantom-locomotion DaemonSet's base
