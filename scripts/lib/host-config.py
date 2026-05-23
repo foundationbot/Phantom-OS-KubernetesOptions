@@ -364,6 +364,23 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     # env vars consumed by dma_launch.sh.
     "imuPitchRatioTol":  "0.30",
     "imuPairDeltaTol":   "0.20",
+    # ── FIR-345 chirp test mode. `testMode: chirp` switches the diagnostic
+    # node into the chirp/Bode sweep instead of joint-by-joint step/ramp.
+    # All chirp* defaults mirror the dma_launch.sh defaults so a bare
+    # `testMode: chirp` (no chirp-field overrides) works end-to-end.
+    # The 12 fields below are inert when `testMode: joint-sweep` (default).
+    "testMode":                 "joint-sweep",
+    "chirpAmplitudeRad":        "0.05",
+    "chirpAmplitudeHardCapRad": "0.30",
+    "chirpFreqMinHz":           "0.05",
+    "chirpFreqMaxHz":           "15.0",
+    "chirpDurationS":           "60.0",
+    "chirpEnvelopeS":           "0.5",
+    "chirpGainMultipliers":     "0.5,0.7,0.9,1.1,1.3,1.5",
+    "chirpSettleVelTolRadS":    "0.02",
+    "chirpSettleQuietS":        "0.5",
+    "chirpSettleMaxS":          "10.0",
+    "chirpRrdDir":              "/dev/shm",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -399,6 +416,20 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "imuIdleGyroTol":    "LOCOMOTION_DIAGNOSTIC_IMU_IDLE_GYRO_TOL",
     "imuIdleProjGTol":   "LOCOMOTION_DIAGNOSTIC_IMU_IDLE_PROJ_G_TOL",
     "imuPairDeltaTol":   "LOCOMOTION_DIAGNOSTIC_IMU_PAIR_DELTA_TOL",
+    # FIR-345 chirp test mode. Routed to dma_launch.sh, which forwards
+    # them to inference.dma_diagnostic_node's argparse.
+    "testMode":                 "LOCOMOTION_DIAGNOSTIC_TEST_MODE",
+    "chirpAmplitudeRad":        "LOCOMOTION_DIAGNOSTIC_CHIRP_AMPLITUDE_RAD",
+    "chirpAmplitudeHardCapRad": "LOCOMOTION_DIAGNOSTIC_CHIRP_AMPLITUDE_HARD_CAP_RAD",
+    "chirpFreqMinHz":           "LOCOMOTION_DIAGNOSTIC_CHIRP_FREQ_MIN_HZ",
+    "chirpFreqMaxHz":           "LOCOMOTION_DIAGNOSTIC_CHIRP_FREQ_MAX_HZ",
+    "chirpDurationS":           "LOCOMOTION_DIAGNOSTIC_CHIRP_DURATION_S",
+    "chirpEnvelopeS":           "LOCOMOTION_DIAGNOSTIC_CHIRP_ENVELOPE_S",
+    "chirpGainMultipliers":     "LOCOMOTION_DIAGNOSTIC_CHIRP_GAIN_MULTIPLIERS",
+    "chirpSettleVelTolRadS":    "LOCOMOTION_DIAGNOSTIC_CHIRP_SETTLE_VEL_TOL_RAD_S",
+    "chirpSettleQuietS":        "LOCOMOTION_DIAGNOSTIC_CHIRP_SETTLE_QUIET_S",
+    "chirpSettleMaxS":          "LOCOMOTION_DIAGNOSTIC_CHIRP_SETTLE_MAX_S",
+    "chirpRrdDir":              "LOCOMOTION_DIAGNOSTIC_CHIRP_RRD_DIR",
 }
 
 # Fields that expand from a single `tol` value into a (BAND_LO, BAND_HI)
