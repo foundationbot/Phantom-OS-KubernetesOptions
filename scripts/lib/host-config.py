@@ -894,6 +894,27 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "phantom",
         "container": "api",
     },
+    # phantom-locomotion DaemonSet — base manifest carries a default
+    # /recordings mount sourced from /root/recordings on the host (same
+    # path dma-recorder writes to). Robots whose recordings live on a
+    # different partition (/data/recordings, /data2/recordings, …) can
+    # override via:
+    #
+    #   deployments:
+    #     phantom-locomotion:
+    #       mounts:
+    #         - {name: recordings, host: /data2/recordings, container: /recordings}
+    #
+    # Strategic-merge patches by volume `name`, so only the named mount
+    # is replaced; shm / dev-input / policies stay as the base manifest
+    # declares them. Operators can also add brand-new mounts (per-bench
+    # logging dir, debug tooling, …) by listing them with fresh names.
+    "phantom-locomotion": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "phantom-locomotion",
+    },
     # DMA.streams recorder DaemonSet — patches go to the `recorder` container
     # (not the `janitor` sidecar). Override channels:
     #   * variant: mk1 | mk2 | mk2_lowerbody — picks the bundled URDF the
