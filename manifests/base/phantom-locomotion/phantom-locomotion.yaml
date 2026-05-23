@@ -141,9 +141,16 @@ spec:
               hostPort: 7400
               protocol: UDP
           volumeMounts:
-            - { name: shm,       mountPath: /dev/shm }
-            - { name: dev-input, mountPath: /dev/input }
-            - { name: policies,  mountPath: /data/policies }
+            - { name: shm,        mountPath: /dev/shm }
+            - { name: dev-input,  mountPath: /dev/input }
+            - { name: policies,   mountPath: /data/policies }
+            # Persistent host directory for diagnostic reports (and
+            # other artifacts an operator wants to `kubectl cp` off
+            # the robot without scraping /dev/shm). Same hostPath the
+            # dma-recorder writes its .rrd files to — sharing the
+            # mount keeps all operator-visible run artifacts under one
+            # tree (`/root/recordings/` on the host).
+            - { name: recordings, mountPath: /recordings }
           resources:
             # Conservative starting point — the policy is small, mostly
             # CPU-bound. Real RT pinning is the cpu-isolation phase's job.
@@ -156,8 +163,13 @@ spec:
 
       volumes:
         - name: shm
-          hostPath: { path: /dev/shm,    type: Directory }
+          hostPath: { path: /dev/shm,         type: Directory }
         - name: dev-input
-          hostPath: { path: /dev/input,  type: Directory }
+          hostPath: { path: /dev/input,       type: Directory }
         - name: policies
           emptyDir: {}
+        # DirectoryOrCreate matches manifests/base/dma-streams/dma-recorder.yaml
+        # so the mount succeeds on robots that have never run dma-recorder
+        # (the kubelet creates /root/recordings if it doesn't exist).
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }
