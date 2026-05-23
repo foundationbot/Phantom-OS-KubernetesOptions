@@ -297,7 +297,14 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     "holdBiasS":    "2.0",
     "holdHomeS":    "1.0",
     "joints":       "all",
-    "outPath":      "/dev/shm/diag_report.json",
+    # /recordings is a hostPath mount (foundationbot/Phantom-OS-
+    # KubernetesOptions phantom-locomotion.yaml: host /root/recordings,
+    # type DirectoryOrCreate). The launcher mkdir -p's the diag_reports
+    # subdirectory before each batch. Stays under /recordings so reports
+    # survive DaemonSet rollouts and sit next to dma-recorder's .rrd
+    # files. Override to /dev/shm/diag_report.json on dev pods that lack
+    # the /recordings mount.
+    "outPath":      "/recordings/diag_reports/diag_report.json",
     # waitForStart gates dma_diagnostic_node on a joystick X-button
     # press (publishes /phantom/start_startup), same OFF->STARTUP
     # semantics as the policy node. Default "true" mirrors the

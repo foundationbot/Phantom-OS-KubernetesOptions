@@ -271,7 +271,7 @@ images:
 #   holdBiasS:            2.0                   # plateau hold (both modes)
 #   holdHomeS:            1.0                   # home hold between joints
 #   joints:               all
-#   outPath:              /dev/shm/diag_report.json
+#   outPath:              /recordings/diag_reports/diag_report.json
 #   waitForStart:         true
 #   jointBiasOverrides:   ""                    # see "Per-joint bias overrides"
 #   iterations:           1                     # repeat the sweep N times
@@ -354,10 +354,13 @@ images:
 # `velTrackingRatioTol`) each expand to a (LO, HI) env-var pair
 # consumed by dma_launch.sh: lo = 1 - tol, hi = 1 + tol.
 #
-# The default outPath lives on the DaemonSet's existing /dev/shm
-# hostPath mount, so the JSON report appears on the host without any
-# manifest edits — operators can `kubectl cp` it from the pod (or
-# read it directly from /dev/shm on the node).
+# The default outPath lives on the DaemonSet's /recordings hostPath
+# mount (host /root/recordings, same path dma-recorder writes .rrd
+# files to). Reports survive pod restarts and are reachable from the
+# host's /root/recordings/diag_reports/ directory; operators can
+# `kubectl cp` the symlink (always the latest run) without knowing
+# the per-iteration timestamp. Override to /dev/shm/diag_report.json
+# on a dev pod that lacks the /recordings mount.
 #
 # Example — normal locomotion (default):
 # phantomLocomotion:
@@ -374,7 +377,7 @@ images:
 #     masterGain: 0.3
 #     holdBiasS: 2.0
 #     holdHomeS: 1.0
-#     outPath: /dev/shm/diag_report.json
+#     outPath: /recordings/diag_reports/diag_report.json
 #     waitForStart: true
 #     jointBiasOverrides: "RightHipRoll=-0.10"
 #
