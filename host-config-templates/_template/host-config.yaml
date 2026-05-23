@@ -391,6 +391,16 @@ images:
 #     holdBiasS: 0.5                      # shorter plateau OK in ramp mode
 #     iterations: 5
 #     jointBiasOverrides: "RightHipRoll=-0.10"
+#
+# Example — host /data2 partition holds recordings instead of the
+# default /root/recordings. The phantom-locomotion DaemonSet's base
+# manifest declares the recordings mount with `path: /root/recordings`;
+# the strategic-merge patch below redirects ONLY that named volume,
+# leaving shm / dev-input / policies untouched:
+# deployments:
+#   phantom-locomotion:
+#     mounts:
+#       - {name: recordings, host: /data2/recordings, container: /recordings}
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
@@ -484,6 +494,8 @@ nodeLabels:
 # Known deployment keys (others are rejected):
 #   positronic-control     core stack, container 'positronic-control'
 #   phantomos-api-server   core stack, container 'api'
+#   phantom-locomotion     core stack, container 'phantom-locomotion'
+#                                       (default /recordings mount, override host path here)
 #   dma-recorder           core stack, container 'recorder' (DMA.streams .rrd writer)
 #   rerun-streamer         core stack, container 'streamer' (DMA.streams live viewer)
 #
@@ -509,6 +521,15 @@ nodeLabels:
 #                                  container: /home/operator/repos/argus/operator_ui}
 #       - {name: phantom-scripts,  host: /opt/phantom/scripts,
 #                                  container: /opt/phantom/scripts}
+#
+#   # phantom-locomotion: the base manifest ships a default recordings
+#   # mount (host /root/recordings → container /recordings) shared with
+#   # dma-recorder. ONLY override on robots whose recordings live on a
+#   # different partition — listing only the named entries you want to
+#   # change keeps shm / dev-input / policies as the base declares them.
+#   phantom-locomotion:
+#     mounts:
+#       - {name: recordings, host: /data2/recordings, container: /recordings}
 #
 #   # variant: mk1 | mk2 | mk2_lowerbody — picks the bundled URDF for
 #   # the DMA.streams workloads. Supported on:
