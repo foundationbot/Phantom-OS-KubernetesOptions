@@ -1,12 +1,30 @@
-# ConfigMap: external reverse proxy config (from argus.operator-ui/nginx.conf)
-# Routes / → operator-ui:8004, /api/ → argus-gateway:9100
+# argus-nginx — single browser-facing ingress for everything operator-ui
+# needs. /api/ai/ is templated at pod start (__AI_PC_HOST__ substituted
+# by the render-config init container from the per-host operator-ui-
+# pairing ConfigMap); the other upstreams resolve via cluster DNS.
+#
+# Routing:
+#   /            -> operator-ui:8004                                  (argus ns, ClusterIP)
+#   /api/        -> argus-gateway:9100                                (argus ns, ClusterIP)
+#   /api/control/-> phantomos-api-server.phantom.svc.cluster.local:5000
+#                   (phantom ns, hostNetwork DaemonSet w/ Service —
+#                    kubelet endpoints land on the node IP, kube-proxy
+#                    routes there)
+#   /api/ai/     -> AI_PC_HOST:5000                                   (paired AI PC,
+#                                                                      separate
+#                                                                      out-of-
+#                                                                      cluster
+#                                                                      machine)
+#
+# Same-origin proxy means the browser only ever talks to this NodePort
+# (30080). No CORS, no mixed-content, one firewall hole per robot.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nginx-config
+  name: nginx-template
   namespace: argus
 data:
-  nginx.conf: |
+  nginx-template.conf: |
     events {
         worker_connections 1024;
     }
@@ -34,6 +52,36 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $scheme;
+            }
+
+            # /api/ai/ and /api/control/ are more specific than /api/ so
+            # they win the longest-prefix match; /api/ falls through to
+            # argus-gateway for everything else.
+            location /api/ai/ {
+                proxy_pass http://__AI_PC_HOST__:5000/;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 3600;
+            }
+
+            location /api/control/ {
+                # Cluster DNS — Service in phantom ns fronts the
+                # hostNetwork DaemonSet. Endpoints resolve to the
+                # node IP automatically; no per-host templating.
+                proxy_pass http://phantomos-api-server.phantom.svc.cluster.local:5000/;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_read_timeout 3600;
             }
 
             location /api/ {
@@ -65,6 +113,33 @@ spec:
     spec:
       imagePullSecrets:
         - name: dockerhub-creds
+      initContainers:
+        # Substitute __AI_PC_HOST__ from the operator-ui-pairing CM
+        # into the templated nginx config and drop the rendered file
+        # into the shared emptyDir for the nginx container to mount
+        # via subPath. /api/control/ no longer needs templating —
+        # it uses the phantomos-api-server Service in phantom ns.
+        - name: render-config
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              : "${AI_PC_HOST:?AI_PC_HOST missing from operator-ui-pairing CM}"
+              sed -e "s|__AI_PC_HOST__|${AI_PC_HOST}|g" \
+                  /template/nginx-template.conf > /rendered/nginx.conf
+              echo "rendered upstream: ai=${AI_PC_HOST}:5000"
+          envFrom:
+            - configMapRef:
+                name: operator-ui-pairing
+          volumeMounts:
+            - name: template
+              mountPath: /template
+              readOnly: true
+            - name: rendered
+              mountPath: /rendered
       containers:
         - name: nginx
           image: nginx:latest
@@ -72,7 +147,7 @@ spec:
           ports:
             - containerPort: 80
           volumeMounts:
-            - name: nginx-config
+            - name: rendered
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
               readOnly: true
@@ -84,9 +159,14 @@ spec:
               cpu: "500m"
               memory: "128Mi"
       volumes:
-        - name: nginx-config
+        - name: template
           configMap:
-            name: nginx-config
+            name: nginx-template
+        # init container writes the rendered config here; main container
+        # mounts /etc/nginx/nginx.conf out of it via subPath so the rest
+        # of /etc/nginx/ (mime.types, etc.) from the image is preserved.
+        - name: rendered
+          emptyDir: {}
 ---
 # NodePort exposes the Operator UI on port 30080 from outside the cluster.
 # Access the UI at http://<robot-ip>:30080

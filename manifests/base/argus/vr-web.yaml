@@ -1,0 +1,278 @@
+# vr-web: browser-based VR teleop UI (WebXR / Quest 3) for the paired
+# AI PC. Image entrypoint (argus.vr.web.react) renders /etc/nginx/
+# nginx.conf from the mounted nginx-template.conf, substituting
+# __ROSBRIDGE_PROXY__ / __CAMERA_PROXY__ / __VOICE_PROXY__ from the
+# CAMERA_SERVER_URL / ROSBRIDGE_URL / VOICE_SERVER_URL env vars at pod
+# start, then serves the SPA on :8010 over TLS (WebXR requires HTTPS).
+#
+# Per-host inputs:
+#
+#   /etc/phantomos/operator-ui-pairing.yaml
+#       operator-ui-pairing ConfigMap. Holds AI_PC_URL plus derived
+#       CAMERA_SERVER_URL (:8889 MediaMTX) and ROSBRIDGE_URL (:9090
+#       rosbridge_server). Rendered by bootstrap-robot.sh phase 6 from
+#       host-config.yaml's aiPcUrl. NOT in the GitOps tree, so ArgoCD
+#       doesn't reset per-host changes. The vr-web Pod reads the two
+#       derived keys via configMapKeyRef.
+#
+#   /opt/certs/*.crt + /opt/certs/*.key
+#       Tailscale-issued TLS cert + key for this robot's Tailscale FQDN
+#       (generated with `sudo tailscale cert <robot>.<tailnet>.ts.net`
+#       then moved to /opt/certs/). Filenames are robot-specific (e.g.
+#       mk11000009.foundation-bot.ts.net.{crt,key}), so the Pod's init
+#       container globs the pair out of the host directory and stages
+#       them into an emptyDir as tls.crt / tls.key — the names the
+#       nginx server block below references. /opt/certs is mounted via
+#       hostPath: any node hosting this Pod must have the files on disk.
+#       Missing files leave the init container in CrashLoopBackOff with
+#       a "no cert/key in /opt/certs" log line.
+#
+# VOICE_SERVER_URL points at the in-cluster voice-server Service in this
+# namespace. vr-web's nginx proxies /api/voice to that backend so the
+# browser only ever talks to vr-web on the NodePort.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vr-web-nginx-template
+  namespace: argus
+data:
+  # SSL variant of argus.vr.web.react/nginx-test.conf. The discover-tls
+  # init container stages the host's /opt/certs/*.{crt,key} pair into
+  # an emptyDir at /etc/nginx/ssl/{tls.crt,tls.key} — the filenames
+  # below. WebXR requires HTTPS, so this is non-optional.
+  nginx-template.conf: |
+    worker_processes auto;
+    events { worker_connections 1024; }
+
+    http {
+      include       /etc/nginx/mime.types;
+      default_type  application/octet-stream;
+
+      sendfile on;
+      tcp_nopush on;
+      tcp_nodelay on;
+      keepalive_timeout 65;
+
+      gzip on;
+      gzip_comp_level 6;
+      gzip_min_length 1024;
+      gzip_vary on;
+      gzip_types
+        text/plain text/css application/javascript application/json
+        application/wasm image/svg+xml;
+
+      server {
+        listen 8010 ssl;
+        server_name _;
+
+        ssl_certificate     /etc/nginx/ssl/tls.crt;
+        ssl_certificate_key /etc/nginx/ssl/tls.key;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location ~* ^/rin-[^/]+/ {
+          rewrite ^/rin-[^/]+/(.*)$ /$1 last;
+        }
+
+        location ~* \.(?:js|css|map|png|jpg|jpeg|gif|svg|ico|woff2|wasm|obj|mtl|stl|zip)$ {
+          add_header Cache-Control "public, max-age=31536000, immutable";
+          try_files $uri =404;
+        }
+
+        location ~* \.(?:html|xml)$ {
+          add_header Cache-Control "public, max-age=300";
+          try_files $uri =404;
+        }
+
+        # Same-origin proxy to ROS bridge on the paired AI PC.
+        location /api/rosbridge {
+          proxy_pass __ROSBRIDGE_PROXY__/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_read_timeout 3600;
+        }
+
+        # Same-origin proxy to MediaMTX camera server on the paired AI PC.
+        location /api/camera/ {
+          proxy_pass __CAMERA_PROXY__/;
+          proxy_set_header Host $host;
+        }
+
+        # Same-origin proxy to the in-cluster voice-server (Vosk).
+        location /api/voice {
+          proxy_pass __VOICE_PROXY__/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_read_timeout 3600;
+        }
+
+        location = /config.js {
+          expires -1;
+          add_header Cache-Control "no-store, no-cache, must-revalidate";
+        }
+
+        location = /index.html {
+          expires -1;
+          add_header Cache-Control "no-store, no-cache, must-revalidate";
+        }
+
+        location / {
+          try_files $uri /index.html;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vr-web
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vr-web
+  template:
+    metadata:
+      labels:
+        app: vr-web
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      initContainers:
+        # Discover the per-robot Tailscale cert pair under /opt/certs on
+        # the host (filenames are <robot>.<tailnet>.ts.net.{crt,key}, so
+        # the Deployment can't hard-code them) and stage them into the
+        # tls emptyDir under the fixed names nginx-template.conf
+        # references. Fails loud if the pair is missing — same UX as a
+        # missing operator-ui-pairing ConfigMap.
+        - name: discover-tls
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              crt=$(ls /host-certs/*.crt 2>/dev/null | head -n1 || true)
+              key=$(ls /host-certs/*.key 2>/dev/null | head -n1 || true)
+              if [ -z "$crt" ] || [ -z "$key" ]; then
+                echo "no cert/key in /opt/certs" >&2
+                ls -la /host-certs/ >&2 || true
+                exit 1
+              fi
+              cp "$crt" /tls/tls.crt
+              cp "$key" /tls/tls.key
+              chmod 0644 /tls/tls.crt
+              chmod 0640 /tls/tls.key
+              echo "staged $(basename "$crt") + $(basename "$key") -> /etc/nginx/ssl/{tls.crt,tls.key}"
+          volumeMounts:
+            - name: host-certs
+              mountPath: /host-certs
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+      containers:
+        - name: vr-web
+          image: foundationbot/argus.vr.web.react:qa
+          imagePullPolicy: IfNotPresent
+          ports:
+            # hostPort:8010 maps the container's port directly onto
+            # the node's :8010. This is the URL the Quest 3 browser
+            # hits: https://<robot-fqdn>:8010/ . Same convention as
+            # registry (5443), rerun-streamer (9788), yovariable-
+            # server (8008/8080), phantom-locomotion (7400).
+            #
+            # Why not a NodePort Service? NodePort range is restricted
+            # to 30000-32767 by default; using :8010 externally would
+            # require expanding the cluster's --service-node-port-range
+            # cluster-wide. hostPort is the cleaner per-service knob
+            # when (as here) the only consumer is an external browser
+            # and no in-cluster pod talks to the Service.
+            - name: https
+              containerPort: 8010
+              hostPort: 8010
+              protocol: TCP
+          env:
+            - name: NGINX_ENTRYPOINT_QUIET_LOGS
+              value: "1"
+            # AI_PC_HOST is the per-host Tailscale IP / FQDN of the AI PC
+            # paired with this robot, sourced from the operator-ui-pairing
+            # ConfigMap that bootstrap-robot.sh phase 6 renders from
+            # /etc/phantomos/host-config.yaml's aiPcUrl. The CM is NOT in
+            # the GitOps tree, so ArgoCD doesn't reset per-host changes.
+            #
+            # CAMERA_SERVER_URL and ROSBRIDGE_URL are composed here via
+            # Kubernetes env-var substitution ($(VAR_NAME)) so the CM
+            # stays single-source — same host drives both endpoints plus
+            # operator-ui's AI_PC_URL.
+            - name: AI_PC_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: AI_PC_HOST
+            - name: CAMERA_SERVER_URL
+              value: "http://$(AI_PC_HOST):8889"
+            - name: ROSBRIDGE_URL
+              value: "ws://$(AI_PC_HOST):9090"
+            # In-cluster Vosk recognizer. vr-web's nginx proxies
+            # /api/voice to this so the browser only ever talks to vr-web.
+            - name: VOICE_SERVER_URL
+              value: ws://voice-server:8011
+          volumeMounts:
+            - name: nginx-template
+              mountPath: /etc/nginx/nginx-template.conf
+              subPath: nginx-template.conf
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/ssl
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: nginx-template
+          configMap:
+            name: vr-web-nginx-template
+        # Read-only view of the host's /opt/certs/ for the init
+        # container to glob. Robot-specific filenames (e.g.
+        # mk11000009.foundation-bot.ts.net.{crt,key}) live here on
+        # disk; the init container picks the pair and stages them
+        # under fixed names in the tls emptyDir below.
+        - name: host-certs
+          hostPath:
+            path: /opt/certs
+            type: Directory
+        # Staging area written by the discover-tls init container and
+        # read by nginx in the main container.
+        - name: tls
+          emptyDir: {}
+---
+# ClusterIP Service kept for in-cluster addressability (e.g. if a
+# future pod wants to dial vr-web). External access is via hostPort
+# on the container: https://<robot-fqdn>:8010 . TLS is terminated
+# inside the Pod against the per-host Tailscale cert pair discovered
+# out of /opt/certs/ on the host (see discover-tls above).
+apiVersion: v1
+kind: Service
+metadata:
+  name: vr-web
+  namespace: argus
+spec:
+  type: ClusterIP
+  selector:
+    app: vr-web
+  ports:
+    - name: https
+      port: 8010
+      targetPort: 8010
+      protocol: TCP

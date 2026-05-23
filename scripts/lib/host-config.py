@@ -705,6 +705,21 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "operator",
         "manifest_image": "foundationbot/argus.operator-ui",
     },
+    "vr-web": {
+        # Browser-based VR teleop UI (Quest 3 / WebXR). Lives in the
+        # argus namespace alongside operator-ui. CI publishes
+        # foundationbot/argus.vr.web.react:<branch> from the
+        # argus.vr.web.react repo.
+        "stack": "operator",
+        "manifest_image": "foundationbot/argus.vr.web.react",
+    },
+    "voice-server": {
+        # In-cluster Vosk recognizer fronting vr-web's /api/voice. CI
+        # publishes foundationbot/argus.voice-server:<branch> from the
+        # voice_server/ subdir of argus.vr.web.react.
+        "stack": "operator",
+        "manifest_image": "foundationbot/argus.voice-server",
+    },
     "yovariable-server": {
         # DaemonSet bridging DMA shm IPC to network-accessible variable
         # endpoints. CI publishes foundationbot/yovariable-server:V-<x.y.z>-<ts>.

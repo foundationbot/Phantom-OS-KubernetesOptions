@@ -1,0 +1,73 @@
+# voice-server: server-side speech recognizer for VR teleop voice
+# commands. Quest 3 browser streams 16 kHz PCM over WebSocket via
+# vr-web's /api/voice nginx proxy; voice-server runs Vosk with a
+# constrained grammar and replies with {"cmd": "..."} JSON.
+#
+# Image is built and published by the argus.vr.web.react CircleCI
+# pipeline (voice_server/Dockerfile -> foundationbot/argus.voice-server:
+# <branch>). The Vosk small-en-us model is baked into the image at
+# /opt/vosk-model — no host mount needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-server
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voice-server
+  template:
+    metadata:
+      labels:
+        app: voice-server
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: voice-server
+          image: foundationbot/argus.voice-server:qa
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8011
+          env:
+            - name: VOICE_PORT
+              value: "8011"
+          # Same TCP healthcheck the upstream Dockerfile ships — keeps
+          # the cluster from routing traffic to a pod that hasn't
+          # finished loading the Vosk model (~5–15 s on cold start).
+          readinessProbe:
+            tcpSocket:
+              port: 8011
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8011
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              # Vosk small-en-us residency is ~80 MB; bumped to give the
+              # WebSocket handler headroom under concurrent clients.
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: voice-server
+  namespace: argus
+spec:
+  selector:
+    app: voice-server
+  ports:
+    - port: 8011
+      targetPort: 8011

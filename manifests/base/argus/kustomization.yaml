@@ -9,4 +9,6 @@ resources:
   - argus-company.yaml
   - argus-gateway.yaml
   - operator-ui.yaml
+  - voice-server.yaml
+  - vr-web.yaml
   - nginx.yaml

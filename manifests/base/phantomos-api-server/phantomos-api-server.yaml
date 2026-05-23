@@ -49,13 +49,26 @@ spec:
         - operator: Exists
           effect: NoSchedule
 
-      # /proc/net/route only makes sense in the host's network namespace,
-      # the operator-UI dials the robot's real IP, and the TCP probe
-      # to 8.8.8.8:53 should exit via the host's stack.
-      hostNetwork: true
+      # Cluster-native networking. The pod gets a normal cluster IP;
+      # other pods reach it via the phantomos-api-server Service in
+      # this namespace. External access (operator's PC / browser)
+      # still works through the hostPort:5000 declared on the
+      # container — kubelet's portmap CNI plugin sets up DNAT from
+      # node:5000 to the pod IP.
+      #
+      # Trade-off: any endpoint that reads network state out of
+      # /proc/net/* now reflects the POD's net namespace, not the
+      # host's. The api server must either:
+      #   (a) read /proc/1/net/route (host PID 1 stays in host net ns
+      #       because hostPID is still true), or
+      #   (b) invoke the read via HOST_EXEC_PREFIX (nsenter -t 1 -a),
+      #       which already brings net+pid+mount namespaces along.
+      # The internet-reachability probe (TCP 8.8.8.8:53) likewise
+      # must run under HOST_EXEC_PREFIX to test the robot's uplink
+      # rather than the pod's CNI bridge.
+      hostNetwork: false
       # Required so `nsenter -t 1 -a` can reach host PID 1.
       hostPID: true
-      dnsPolicy: ClusterFirstWithHostNet
 
       # Host-level singleton — no point starting a second copy.
       terminationGracePeriodSeconds: 15
@@ -108,13 +121,27 @@ spec:
           # CircleCI publishes this image to DockerHub on every push to
           # the default branch as foundationbot/phantomos-api-server:V-<ver>-<ts>
           # (and also retags :latest). Bump this tag when a new build needs to roll.
-          image: foundationbot/phantomos-api-server:V-1-0-1-20260430-001713
+          image: foundationbot/phantomos-api-server:V-1-0-2-20260522-203810
           imagePullPolicy: IfNotPresent
 
           ports:
+            # containerPort only — no hostPort. Single entry point
+            # into this service is the phantomos-api-server Service
+            # in this namespace. External clients (operator's PC,
+            # browser) reach it through argus-nginx (NodePort 30080
+            # in the argus ns), which proxies /api/control/ -> this
+            # Service. Anything pod-side uses cluster DNS directly.
+            #
+            # Why not hostPort:5000 too? It creates a second,
+            # node-pinned path (node:5000 -> pod) that bypasses the
+            # Service, breaks under multi-replica, and silently
+            # diverges from the proxied path during debugging.
+            # If you need raw :5000 for a one-off probe, use
+            #   kubectl -n phantom port-forward svc/phantomos-api-server 5000:5000
+            # — same on-the-wire result, no manifest carrying a
+            # second routing concept it doesn't need.
             - name: http
               containerPort: 5000
-              hostPort: 5000
 
           env:
             - name: API_HOST
@@ -141,12 +168,24 @@ spec:
             # bootstrap will inject them via kustomize.patches.
             - name: PHANTOM_MODELS
               value: /home/operator/models
-            # Override these in host-config.yaml as ConfigMap fields if
-            # you have on-disk compose project trees to expose:
+            # phantomos-api-server's internal/config/config.go defaults
+            # these to /home/gaurav/... — a developer's home from the
+            # original docker-compose era. On a production robot that
+            # path doesn't exist, so /phantom/slave-info,
+            # /positronic/* and friends fail with bash "No such file"
+            # errors. Pin them to /home/operator/... here so the base
+            # manifest carries the install convention; per-host
+            # overrides can still come through
+            # deployments.phantomos-api-server.env via
+            # host-config.yaml's kustomize.patches.
+            - name: PHANTOM_SCRIPT_DIRECTORY
+              value: /home/operator/foundation/ai-nix-phantom-apps
+            - name: POSITRONIC_CONTROL_PATH
+              value: /home/operator/foundation/positronic_control
+            # Override in host-config.yaml only if you have an on-disk
+            # docker-compose tree to expose:
             # - name: OPERATOR_UI_COMPOSE_PATH
             #   value: /home/operator/repos/argus/operator_ui
-            # - name: PHANTOM_SCRIPT_DIRECTORY
-            #   value: /home/operator/scripts
 
           securityContext:
             # nsenter into PID 1 needs CAP_SYS_ADMIN + CAP_SYS_PTRACE.
@@ -250,3 +289,30 @@ spec:
         # models entry that handles positronic).
         - name: phantom-models
           emptyDir: {}
+---
+# In-cluster Service so other pods (notably argus-nginx in the argus
+# namespace) can reach phantomos-api-server via stable DNS rather than
+# templating the node's external IP into config. The pod is
+# hostNetwork, so kubelet populates Endpoints with the node IP; kube-
+# proxy then routes Service traffic to <node-ip>:5000 where the pod is
+# actually bound. The DaemonSet keeps it node-local; the Service makes
+# it pod-addressable.
+#
+# Browser traffic still goes the other way (operator's tablet
+# -> robot:30080 -> argus-nginx -> THIS Service -> node:5000),
+# so the Service replaces the per-host IP indirection cleanly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: phantomos-api-server
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: phantomos-api-server
+spec:
+  selector:
+    app.kubernetes.io/name: phantomos-api-server
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      protocol: TCP
