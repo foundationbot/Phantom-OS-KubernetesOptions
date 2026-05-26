@@ -40,7 +40,6 @@ spec:
               mountPath: /dev/bus/usb
             - name: cameras-config
               mountPath: /opt/configs/cameras.json
-              subPath: cameras.json
               readOnly: true
           resources:
             requests:
@@ -58,6 +57,14 @@ spec:
           hostPath:
             path: /dev/bus/usb
             type: Directory
+        # Per-robot OAK config (MXIDs + socket map + intrinsics) lives
+        # on the host at /etc/phantom/head_camera.json — the
+        # phantom-jetson convention this fleet already uses. ArgoCD
+        # does NOT reconcile it. hostPath type: File makes the pod
+        # fail to schedule when the file is missing, which is the
+        # right loud-failure mode (no silent fallback to a stale
+        # fleet default).
         - name: cameras-config
-          configMap:
-            name: cameras-config
+          hostPath:
+            path: /etc/phantom/head_camera.json
+            type: File

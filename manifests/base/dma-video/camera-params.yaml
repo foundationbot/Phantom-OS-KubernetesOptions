@@ -29,7 +29,6 @@ spec:
           volumeMounts:
             - name: cameras-config
               mountPath: /opt/configs/cameras.json
-              subPath: cameras.json
               readOnly: true
           resources:
             requests:
@@ -39,6 +38,9 @@ spec:
               cpu: "1"
               memory: "512Mi"
       volumes:
+        # Per-robot OAK config from /etc/phantom/head_camera.json —
+        # see producer.yaml for full rationale.
         - name: cameras-config
-          configMap:
-            name: cameras-config
+          hostPath:
+            path: /etc/phantom/head_camera.json
+            type: File
