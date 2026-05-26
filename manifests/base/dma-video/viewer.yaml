@@ -27,11 +27,12 @@ spec:
         # back into CrashLoopBackOff, polluting logs and masking the
         # real upstream problem (producer can't open OAK cameras).
         #
-        # The queue contract: producer writes one ring-buffer file per
-        # camera under /dev/shm named cam<queue_id> (queue_id 0-5 per
-        # cameras-config). Presence of ANY cam* file means producer
-        # has at least started — that's the minimum required for
-        # video_viewer.py's mmap discovery to succeed.
+        # The queue contract: producer writes two files per camera
+        # under /dev/shm — video_meta_cam<queue_id> (metadata ring)
+        # and video_frames_cam<queue_id> (frame pool), queue_id 0-5
+        # per cameras-config. video_viewer.py probes video_meta_cam*
+        # to discover cameras (video_viewer.py:637), so presence of
+        # any video_meta_cam* file is the gate that matters.
         #
         # We wait indefinitely (no timeout) because producer is on the
         # same node; if producer is gone, viewer staying in Init is
@@ -45,9 +46,9 @@ spec:
             - -c
             - |
               set -eu
-              echo "waiting for producer to publish /dev/shm/cam* queues..."
+              echo "waiting for producer to publish /dev/shm/video_meta_cam* queues..."
               i=0
-              until ls /dev/shm/cam* >/dev/null 2>&1; do
+              until ls /dev/shm/video_meta_cam* >/dev/null 2>&1; do
                 i=$((i + 1))
                 # Heartbeat every ~30 s so the operator can see we're
                 # alive in `kubectl logs ... -c wait-for-producer`.
@@ -57,7 +58,7 @@ spec:
                 fi
                 sleep 2
               done
-              echo "producer queues present: $(ls /dev/shm/cam* | tr '\n' ' ')"
+              echo "producer queues present: $(ls /dev/shm/video_meta_cam* | tr '\n' ' ')"
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
