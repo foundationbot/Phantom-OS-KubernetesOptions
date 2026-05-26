@@ -381,6 +381,25 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     "chirpSettleQuietS":        "0.5",
     "chirpSettleMaxS":          "10.0",
     "chirpRrdDir":              "/dev/shm",
+    # Per-joint chirp amplitude overrides. Comma-separated NAME=VALUE list,
+    # parallel in shape to `jointBiasOverrides` above. Operators paste the
+    # precomputed 1/gear_ratio table from phantom-locomotion's static
+    # reference JSON (docs/diagnostics/chirp_amplitudes_mk2_lower_body.json)
+    # so each joint sees a mechanically-comparable command amplitude
+    # regardless of its gearbox. Default empty (use the global
+    # `chirpAmplitudeRad` for every joint). Inert when
+    # `testMode: joint-sweep`. Mirrors jointBiasOverrides' omit-if-empty
+    # behaviour so a bare diagnostic config doesn't ship a blank env var.
+    "chirpAmplitudeOverrides": "",
+    # CSV ladder of multipliers applied to baseline `position_kd` per
+    # drive at each rung of the chirp sweep. Default "1.0" (single
+    # rung, no Kd override) keeps existing chirp deployments unchanged.
+    # For the Bode-tuning sweep, operators set the full ladder:
+    #   positionKdMultipliers: "1.0,1.25,1.5,1.75,2.0"
+    # When more than one value is given, the chirp test repeats the
+    # full joint sweep at each Kd multiplier rung. Inert when
+    # `testMode: joint-sweep`.
+    "positionKdMultipliers":   "1.0",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -430,6 +449,8 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "chirpSettleQuietS":        "LOCOMOTION_DIAGNOSTIC_CHIRP_SETTLE_QUIET_S",
     "chirpSettleMaxS":          "LOCOMOTION_DIAGNOSTIC_CHIRP_SETTLE_MAX_S",
     "chirpRrdDir":              "LOCOMOTION_DIAGNOSTIC_CHIRP_RRD_DIR",
+    "chirpAmplitudeOverrides":  "LOCOMOTION_DIAGNOSTIC_CHIRP_AMPLITUDE_OVERRIDES",
+    "positionKdMultipliers":    "LOCOMOTION_DIAGNOSTIC_POSITION_KD_MULTIPLIERS",
 }
 
 # Fields that expand from a single `tol` value into a (BAND_LO, BAND_HI)
@@ -463,6 +484,10 @@ DIAGNOSTIC_OMIT_IF_EMPTY: frozenset[str] = frozenset({
     # symmetric ramp). Avoids forcing an explicit value in every
     # host-config when the symmetric default is fine.
     "returnRampS",
+    # FIR-345 chirp: when chirpAmplitudeOverrides is empty, every joint
+    # uses the global `chirpAmplitudeRad`. Mirrors jointBiasOverrides
+    # so a bare diagnostic config doesn't ship a blank env var.
+    "chirpAmplitudeOverrides",
 })
 
 # Diagnostic fields whose rendered ConfigMap value must be the
