@@ -309,6 +309,8 @@ images:
 #   chirpSettleQuietS:        0.5               # quiet duration before next gain
 #   chirpSettleMaxS:          10.0              # FATAL abort if joint won't quiet
 #   chirpRrdDir:              /dev/shm          # per-(joint, gain) .rrd output dir
+#   chirpAmplitudeOverrides:  ""                # see "Per-joint chirp amplitudes"
+#   positionKdMultipliers:    "1.0,1.25,1.5,1.75,2.0"   # Bode Kd-tuning ladder
 #
 # waitForStart: when `true` (default), the diagnostic subscribes to
 # /phantom/start_startup (Bool) and blocks until the operator presses
@@ -389,6 +391,30 @@ images:
 # Requires master-side dma-main clamp raised to 2.0 (FIR-348) for
 # multipliers > 1.0 to take effect.
 #
+# Per-joint chirp amplitudes (`chirpAmplitudeOverrides`): comma-
+# separated NAME=VALUE list, parallel in shape to `jointBiasOverrides`.
+# Each entry overrides the global `chirpAmplitudeRad` for that joint
+# so a high-gearbox joint (e.g. SpineYaw) sees a mechanically-
+# comparable command amplitude to a low-gearbox one (e.g. HipPitch).
+# The canonical 1/gear_ratio table lives in phantom-locomotion at
+#   docs/diagnostics/chirp_amplitudes_mk2_lower_body.json
+# — bench operators paste the full mk2-lower-body block from that
+# file straight into this field. Default empty (use the global
+# `chirpAmplitudeRad` for every joint). Chirp-mode-only — inert when
+# `testMode: joint-sweep`. Maps to env
+# LOCOMOTION_DIAGNOSTIC_CHIRP_AMPLITUDE_OVERRIDES; omit-if-empty so a
+# bare diagnostic config doesn't ship a blank env var.
+#
+# Position-Kd ladder (`positionKdMultipliers`): CSV ladder of
+# multipliers applied to baseline `position_kd` per drive. Default
+# "1.0,1.25,1.5,1.75,2.0" — the standard Bode-tuning sweep that
+# brackets nominal Kd. A single-rung "1.0" disables the ladder
+# (no Kd override, single chirp pass). When more than one value is
+# given, the chirp test repeats the full joint sweep at each Kd
+# multiplier rung, multiplying total runtime by len(rungs). Chirp-
+# mode-only — inert when `testMode: joint-sweep`. Maps to env
+# LOCOMOTION_DIAGNOSTIC_POSITION_KD_MULTIPLIERS.
+#
 # The default outPath lives on the DaemonSet's /recordings hostPath
 # mount (host /root/recordings, same path dma-recorder writes .rrd
 # files to). Reports survive pod restarts and are reachable from the
@@ -451,6 +477,24 @@ images:
 #     masterGain: 0.3
 #     chirpRrdDir: /recordings/chirp
 #     # everything else defaults: full 13-joint sweep at 0.5,0.7,...,1.5×
+#
+# Example — chirp test sweeping per-joint amplitudes (1/gear_ratio) across
+# a positionKd ladder. Bench operators paste the chirpAmplitudeOverrides
+# values from phantom-locomotion's static reference JSON
+# (docs/diagnostics/chirp_amplitudes_mk2_lower_body.json) so each joint
+# sees a mechanically-comparable command amplitude. The 5-rung default
+# Kd ladder repeats the full joint sweep at each rung — expect roughly
+# 5× the single-pass runtime; subset `joints:` or shorten the ladder
+# for a quicker characterisation pass.
+# phantomLocomotion:
+#   mode: diagnostic
+#   diagnostic:
+#     testMode: chirp
+#     chirpAmplitudeOverrides: "SpineYaw=0.04388,LeftHipPitch=0.06794, ..."
+#     positionKdMultipliers: "1.0,1.25,1.5,1.75,2.0"
+#     masterGain: 1.0
+#     joints: all
+#     chirpRrdDir: /recordings/chirp
 #
 # Example — host /data2 partition holds recordings instead of the
 # default /root/recordings. The phantom-locomotion DaemonSet's base
