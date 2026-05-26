@@ -392,12 +392,14 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     # behaviour so a bare diagnostic config doesn't ship a blank env var.
     "chirpAmplitudeOverrides": "",
     # CSV ladder of multipliers applied to baseline `position_kd` per
-    # drive at each rung of the chirp sweep. Default
-    # "1.0,1.25,1.5,1.75,2.0" is the Bode-tuning sweep; a single-rung
-    # "1.0" disables the ladder (no Kd override). When more than one
-    # value is given, the chirp test repeats the full joint sweep at
-    # each Kd multiplier rung. Inert when `testMode: joint-sweep`.
-    "positionKdMultipliers":   "1.0,1.25,1.5,1.75,2.0",
+    # drive at each rung of the chirp sweep. Default "1.0" (single
+    # rung, no Kd override) keeps existing chirp deployments unchanged.
+    # For the Bode-tuning sweep, operators set the full ladder:
+    #   positionKdMultipliers: "1.0,1.25,1.5,1.75,2.0"
+    # When more than one value is given, the chirp test repeats the
+    # full joint sweep at each Kd multiplier rung. Inert when
+    # `testMode: joint-sweep`.
+    "positionKdMultipliers":   "1.0",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
