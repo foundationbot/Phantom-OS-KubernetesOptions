@@ -374,6 +374,13 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     "chirpAmplitudeHardCapRad": "0.30",
     "chirpFreqMinHz":           "0.05",
     "chirpFreqMaxHz":           "15.0",
+    # Diagnostic control-loop push rate (Hz) for desired commands. "0.0"
+    # (default) derives the rate from the observed /actuals dt (~50 Hz);
+    # set explicitly (e.g. "200") to push faster. Important for chirp
+    # fidelity: run at >= ~10x chirpFreqMaxHz to resolve the sweep
+    # (50 Hz undersamples a 15 Hz chirp). Capped by the /actuals rate
+    # (~500 Hz). Applies to both joint-sweep and chirp testMode.
+    "cycleRateHz":              "0.0",
     "chirpDurationS":           "60.0",
     "chirpEnvelopeS":           "0.5",
     "chirpGainMultipliers":     "0.5,0.7,0.9,1.1,1.3,1.5",
@@ -442,6 +449,7 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "chirpAmplitudeHardCapRad": "LOCOMOTION_DIAGNOSTIC_CHIRP_AMPLITUDE_HARD_CAP_RAD",
     "chirpFreqMinHz":           "LOCOMOTION_DIAGNOSTIC_CHIRP_FREQ_MIN_HZ",
     "chirpFreqMaxHz":           "LOCOMOTION_DIAGNOSTIC_CHIRP_FREQ_MAX_HZ",
+    "cycleRateHz":              "LOCOMOTION_DIAGNOSTIC_CYCLE_RATE_HZ",
     "chirpDurationS":           "LOCOMOTION_DIAGNOSTIC_CHIRP_DURATION_S",
     "chirpEnvelopeS":           "LOCOMOTION_DIAGNOSTIC_CHIRP_ENVELOPE_S",
     "chirpGainMultipliers":     "LOCOMOTION_DIAGNOSTIC_CHIRP_GAIN_MULTIPLIERS",
