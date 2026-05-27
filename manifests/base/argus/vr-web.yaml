@@ -134,6 +134,16 @@ metadata:
   namespace: argus
 spec:
   replicas: 1
+  # hostPort:8010 is a node-level singleton — only one pod per node can
+  # bind it. Default RollingUpdate would surge a second pod first, which
+  # then sits Pending ("node(s) didn't have free ports") until the old
+  # one is killed manually. bootstrap-robot.sh phase 6 runs
+  # `rollout restart deploy/vr-web` on every bootstrap to pick up new
+  # TLS certs / pairing CM, so this matters in practice. Recreate makes
+  # the kill-then-start order explicit (~5 s gap during which :8010 is
+  # down). Same reasoning as manifests/base/registry/registry.yaml.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: vr-web
