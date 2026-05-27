@@ -302,6 +302,8 @@ images:
 #   chirpAmplitudeHardCapRad: 0.30              # safety cap on amplitude
 #   chirpFreqMinHz:           0.05              # log sweep lower bound
 #   chirpFreqMaxHz:           15.0              # log sweep upper bound
+#   cycleRateHz:              0.0               # diag loop push rate (Hz); 0 = auto (~50 Hz)
+#                                                # set >= 10x chirpFreqMaxHz for chirp fidelity
 #   chirpDurationS:           60.0              # per (joint, gain) sweep length
 #   chirpEnvelopeS:           0.5               # pre/post-ramp fade-in
 #   chirpGainMultipliers:     "0.5,0.7,0.9,1.1,1.3,1.5"   # x masterGain
@@ -391,6 +393,14 @@ images:
 # All chirp* fields are inert when testMode is `joint-sweep` (default).
 # Requires master-side dma-main clamp raised to 2.0 (FIR-348) for
 # multipliers > 1.0 to take effect.
+#
+# Control-loop rate (`cycleRateHz`): the diagnostic pushes desired
+# commands at this rate. 0 (default) derives it from the observed
+# /actuals dt, which lands at ~50 Hz — fine for joint-sweep but it
+# UNDERSAMPLES the chirp (a 15 Hz sweep at 50 Hz is past Nyquist). For
+# chirp runs set it explicitly to >= ~10x chirpFreqMaxHz (e.g. 200); the
+# effective rate is capped by the /actuals publish rate (~500 Hz).
+# Applies to both testMode values.
 #
 # Per-joint chirp amplitudes (`chirpAmplitudeOverrides`): comma-
 # separated NAME=VALUE list, parallel in shape to `jointBiasOverrides`.
