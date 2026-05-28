@@ -284,6 +284,16 @@ nic_write_udev_rule() {
         echo "nic_write_udev_rule: invalid iface name: $iface" >&2
         return 1
     fi
+    # Advisory guard (non-fatal): a default-looking iface name means the
+    # rename is a no-op and consumers expecting ecatN won't find the
+    # interface. This is the misconfiguration that bound ecat1's MAC to
+    # NAME="enP2p1s0". Warn but proceed — the operator may know better.
+    if nic_iface_looks_default "$iface"; then
+        echo "nic_write_udev_rule: WARNING: iface name '$iface' looks like a" \
+             "default kernel NIC name, not the ecatN convention. Binding the" \
+             "EtherCAT NIC to its own default name is a no-op rename; consumers" \
+             "(e.g. INTERFACE=ecat1) will not find it. Did you mean 'ecat0'/'ecat1'?" >&2
+    fi
 
     local rule_file="${NIC_UDEV_RULE_FILE}"
     local rule_dir
