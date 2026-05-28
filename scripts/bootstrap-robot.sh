@@ -1283,6 +1283,19 @@ host_config() {
     fail "configure-k0s-containerd-mirror.sh"
   fi
 
+  # OAK USB power — install udev rule disabling autosuspend for VID
+  # 03e7 so libusb's claim+rebind during DepthAI firmware boot doesn't
+  # race the kernel powering the device down. Idempotent; harmless on
+  # hosts without OAK cameras (rule just never fires). Doesn't touch
+  # k0s, so it runs above the post-config Ready wait below.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  bash $REPO_ROOT/scripts/configure-usb-power.sh"
+  elif bash "$REPO_ROOT/scripts/configure-usb-power.sh"; then
+    pass "OAK USB autosuspend disabled (udev rule installed)"
+  else
+    fail "configure-usb-power.sh"
+  fi
+
   # NVIDIA runtime — autodetect, override-able via --skip-nvidia
   if [ "$SKIP_NVIDIA" = 1 ]; then
     skip "nvidia runtime  (--skip-nvidia)"

@@ -94,6 +94,9 @@ stacks:
 #   phantom-models       core stack — positronic-control's load-models init.
 #                          manifest uses localhost:5443/phantom-models.
 #                          Bundles model weights / configs (~GB).
+#                          NOTE: phantomos-api-server no longer consumes this
+#                          image — it bind-mounts /root/models off the host
+#                          directly. Only positronic-control still pulls it.
 #   phantom-policies     core stack — phantom-locomotion's load-policies init.
 #                          manifest uses localhost:5443/phantom-policies.
 #                          Slim image with ONNX files at /models/policies/.
@@ -638,6 +641,10 @@ nodeLabels:
 #
 #   phantomos-api-server:
 #     mounts:
+#       # The base manifest already bind-mounts host /root/models to
+#       # the api server's expected in-pod path (/home/operator/models).
+#       # Don't redeclare that here — only add extra paths the api
+#       # server needs.
 #       - {name: operator-ui-repo, host: /opt/argus/operator_ui,
 #                                  container: /home/operator/repos/argus/operator_ui}
 #       - {name: phantom-scripts,  host: /opt/phantom/scripts,

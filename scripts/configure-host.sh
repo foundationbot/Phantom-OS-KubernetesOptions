@@ -130,7 +130,9 @@ die() { err "$1"; exit "${2:-1}"; }
 # and its primary IPv4 address. Prints "<iface>\t<ip>" on success;
 # returns non-zero with no output on failure (no default route, no
 # IPv4 on the interface, missing `ip` tool, etc.). Used by the AI PC
-# pairing wizard step's "auto-detect" option.
+# pairing wizard step's "auto-detect" option as a LAST-RESORT
+# fallback when no Tailscale identity is available — see the
+# corresponding warning in the prompt block.
 detect_gateway_iface_ip() {
   command -v ip >/dev/null 2>&1 || return 1
   local iface ip4
@@ -141,6 +143,24 @@ detect_gateway_iface_ip() {
           | awk '{print $4}' | cut -d/ -f1 | head -1)
   [ -n "$ip4" ] || return 1
   printf '%s\t%s\n' "$iface" "$ip4"
+}
+
+# Read this host's own Tailscale IPv4 (the address other Tailscale
+# nodes use to reach it). Prefer `tailscale ip -4` over parsing
+# `ifconfig tailscale0` because it returns nothing — and exit 1 —
+# when the daemon is not running / not logged in, which is the
+# signal the caller wants. Returns the IP on stdout, non-zero on
+# any failure. Used by the AI PC pairing wizard's auto-detect:
+# Tailscale identity is the only address that is (a) stable across
+# DHCP rebinds, (b) routable from off-LAN operator machines, and
+# (c) advertised correctly as a WebRTC ICE host candidate by
+# mediamtx (hostNetwork pod sees tailscale0).
+detect_tailscale_self_ip() {
+  command -v tailscale >/dev/null 2>&1 || return 1
+  local ip
+  ip=$(tailscale ip -4 2>/dev/null | head -1)
+  [ -n "$ip" ] || return 1
+  printf '%s\n' "$ip"
 }
 
 # Read a value from stdin with a default. Pressing enter accepts the
@@ -620,31 +640,52 @@ ok "robot = $robot"
 
 # --- AI PC URL ---
 heading "AI PC pairing"
-hint "URL of the AI PC paired with this robot. operator-ui talks to it."
-hint "Two ways to set this:"
-hint "  1) enter a Tailscale IP/URL manually (recommended for production)"
-hint "  2) auto-detect from this robot's default-gateway interface"
-hint "     (use when the AI PC sits on the same LAN as the robot's"
-hint "     gateway-facing port, or when robot and AI PC are colocated)"
+hint "URL of the AI PC paired with this robot. operator-ui, vr-web's"
+hint "ROS bridge / camera proxies, and mediamtx WebRTC ICE all derive"
+hint "their target host from this single value."
+hint ""
+hint "Three address kinds, in decreasing order of robustness:"
+hint "  - Tailscale IPv4 (e.g. 100.124.202.97) — per-node identity,"
+hint "    stable across reboots and DHCP, routable from off-LAN"
+hint "    operator machines, advertised as a working WebRTC ICE host"
+hint "    candidate by mediamtx. THIS IS THE RIGHT ANSWER."
+hint "  - Tailscale FQDN (e.g. mk....ts.net) — same routing, more"
+hint "    stable identity, BUT pods can't resolve .ts.net unless"
+hint "    CoreDNS is configured to forward to 100.100.100.100. Don't"
+hint "    use until that's set up."
+hint "  - LAN IPv4 — DHCP-volatile and only works when robot + AI PC"
+hint "    + operator share an L2 broadcast domain. Almost never the"
+hint "    right answer in production."
+hint ""
+hint "Auto-detect will try Tailscale first and only fall back to the"
+hint "default-gateway LAN IP with a loud warning."
 
 ai_pc_url=""
 if [ "$YES" != 1 ]; then
-  if confirm "Auto-detect AI PC URL from default-gateway interface?" "n"; then
-    if iface_ip=$(detect_gateway_iface_ip); then
+  if confirm "Auto-detect AI PC URL?" "y"; then
+    if ts_ip=$(detect_tailscale_self_ip); then
+      ok "tailscale IPv4:    $ts_ip"
+      candidate="http://$ts_ip:5000"
+      ai_pc_url="$candidate"
+      ok "aiPcUrl = $ai_pc_url  (auto-detected from tailscale0)"
+    elif iface_ip=$(detect_gateway_iface_ip); then
       iface=$(printf '%s' "$iface_ip" | cut -f1)
       ip=$(printf '%s'    "$iface_ip" | cut -f2)
-      ok "gateway interface: $iface"
-      ok "interface IP:      $ip"
+      warn "tailscale not running / not logged in on this host"
+      warn "falling back to LAN gateway iface $iface ($ip)"
+      warn "this value will break the next time DHCP reassigns the"
+      warn "lease — strongly prefer joining tailscale and re-running"
+      warn "configure-host.sh. Continuing for now."
       candidate="http://$ip:5000"
       if validate_url "$candidate"; then
         ai_pc_url="$candidate"
-        ok "aiPcUrl = $ai_pc_url  (auto-detected)"
+        ok "aiPcUrl = $ai_pc_url  (LAN fallback — fragile)"
       else
         err "auto-detected URL failed validation: $candidate"
         err "falling back to manual entry"
       fi
     else
-      err "could not detect a default gateway interface / IP on this host"
+      err "no tailscale IP and no default-gateway IP detected"
       err "falling back to manual entry"
     fi
   fi
@@ -653,7 +694,7 @@ fi
 if [ -z "$ai_pc_url" ]; then
   example "http://100.124.202.97:5000"
   ai_default="$seed_ai"
-  ai_pc_url="$(ask "aiPcUrl" "$ai_default" "Full URL with scheme + port. Tailscale IP recommended." validate_url)"
+  ai_pc_url="$(ask "aiPcUrl" "$ai_default" "Full URL with scheme + port. Tailscale IPv4 recommended." validate_url)"
   ok "aiPcUrl = $ai_pc_url"
 fi
 
