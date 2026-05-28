@@ -205,3 +205,18 @@ nic_validate_iface_name() {
     fi
     return 0
 }
+
+# ---- nic_iface_looks_default <name> ----------------------------------------
+# Returns 0 if <name> looks like a kernel/udev *default* NIC name
+# (eth*, en* — incl. eno/ens/enp/enx/enP — wl*, ww*, usb*, mgbe*, igb*,
+# igc*, em*) rather than a deliberate EtherCAT name (the ecatN convention).
+#
+# Advisory predicate only — it does not reject anything. Binding the
+# EtherCAT iface to a NIC's own default name is almost always a
+# misconfiguration: the udev "rename" is a no-op, and the consumer
+# (dma-ethercat.env INTERFACE=ecatN) never finds the interface. Callers
+# warn on a match so the operator notices before shipping the config.
+nic_iface_looks_default() {
+    local name="${1:-}"
+    [[ "$name" =~ ^(en|eth|wl|ww|usb|mgbe|igb|igc|em)[0-9a-zA-Z] ]]
+}
