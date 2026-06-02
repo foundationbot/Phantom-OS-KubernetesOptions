@@ -4995,6 +4995,43 @@ PY
   "${KUBECTL[@]}" -n argocd patch app "$app" \
     --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 \
     && pass "triggered sync of $app"
+
+  # FIR-407 follow-up: roll the positronic-control DaemonSet if the live
+  # ConfigMap's PHANTOM_CMD doesn't match the value we just declared. K8s
+  # doesn't restart pods on ConfigMap data changes (env-from is read once
+  # at container start), so without this the running pod keeps its stale
+  # PHANTOM_CMD until something else kills it. We poll the live CM for up
+  # to a few seconds to let Argo sync land, then compare and rollout-
+  # restart only on actual change. No-op re-runs (same desired value)
+  # skip the restart so phase 12 stays idempotent.
+  local desired_phantom_cmd="$launch_command"
+  if [ "$field_absent" = 1 ]; then desired_phantom_cmd=""; fi
+  local current_phantom_cmd=""
+  current_phantom_cmd="$("${KUBECTL[@]}" -n positronic get cm positronic-config \
+      -o jsonpath='{.data.PHANTOM_CMD}' 2>/dev/null || true)"
+  if [ "$desired_phantom_cmd" = "$current_phantom_cmd" ]; then
+    return  # no-op — nothing to roll
+  fi
+  # Argo sync runs async; poll up to ~10s for the ConfigMap to converge
+  # to the desired value before rolling. If sync stalls, warn and leave
+  # the rollout to a future operator action — don't roll the pod with a
+  # stale value.
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    current_phantom_cmd="$("${KUBECTL[@]}" -n positronic get cm positronic-config \
+        -o jsonpath='{.data.PHANTOM_CMD}' 2>/dev/null || true)"
+    [ "$current_phantom_cmd" = "$desired_phantom_cmd" ] && break
+  done
+  if [ "$current_phantom_cmd" != "$desired_phantom_cmd" ]; then
+    warn "PHANTOM_CMD patch applied to Argo but live ConfigMap hasn't converged after 10s; skipping rollout (operator must restart positronic-control manually)"
+    return
+  fi
+  if "${KUBECTL[@]}" -n positronic rollout restart daemonset/positronic-control >/dev/null 2>&1; then
+    pass "rolled positronic-control DaemonSet (PHANTOM_CMD change applied)"
+  else
+    warn "kubectl rollout restart daemonset/positronic-control failed; pod will roll on next pod-kill"
+  fi
 }
 
 # ---- phase 13: dev hostPath mounts (per-host) --------------------------
