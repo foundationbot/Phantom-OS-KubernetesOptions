@@ -1159,6 +1159,41 @@ def _build_deployment_patch(
     return yaml.safe_dump(patch, sort_keys=False), warnings
 
 
+# Target descriptor for the positronic-config ConfigMap that supplies
+# PHANTOM_CMD to the positronic-control DaemonSet via envFrom. Lives in
+# the `core` stack alongside the DaemonSet itself. Used by
+# `positronic.launchCommand` (host-config.yaml) -> Argo kustomize.patches
+# so the launch command becomes declarative (source-of-truth =
+# host-config.yaml) and survives every Argo sync. See docs/internal/
+# phantom-cmd-persistence.md.
+POSITRONIC_CONFIGMAP_TARGET: dict[str, str] = {
+    "stack": "core",
+    "kind": "ConfigMap",
+    "name": "positronic-config",
+    "namespace": "positronic",
+}
+
+
+def _build_positronic_phantom_cmd_patch(value: str) -> str:
+    """Render a strategic-merge YAML patch that stamps PHANTOM_CMD into
+    the positronic-config ConfigMap. `value` is the operator-supplied
+    launch command from host-config.yaml's `positronic.launchCommand`."""
+    target = POSITRONIC_CONFIGMAP_TARGET
+    patch = {
+        "apiVersion": "v1",
+        "kind": target["kind"],
+        "metadata": {
+            "name": target["name"],
+            "namespace": target["namespace"],
+        },
+        # `data` is a strategic-merge map — kustomize merges by key, so
+        # only PHANTOM_CMD is touched; ROS_DOMAIN_ID (and any other key)
+        # falls through from the base ConfigMap.
+        "data": {"PHANTOM_CMD": value},
+    }
+    return yaml.safe_dump(patch, sort_keys=False)
+
+
 def cmd_get_deployment_patches_json(cfg: dict) -> int:
     """Emit a list of patch entries grouped by owning stack:
     [{"stack": "core", "patches": [{target, patch}, ...]}, ...].
@@ -1209,6 +1244,33 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
             },
             "patch": patch_yaml,
         })
+
+    # positronic.launchCommand — declarative PHANTOM_CMD persistence.
+    # When set, emit a strategic-merge patch on the positronic-config
+    # ConfigMap so the next Argo sync stamps PHANTOM_CMD = <value>
+    # (instead of reverting it to "" from the base manifest). When the
+    # field is absent, no patch is emitted — the base manifest's
+    # `PHANTOM_CMD: ""` flows through and the DaemonSet falls back to
+    # `sleep infinity` (legacy / dev-mode behavior).
+    #
+    # Operators can still override at runtime with
+    # `positronic.sh set-cmd <cmd>`, but that patch is transient: the
+    # next `bootstrap-robot.sh --image-overrides` (or --deployments)
+    # run will overwrite it with whatever host-config.yaml says.
+    positronic_block = cfg.get("positronic")
+    if isinstance(positronic_block, dict):
+        launch_command = positronic_block.get("launchCommand")
+        if launch_command is not None:
+            patch_yaml = _build_positronic_phantom_cmd_patch(str(launch_command))
+            tgt = POSITRONIC_CONFIGMAP_TARGET
+            by_stack.setdefault(tgt["stack"], []).append({
+                "target": {
+                    "kind": tgt["kind"],
+                    "name": tgt["name"],
+                    "namespace": tgt["namespace"],
+                },
+                "patch": patch_yaml,
+            })
 
     for w in all_warnings:
         print(f"warning: {w}", file=sys.stderr)
@@ -1485,6 +1547,32 @@ def cmd_validate(cfg: dict) -> int:
             errors.append(
                 f"gitSource={git_source!r}: must be 'local' or 'remote'"
             )
+
+    # positronic: optional top-level block. Currently exposes a single
+    # field — launchCommand — which makes PHANTOM_CMD declarative (every
+    # bootstrap re-applies it via a kustomize.patches strategic-merge on
+    # the positronic-config ConfigMap). When absent, the base manifest's
+    # `PHANTOM_CMD: ""` wins and the pod runs sleep infinity (legacy /
+    # dev-mode behavior). See docs/internal/phantom-cmd-persistence.md.
+    positronic_block = cfg.get("positronic")
+    if positronic_block is not None:
+        if not isinstance(positronic_block, dict):
+            errors.append("'positronic' must be a mapping")
+        else:
+            lc = positronic_block.get("launchCommand")
+            if lc is not None and not isinstance(lc, str):
+                errors.append(
+                    f"positronic.launchCommand: must be a string "
+                    f"(got: {lc!r})"
+                )
+            # Surface unknown keys so typos like `launchCmd` don't
+            # silently fall through to "no patch emitted".
+            for key in positronic_block.keys():
+                if key not in ("launchCommand",):
+                    errors.append(
+                        f"positronic.{key}: unknown field "
+                        f"(known: launchCommand)"
+                    )
 
     # stacks: must be a mapping; only known stack names; required
     # stacks cannot be disabled; per-stack fields type-checked.
