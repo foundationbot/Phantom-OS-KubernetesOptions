@@ -8,8 +8,19 @@
 # Knobs:
 #   ROS_DOMAIN_ID — base default "1". mk09 does not patch this.
 #   PHANTOM_CMD   — empty -> `sleep infinity` (interactive dev mode).
-#                   Populate it to flip the pod into service mode and
-#                   rollout restart the Deployment.
+#                   Populate it to flip the pod into service mode.
+#
+# PHANTOM_CMD persistence (Option A — docs/internal/phantom-cmd-persistence.md):
+#   The CANONICAL way to set PHANTOM_CMD is via host-config.yaml:
+#       deployments:
+#         positronic-control:
+#           launchCommand: "ros2 launch <pkg> <launch>.py <args>"
+#   Then `bootstrap-robot.sh --image-overrides` (or --deployments) injects
+#   a strategic-merge patch on this ConfigMap into the core Argo app's
+#   spec.source.kustomize.patches, so the value stamps on every sync.
+#   `positronic.sh set-cmd <cmd>` is durable by default (FIR-408): it
+#   edits host-config.yaml + re-runs bootstrap. Pass --transient for the
+#   legacy one-off kubectl-patch behavior.
 apiVersion: v1
 kind: ConfigMap
 metadata:

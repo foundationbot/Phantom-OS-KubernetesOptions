@@ -617,15 +617,32 @@ nodeLabels:
 #
 # Known deployment keys (others are rejected):
 #   positronic-control     core stack, container 'positronic-control'
+#                                       (also accepts launchCommand — see below)
 #   phantomos-api-server   core stack, container 'api'
 #   phantom-locomotion     core stack, container 'phantom-locomotion'
 #                                       (default /recordings mount, override host path here)
 #   dma-recorder           core stack, container 'recorder' (DMA.streams .rrd writer)
 #   rerun-streamer         core stack, container 'streamer' (DMA.streams live viewer)
 #
+# deployments.positronic-control.launchCommand (optional):
+#   The command the positronic-control pod's entrypoint runs (exec'd via
+#   PHANTOM_CMD env). When unset, the pod runs `sleep infinity` (interactive
+#   dev mode). The value flows into a strategic-merge patch on the
+#   positronic-config ConfigMap (data.PHANTOM_CMD), injected into the
+#   core Argo Application's spec.source.kustomize.patches by
+#   bootstrap-robot.sh phase 12 (image-overrides) and phase 13
+#   (deployments). This makes PHANTOM_CMD declarative — every Argo sync
+#   re-applies it, so the value survives `kubectl apply -k` cycles, pod
+#   rolls, and operator-side ConfigMap edits.
+#
+#   `positronic.sh set-cmd <cmd>` is durable by default (FIR-408): it
+#   edits this field + re-runs bootstrap. Pass --transient for the legacy
+#   one-off kubectl-patch behavior. See docs/internal/phantom-cmd-persistence.md.
+#
 # deployments:
 #   positronic-control:
 #     privileged: false
+#     launchCommand: "ros2 launch phantom_policies dma_policy_launch.py policy_path:=/root/models/walking-imu-hard-railing"
 #     mounts:
 #       # Production-canonical paths (every robot)
 #       - {name: data,        host: /data,                container: /data}

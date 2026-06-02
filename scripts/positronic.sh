@@ -196,11 +196,28 @@ ${C_BOLD}Subcommands:${C_RESET}
                                examples.
   gpu-test                     Run a PyTorch CUDA matmul inside the pod;
                                PASS iff cuda is available and result != 0.
-  set-cmd <command...>         Set PHANTOM_CMD in $CONFIGMAP_NAME to the
-                               joined args, then rollout restart the
-                               DaemonSet so the new command takes effect.
-  clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
-                               mode → sleep infinity), rollout restart.
+  set-cmd [--transient] <command...>
+                               DURABLE by default (FIR-408): edits
+                               deployments.positronic-control.launchCommand
+                               in $HOST_CONFIG_FILE, runs
+                               'bootstrap-robot.sh --image-overrides' to
+                               propagate via Argo, then rollout restarts
+                               the DaemonSet. The value survives every
+                               Argo sync.
+                               With --transient: skip the host-config
+                               edit + bootstrap; just kubectl patch the
+                               live ConfigMap and rollout. The next
+                               bootstrap sync will revert to whatever
+                               host-config says — use for one-off test
+                               runs that shouldn't persist.
+  clear-cmd [--transient]      DURABLE by default: removes the
+                               launchCommand field from host-config and
+                               re-runs bootstrap (which scrubs the
+                               kustomize.patches entry; Argo reverts
+                               PHANTOM_CMD to the base manifest's "").
+                               --transient: kubectl-patch the live
+                               ConfigMap to empty without touching
+                               host-config.
   push-image <src> [--tag <dest-tag>] [--no-redeploy]
                                Tag local docker image <src> as
                                $IMAGE_NAME:<dest-tag>, push it, and bump
@@ -259,7 +276,9 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh exec locomotion -- sh
   bash scripts/positronic.sh gpu-test
   bash scripts/positronic.sh set-cmd ros2 launch srg_localization global_positioning_launch.py
+  bash scripts/positronic.sh set-cmd --transient sleep 60     # one-off
   bash scripts/positronic.sh clear-cmd
+  bash scripts/positronic.sh clear-cmd --transient            # one-off
   bash scripts/positronic.sh push-image positronic-control:0.2.45-cu130
   bash scripts/positronic.sh push-image phantom-cuda:dev --tag 0.2.45-dev
   bash scripts/positronic.sh push-image positronic-control:0.2.45 --no-redeploy
@@ -618,11 +637,13 @@ print(f"matmul sum: {s}")
 
 # ---------- subcommand: set-cmd / clear-cmd -------------------------------
 
-# Patch the ConfigMap's PHANTOM_CMD field. Pass the desired value as $1.
-# Uses `kubectl patch --type=merge -p <json>` and JSON-escapes the value
-# in pure Python to avoid any shell-quoting hazards: the user might pass
-# colons, ampersands, dollars, single+double quotes, etc.
-patch_phantom_cmd() {
+# Patch the live ConfigMap's PHANTOM_CMD field + rollout. Used by both
+# durable mode (after the host-config edit + bootstrap have already
+# propagated the change via Argo) and --transient mode (alone). Pass the
+# desired value as $1. JSON-escapes via Python to avoid shell-quoting
+# hazards: the user might pass colons, ampersands, dollars, single +
+# double quotes, etc.
+_patch_live_configmap_and_rollout() {
   local value="$1"
   local json
   if ! json="$(VALUE="$value" python3 -c '
@@ -659,8 +680,94 @@ print(json.dumps({"data": {"PHANTOM_CMD": os.environ["VALUE"]}}))
   printf '\n  next: bash scripts/positronic.sh logs -f\n'
 }
 
+# Locate bootstrap-robot.sh relative to this script. Honors an explicit
+# BOOTSTRAP_SCRIPT env override for non-standard installs.
+_resolve_bootstrap_script() {
+  if [ -n "${BOOTSTRAP_SCRIPT:-}" ]; then
+    [ -x "$BOOTSTRAP_SCRIPT" ] || die "BOOTSTRAP_SCRIPT not executable: $BOOTSTRAP_SCRIPT"
+    printf '%s\n' "$BOOTSTRAP_SCRIPT"
+    return 0
+  fi
+  local candidate="$REPO/scripts/bootstrap-robot.sh"
+  if [ -r "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if [ -r /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh ]; then
+    printf '%s\n' /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh
+    return 0
+  fi
+  die "could not locate bootstrap-robot.sh (try BOOTSTRAP_SCRIPT=<path>)"
+}
+
+# Durable set/clear: edit host-config.yaml, propagate via
+# bootstrap-robot.sh --image-overrides (which patches the Argo
+# Application's kustomize.patches), then patch the live ConfigMap + roll
+# the DaemonSet so the change takes effect immediately. The next pod
+# roll and every Argo sync afterwards carries the new value.
+_durable_set_phantom_cmd() {
+  local value="$1"  # empty string -> clear
+  [ -r "$HOST_CONFIG_FILE" ] || die "$HOST_CONFIG_FILE not readable"
+  [ -r "$HOST_CONFIG_HELPER" ] || die "$HOST_CONFIG_HELPER not readable"
+  local bootstrap_script
+  bootstrap_script="$(_resolve_bootstrap_script)"
+
+  bold "Updating $HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ]; then
+    if [ -z "$value" ]; then
+      info "would clear deployments.positronic-control.launchCommand"
+    else
+      info "would set deployments.positronic-control.launchCommand = $value"
+    fi
+  else
+    if [ -z "$value" ]; then
+      python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" \
+        clear-positronic-launch-command \
+        || die "failed to clear launchCommand in $HOST_CONFIG_FILE"
+      ok "cleared deployments.positronic-control.launchCommand"
+    else
+      python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" \
+        set-positronic-launch-command "$value" \
+        || die "failed to set launchCommand in $HOST_CONFIG_FILE"
+      ok "set deployments.positronic-control.launchCommand"
+    fi
+  fi
+
+  bold "Propagating via $bootstrap_script --image-overrides"
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would run: bash $bootstrap_script --image-overrides -y"
+  else
+    bash "$bootstrap_script" --image-overrides -y \
+      || die "bootstrap-robot.sh --image-overrides failed"
+  fi
+
+  # Now patch the live ConfigMap so the new value takes effect immediately
+  # — Argo's reconcile would catch up within ~3 min but the operator
+  # expects set-cmd to be effective when it returns.
+  _patch_live_configmap_and_rollout "$value"
+
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  printf '\n  %sdurable:%s host-config.yaml updated; the value survives every Argo sync.\n' \
+    "$C_GREEN" "$C_RESET"
+}
+
 cmd_set_cmd() {
-  require_kubectl
+  local transient=0
+  # Pull the --transient flag from anywhere in the arglist BEFORE any
+  # positional args. Anything after the first non-flag positional is
+  # treated as the command (the user may legitimately pass --transient
+  # as an argv to the inner command if they really want to).
+  local _filtered=() _saw_positional=0
+  for a in "$@"; do
+    if [ "$_saw_positional" = 0 ] && [ "$a" = "--transient" ]; then
+      transient=1
+      continue
+    fi
+    [ "$a" != "--transient" ] && _saw_positional=1
+    _filtered+=("$a")
+  done
+  set -- "${_filtered[@]}"
+
   if [ $# -eq 0 ]; then
     die "set-cmd needs at least one argument (the command to run inside the pod)"
   fi
@@ -668,12 +775,38 @@ cmd_set_cmd() {
   #   set-cmd ros2 launch foo bar.launch.py arg:=value
   # and "$*" reflects that joined verbatim.
   local joined="$*"
-  patch_phantom_cmd "$joined"
+
+  if [ "$transient" = 1 ]; then
+    require_kubectl
+    bold "TRANSIENT mode — live ConfigMap only, host-config.yaml not touched"
+    info "next bootstrap sync will revert to host-config's value"
+    _patch_live_configmap_and_rollout "$joined"
+    return $?
+  fi
+
+  require_kubectl
+  _durable_set_phantom_cmd "$joined"
 }
 
 cmd_clear_cmd() {
+  local transient=0
+  for a in "$@"; do
+    case "$a" in
+      --transient) transient=1 ;;
+      *) die "clear-cmd takes no positional args (got: $a)" ;;
+    esac
+  done
+
+  if [ "$transient" = 1 ]; then
+    require_kubectl
+    bold "TRANSIENT mode — live ConfigMap only, host-config.yaml not touched"
+    info "next bootstrap sync will revert to host-config's value"
+    _patch_live_configmap_and_rollout ""
+    return $?
+  fi
+
   require_kubectl
-  patch_phantom_cmd ""
+  _durable_set_phantom_cmd ""
 }
 
 # ---------- subcommand: push-image ----------------------------------------

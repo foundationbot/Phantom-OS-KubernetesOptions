@@ -4834,6 +4834,167 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
       --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 \
       && pass "triggered sync of $app"
   done <<< "$stacks_with_overrides"
+
+  # ---- sub-phase: PHANTOM_CMD persistence -----------------------------
+  # (deployments.positronic-control.launchCommand — FIR-407)
+  #
+  # When host-config.yaml has deployments.positronic-control.launchCommand
+  # set, surgically merge a strategic-merge patch on positronic-config
+  # (ConfigMap) into the core Application's kustomize.patches. This makes
+  # PHANTOM_CMD declarative — Argo re-applies it on every sync, so the
+  # live ConfigMap survives `kubectl apply -k` cycles and the next pod
+  # roll comes up with the configured launch command (not the manifest's
+  # default "" -> sleep infinity). When the field is absent, any prior
+  # patch with the same (kind,name,namespace) is REMOVED so behavior
+  # reverts to the manifest default.
+  #
+  # Phase 13 (deployments_phase) emits the same patch in its full
+  # kustomize.patches payload — the two phases are consistent. This
+  # sub-phase exists so the operator-facing flow `bootstrap-robot.sh
+  # --image-overrides` is enough to push PHANTOM_CMD changes without
+  # also needing --deployments.
+  _patch_positronic_phantom_cmd "$hc"
+}
+
+# Surgically merge the positronic-config PHANTOM_CMD ConfigMap patch
+# into the core Argo Application's spec.source.kustomize.patches. Read,
+# filter out any prior entry targeting ConfigMap/positronic-config, then
+# either append a new entry (if
+# deployments.positronic-control.launchCommand is set) or leave the rest
+# untouched. Designed to be safe to run from phase 12 — does not touch
+# image overrides or other patches.
+_patch_positronic_phantom_cmd() {
+  local hc="$1"
+  [ -r "$hc" ] || return 0
+
+  local launch_command
+  if ! launch_command="$(python3 - "$hc" <<'PY' 2>/dev/null
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    sys.exit(1)
+deployments = cfg.get("deployments") if isinstance(cfg, dict) else None
+if not isinstance(deployments, dict):
+    sys.exit(2)  # block absent
+pc = deployments.get("positronic-control")
+if not isinstance(pc, dict):
+    sys.exit(2)  # field absent
+lc = pc.get("launchCommand")
+if lc is None:
+    sys.exit(2)  # field absent
+# Emit the raw string; downstream JSON-escapes via python.
+sys.stdout.write(str(lc))
+PY
+)"; then
+    # Non-zero rc: either yaml parse error (rc=1) or field absent (rc=2).
+    # Treat both as "no launchCommand". We still need to scrub any
+    # leftover ConfigMap/positronic-config entry from a prior run so
+    # removing the field cleanly reverts behavior.
+    launch_command=""
+    local field_absent=1
+  else
+    local field_absent=0
+  fi
+
+  local app="phantomos-$ROBOT-core"
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    info "no kubectl/k0s available — skipping PHANTOM_CMD sub-phase"
+    return
+  fi
+  if ! "${KUBECTL[@]}" -n argocd get app "$app" >/dev/null 2>&1; then
+    info "Application $app not present — skipping PHANTOM_CMD sub-phase"
+    return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    if [ "$field_absent" = 1 ]; then
+      info "DRY-RUN  scrub any prior ConfigMap/positronic-config patch from $app"
+    else
+      info "DRY-RUN  set PHANTOM_CMD=$launch_command via $app kustomize.patches"
+    fi
+    return
+  fi
+
+  # Fetch current patches list (may be absent / null / []).
+  local current_patches_json
+  current_patches_json="$("${KUBECTL[@]}" -n argocd get app "$app" \
+      -o jsonpath='{.spec.source.kustomize.patches}' 2>/dev/null || true)"
+  [ -z "$current_patches_json" ] && current_patches_json="[]"
+
+  # Compute the new patches list in Python: drop any prior entry whose
+  # target is the positronic-config ConfigMap, then (if set) append a
+  # fresh entry. Emits a kubectl merge-patch JSON on stdout.
+  local merge_patch
+  if ! merge_patch="$(LAUNCH_COMMAND="$launch_command" FIELD_ABSENT="$field_absent" \
+      CURRENT_PATCHES="$current_patches_json" python3 - <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(1)
+launch = os.environ["LAUNCH_COMMAND"]
+absent = os.environ["FIELD_ABSENT"] == "1"
+try:
+    current = json.loads(os.environ["CURRENT_PATCHES"]) or []
+except json.JSONDecodeError:
+    current = []
+if not isinstance(current, list):
+    current = []
+
+TARGET_KIND = "ConfigMap"
+TARGET_NAME = "positronic-config"
+TARGET_NS = "positronic"
+
+def is_phantom_cmd_entry(entry: dict) -> bool:
+    tgt = entry.get("target") or {}
+    return (
+        tgt.get("kind") == TARGET_KIND
+        and tgt.get("name") == TARGET_NAME
+        and tgt.get("namespace") == TARGET_NS
+    )
+
+# Drop any prior entry pointing at our ConfigMap target.
+filtered = [e for e in current if isinstance(e, dict) and not is_phantom_cmd_entry(e)]
+
+if not absent:
+    patch_doc = {
+        "apiVersion": "v1",
+        "kind": TARGET_KIND,
+        "metadata": {"name": TARGET_NAME, "namespace": TARGET_NS},
+        "data": {"PHANTOM_CMD": launch},
+    }
+    filtered.append({
+        "target": {
+            "kind": TARGET_KIND,
+            "name": TARGET_NAME,
+            "namespace": TARGET_NS,
+        },
+        "patch": yaml.safe_dump(patch_doc, sort_keys=False),
+    })
+
+print(json.dumps({"spec": {"source": {"kustomize": {"patches": filtered}}}}))
+PY
+)"; then
+    fail "failed to compute kustomize.patches merge (PyYAML missing?)"
+    return
+  fi
+
+  if "${KUBECTL[@]}" -n argocd patch app "$app" --type=merge -p "$merge_patch" >/dev/null; then
+    if [ "$field_absent" = 1 ]; then
+      pass "$app  PHANTOM_CMD entry scrubbed (deployments.positronic-control.launchCommand unset)"
+    else
+      pass "$app  PHANTOM_CMD set declaratively (deployments.positronic-control.launchCommand)"
+    fi
+  else
+    fail "kubectl patch app $app PHANTOM_CMD failed"
+    return
+  fi
+
+  "${KUBECTL[@]}" -n argocd patch app "$app" \
+    --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 \
+    && pass "triggered sync of $app"
 }
 
 # ---- phase 13: dev hostPath mounts (per-host) --------------------------
