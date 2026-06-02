@@ -12,14 +12,15 @@
 #
 # PHANTOM_CMD persistence (Option A — docs/internal/phantom-cmd-persistence.md):
 #   The CANONICAL way to set PHANTOM_CMD is via host-config.yaml:
-#       positronic:
-#         launchCommand: "ros2 launch <pkg> <launch>.py <args>"
+#       deployments:
+#         positronic-control:
+#           launchCommand: "ros2 launch <pkg> <launch>.py <args>"
 #   Then `bootstrap-robot.sh --image-overrides` (or --deployments) injects
 #   a strategic-merge patch on this ConfigMap into the core Argo app's
 #   spec.source.kustomize.patches, so the value stamps on every sync.
-#   `positronic.sh set-cmd` still works as a transient override but is
-#   overwritten on the next bootstrap sync — use host-config for anything
-#   that should survive a reboot or Argo reconcile.
+#   `positronic.sh set-cmd <cmd>` is durable by default (FIR-408): it
+#   edits host-config.yaml + re-runs bootstrap. Pass --transient for the
+#   legacy one-off kubectl-patch behavior.
 apiVersion: v1
 kind: ConfigMap
 metadata:

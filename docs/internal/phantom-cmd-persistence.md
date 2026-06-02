@@ -1,4 +1,4 @@
-# PHANTOM_CMD Persistence (positronic.launchCommand)
+# PHANTOM_CMD Persistence (deployments.positronic-control.launchCommand)
 
 `PHANTOM_CMD` is the env var the `positronic-control` pod's entrypoint
 exec's at startup. Empty value → the pod runs `sleep infinity` (interactive
@@ -20,12 +20,17 @@ new image and ROS 2 came up empty.
 
 ## The fix (Option A — declarative source-of-truth)
 
-A new optional field, `positronic.launchCommand`, in
-`/etc/phantomos/host-config.yaml`:
+A new optional field,
+`deployments.positronic-control.launchCommand`, in
+`/etc/phantomos/host-config.yaml` (FIR-407 — colocated with the rest of
+the positronic-control deployment-side config):
 
 ```yaml
-positronic:
-  launchCommand: "ros2 launch phantom_policies dma_policy_launch.py policy_path:=/root/models/walking-imu-hard-railing"
+deployments:
+  positronic-control:
+    launchCommand: "ros2 launch phantom_policies dma_policy_launch.py policy_path:=/root/models/walking-imu-hard-railing"
+    mounts:
+      - {name: recordings, host: /root/recordings, container: /recordings}
 ```
 
 When set, `bootstrap-robot.sh`'s phase 12 (`--image-overrides`) and phase 13
@@ -67,39 +72,54 @@ runs phase 12 followed by phase 13, so the final list is whatever phase
 
 | Host-config state | Result |
 | --- | --- |
-| `positronic.launchCommand` absent | No patch emitted. Base manifest's `PHANTOM_CMD: ""` flows through. Pod runs `sleep infinity`. |
-| `positronic.launchCommand: ""` (explicit) | Patch emitted with empty string. Functionally equivalent to absent, but makes the intent declarative. |
-| `positronic.launchCommand: "<cmd>"` | Patch emitted. Pod runs `<cmd>`. |
-| Unknown field under `positronic` (typo) | `host-config.py validate` rejects it before bootstrap proceeds. |
+| `deployments.positronic-control.launchCommand` absent | No patch emitted. Base manifest's `PHANTOM_CMD: ""` flows through. Pod runs `sleep infinity`. |
+| `deployments.positronic-control.launchCommand: ""` (explicit) | Patch emitted with empty string. Functionally equivalent to absent, but makes the intent declarative. |
+| `deployments.positronic-control.launchCommand: "<cmd>"` | Patch emitted. Pod runs `<cmd>`. |
+| Legacy top-level `positronic:` block (pre-FIR-407) | `host-config.py validate` rejects it with a migration hint. |
 
-Existing host-config.yaml files without the new block keep working
-unchanged.
+Existing host-config.yaml files without the new field keep working
+unchanged. host-configs that carried the pre-FIR-407 top-level
+`positronic:` block must move the field to
+`deployments.positronic-control.launchCommand`.
 
 ## Runtime override (`positronic.sh set-cmd`)
 
-`positronic.sh set-cmd <cmd>` still works — it `kubectl patch`'s the live
-ConfigMap and rolls the DaemonSet. Useful for one-off tests where you don't
-want to edit host-config.yaml. **Transient**: the next bootstrap sync
-overwrites the override with whatever host-config says. `positronic.sh`'s
-help text now flags this explicitly, and the post-patch summary prints a
-yellow `heads up` line reminding the operator.
+`positronic.sh set-cmd <cmd>` is **durable by default** (FIR-408): it
+edits `deployments.positronic-control.launchCommand` in
+`/etc/phantomos/host-config.yaml`, re-runs `bootstrap-robot.sh
+--image-overrides` to propagate the change via Argo, and finally rolls
+the DaemonSet. The new launch command survives every Argo sync.
 
-For anything that should survive a reboot, an Argo reconcile, or another
-operator's `kubectl apply -k`: set `positronic.launchCommand` in
-host-config.yaml and re-run `bootstrap-robot.sh --image-overrides`.
+Pass `--transient` to get the legacy one-off behavior — just
+`kubectl patch` the live ConfigMap and roll. Useful for short-lived
+test runs that shouldn't persist; the next bootstrap sync will revert
+the override to whatever host-config says.
+
+```sh
+# Durable: writes host-config + propagates via Argo.
+positronic.sh set-cmd ros2 launch phantom_policies dma_policy_launch.py policy_path:=/root/models/walking-imu-hard-railing
+
+# One-off / transient: patches live ConfigMap only. Reverts on the next
+# bootstrap sync.
+positronic.sh set-cmd --transient sleep 60
+```
 
 ## Acceptance criteria (verified on bench)
 
-1. Adding `positronic.launchCommand: "<cmd>"` to host-config.yaml +
-   `bootstrap-robot.sh --image-overrides` → live ConfigMap shows
-   `PHANTOM_CMD: "<cmd>"`.
+1. Adding `deployments.positronic-control.launchCommand: "<cmd>"` to
+   host-config.yaml + `bootstrap-robot.sh --image-overrides` → live
+   ConfigMap shows `PHANTOM_CMD: "<cmd>"`.
 2. Next pod roll comes up with PHANTOM_CMD set; ROS 2 nodes start
    automatically.
 3. Removing the field + re-running bootstrap → patch is scrubbed from the
    Argo app's `kustomize.patches`, `PHANTOM_CMD` reverts to `""`.
-4. Existing host-config.yaml files (no `positronic:` block) keep working
-   unchanged.
+4. Existing host-config.yaml files (no `launchCommand:` under
+   deployments.positronic-control) keep working unchanged.
 5. `positronic.sh status` keeps printing the live PHANTOM_CMD verbatim.
+6. `positronic.sh set-cmd <cmd>` (durable mode, FIR-408) edits
+   host-config + re-runs bootstrap; the value survives subsequent
+   bootstrap re-runs. `--transient` retains the old kubectl-patch-only
+   behavior.
 
 ## Why not Argo CD `ignoreDifferences`? (Option B)
 
@@ -114,14 +134,14 @@ pattern already used for `deployments:`, `images:`, and `cpuIsolation:`.
 
 ## Schema reference
 
-Field: `positronic.launchCommand`
+Field: `deployments.positronic-control.launchCommand`
 
 | Property | Value |
 | --- | --- |
 | Type | string |
-| Required | No (optional top-level block) |
+| Required | No (optional, nested under `deployments.positronic-control`) |
 | Default | absent → no patch; base manifest's `PHANTOM_CMD: ""` applies |
-| Validation | `host-config.py validate` rejects non-string values and unknown sibling keys |
+| Validation | `host-config.py validate` rejects non-string values, rejects `launchCommand` on any other deployment, and rejects the legacy top-level `positronic:` block with a migration hint |
 
 The value is dropped into the ConfigMap verbatim — no shell quoting or
 expansion happens on the bootstrap side. The operator is responsible for

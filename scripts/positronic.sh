@@ -201,7 +201,8 @@ ${C_BOLD}Subcommands:${C_RESET}
                                DaemonSet so the new command takes effect.
                                TRANSIENT — the next bootstrap sync
                                (--image-overrides / --deployments)
-                               overwrites this with positronic.launchCommand
+                               overwrites this with
+                               deployments.positronic-control.launchCommand
                                from /etc/phantomos/host-config.yaml. For
                                persistence, set that field instead.
   clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
@@ -664,8 +665,9 @@ print(json.dumps({"data": {"PHANTOM_CMD": os.environ["VALUE"]}}))
 
   printf '\n  next: bash scripts/positronic.sh logs -f\n'
   printf '\n  %sheads up:%s this patch is transient — the next bootstrap sync\n' "$C_YELLOW" "$C_RESET"
-  printf '  overwrites it with positronic.launchCommand from /etc/phantomos/host-config.yaml.\n'
-  printf '  For persistence, set that field and re-run bootstrap-robot.sh --image-overrides.\n'
+  printf '  overwrites it with deployments.positronic-control.launchCommand\n'
+  printf '  from /etc/phantomos/host-config.yaml. For persistence, set that\n'
+  printf '  field and re-run bootstrap-robot.sh --image-overrides.\n'
 }
 
 cmd_set_cmd() {

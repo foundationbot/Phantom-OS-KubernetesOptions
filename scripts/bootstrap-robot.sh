@@ -4835,14 +4835,15 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
       && pass "triggered sync of $app"
   done <<< "$stacks_with_overrides"
 
-  # ---- sub-phase: PHANTOM_CMD persistence (positronic.launchCommand) ----
+  # ---- sub-phase: PHANTOM_CMD persistence -----------------------------
+  # (deployments.positronic-control.launchCommand — FIR-407)
   #
-  # When host-config.yaml has positronic.launchCommand set, surgically
-  # merge a strategic-merge patch on positronic-config (ConfigMap) into
-  # the core Application's kustomize.patches. This makes PHANTOM_CMD
-  # declarative — Argo re-applies it on every sync, so the live
-  # ConfigMap survives `kubectl apply -k` cycles and the next pod roll
-  # comes up with the configured launch command (not the manifest's
+  # When host-config.yaml has deployments.positronic-control.launchCommand
+  # set, surgically merge a strategic-merge patch on positronic-config
+  # (ConfigMap) into the core Application's kustomize.patches. This makes
+  # PHANTOM_CMD declarative — Argo re-applies it on every sync, so the
+  # live ConfigMap survives `kubectl apply -k` cycles and the next pod
+  # roll comes up with the configured launch command (not the manifest's
   # default "" -> sleep infinity). When the field is absent, any prior
   # patch with the same (kind,name,namespace) is REMOVED so behavior
   # reverts to the manifest default.
@@ -4858,9 +4859,10 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
 # Surgically merge the positronic-config PHANTOM_CMD ConfigMap patch
 # into the core Argo Application's spec.source.kustomize.patches. Read,
 # filter out any prior entry targeting ConfigMap/positronic-config, then
-# either append a new entry (if positronic.launchCommand is set) or
-# leave the rest untouched. Designed to be safe to run from phase 12 —
-# does not touch image overrides or other patches.
+# either append a new entry (if
+# deployments.positronic-control.launchCommand is set) or leave the rest
+# untouched. Designed to be safe to run from phase 12 — does not touch
+# image overrides or other patches.
 _patch_positronic_phantom_cmd() {
   local hc="$1"
   [ -r "$hc" ] || return 0
@@ -4873,10 +4875,13 @@ try:
         cfg = yaml.safe_load(f) or {}
 except Exception:
     sys.exit(1)
-positronic = cfg.get("positronic") if isinstance(cfg, dict) else None
-if not isinstance(positronic, dict):
+deployments = cfg.get("deployments") if isinstance(cfg, dict) else None
+if not isinstance(deployments, dict):
+    sys.exit(2)  # block absent
+pc = deployments.get("positronic-control")
+if not isinstance(pc, dict):
     sys.exit(2)  # field absent
-lc = positronic.get("launchCommand")
+lc = pc.get("launchCommand")
 if lc is None:
     sys.exit(2)  # field absent
 # Emit the raw string; downstream JSON-escapes via python.
@@ -4978,9 +4983,9 @@ PY
 
   if "${KUBECTL[@]}" -n argocd patch app "$app" --type=merge -p "$merge_patch" >/dev/null; then
     if [ "$field_absent" = 1 ]; then
-      pass "$app  PHANTOM_CMD entry scrubbed (positronic.launchCommand unset)"
+      pass "$app  PHANTOM_CMD entry scrubbed (deployments.positronic-control.launchCommand unset)"
     else
-      pass "$app  PHANTOM_CMD set declaratively (positronic.launchCommand)"
+      pass "$app  PHANTOM_CMD set declaratively (deployments.positronic-control.launchCommand)"
     fi
   else
     fail "kubectl patch app $app PHANTOM_CMD failed"

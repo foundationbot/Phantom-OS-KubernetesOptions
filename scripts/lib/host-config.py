@@ -1062,6 +1062,27 @@ VARIANT_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"rerun-streamer", "dm
 EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"})
 
 
+# Fields under a deployments.<name> entry that target the workload
+# resource itself (volumes, container args, securityContext). Used by
+# _deployment_spec_targets_workload below to decide whether the entry
+# contributes a strategic-merge patch on the DaemonSet/Deployment.
+# Fields outside this set (e.g. positronic-control's launchCommand,
+# which patches the positronic-config ConfigMap instead) don't trigger
+# an empty no-op patch on the workload.
+_WORKLOAD_PATCH_FIELDS: frozenset[str] = frozenset({
+    "mounts", "privileged", "variant", "queueMemoryLimitMb", "explodeJoints",
+})
+
+
+def _deployment_spec_targets_workload(spec: dict) -> bool:
+    """True iff this deployments.<name> entry has at least one field
+    that produces a strategic-merge patch on the workload (DaemonSet /
+    Deployment). Entries that only carry workload-adjacent fields like
+    launchCommand (which patches the positronic-config ConfigMap) are
+    treated as no-op for `_build_deployment_patch`."""
+    return any(k in spec for k in _WORKLOAD_PATCH_FIELDS)
+
+
 def _build_deployment_patch(
     deployment_name: str, spec: dict
 ) -> tuple[str, list[str]]:
@@ -1162,10 +1183,10 @@ def _build_deployment_patch(
 # Target descriptor for the positronic-config ConfigMap that supplies
 # PHANTOM_CMD to the positronic-control DaemonSet via envFrom. Lives in
 # the `core` stack alongside the DaemonSet itself. Used by
-# `positronic.launchCommand` (host-config.yaml) -> Argo kustomize.patches
-# so the launch command becomes declarative (source-of-truth =
-# host-config.yaml) and survives every Argo sync. See docs/internal/
-# phantom-cmd-persistence.md.
+# `deployments.positronic-control.launchCommand` (host-config.yaml) ->
+# Argo kustomize.patches so the launch command becomes declarative
+# (source-of-truth = host-config.yaml) and survives every Argo sync.
+# See docs/internal/phantom-cmd-persistence.md.
 POSITRONIC_CONFIGMAP_TARGET: dict[str, str] = {
     "stack": "core",
     "kind": "ConfigMap",
@@ -1177,7 +1198,8 @@ POSITRONIC_CONFIGMAP_TARGET: dict[str, str] = {
 def _build_positronic_phantom_cmd_patch(value: str) -> str:
     """Render a strategic-merge YAML patch that stamps PHANTOM_CMD into
     the positronic-config ConfigMap. `value` is the operator-supplied
-    launch command from host-config.yaml's `positronic.launchCommand`."""
+    launch command from
+    host-config.yaml's `deployments.positronic-control.launchCommand`."""
     target = POSITRONIC_CONFIGMAP_TARGET
     patch = {
         "apiVersion": "v1",
@@ -1229,6 +1251,12 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
                 file=sys.stderr,
             )
             return 2
+        # Skip entries that only carry workload-adjacent fields (e.g.
+        # positronic-control with only launchCommand and no mounts). They
+        # don't patch the DaemonSet/Deployment — launchCommand handled
+        # separately below.
+        if not _deployment_spec_targets_workload(spec):
+            continue
         try:
             patch_yaml, warnings = _build_deployment_patch(name, spec)
         except ValueError as exc:
@@ -1245,21 +1273,25 @@ def cmd_get_deployment_patches_json(cfg: dict) -> int:
             "patch": patch_yaml,
         })
 
-    # positronic.launchCommand — declarative PHANTOM_CMD persistence.
-    # When set, emit a strategic-merge patch on the positronic-config
-    # ConfigMap so the next Argo sync stamps PHANTOM_CMD = <value>
-    # (instead of reverting it to "" from the base manifest). When the
-    # field is absent, no patch is emitted — the base manifest's
-    # `PHANTOM_CMD: ""` flows through and the DaemonSet falls back to
-    # `sleep infinity` (legacy / dev-mode behavior).
+    # deployments.positronic-control.launchCommand — declarative
+    # PHANTOM_CMD persistence. When set, emit a strategic-merge patch on
+    # the positronic-config ConfigMap so the next Argo sync stamps
+    # PHANTOM_CMD = <value> (instead of reverting it to "" from the base
+    # manifest). When the field is absent, no patch is emitted — the
+    # base manifest's `PHANTOM_CMD: ""` flows through and the DaemonSet
+    # falls back to `sleep infinity` (legacy / dev-mode behavior).
+    #
+    # Lives nested under deployments.positronic-control alongside the
+    # block's existing `mounts:` field so all positronic-control
+    # deployment-side config sits together. (FIR-407 — moved here from a
+    # top-level `positronic:` block, which only ever had this one field.)
     #
     # Operators can still override at runtime with
-    # `positronic.sh set-cmd <cmd>`, but that patch is transient: the
-    # next `bootstrap-robot.sh --image-overrides` (or --deployments)
-    # run will overwrite it with whatever host-config.yaml says.
-    positronic_block = cfg.get("positronic")
-    if isinstance(positronic_block, dict):
-        launch_command = positronic_block.get("launchCommand")
+    # `positronic.sh set-cmd <cmd>`, but that patch is transient by
+    # default unless the operator passes --transient: see FIR-408.
+    pc_block = deployments.get("positronic-control") if isinstance(deployments, dict) else None
+    if isinstance(pc_block, dict):
+        launch_command = pc_block.get("launchCommand")
         if launch_command is not None:
             patch_yaml = _build_positronic_phantom_cmd_patch(str(launch_command))
             tgt = POSITRONIC_CONFIGMAP_TARGET
@@ -1452,6 +1484,11 @@ def cmd_inject_kustomize_block(
         if not isinstance(spec, dict):
             print(f"error: deployments.{name}: must be a mapping", file=sys.stderr)
             return 2
+        # Skip entries that only carry workload-adjacent fields (e.g.
+        # positronic-control with only launchCommand and no mounts). See
+        # _deployment_spec_targets_workload for the gate.
+        if not _deployment_spec_targets_workload(spec):
+            continue
         try:
             patch_yaml, w = _build_deployment_patch(name, spec)
         except ValueError as exc:
@@ -1466,6 +1503,27 @@ def cmd_inject_kustomize_block(
                 "namespace": target["namespace"],
             },
         })
+
+    # Also emit the positronic-config PHANTOM_CMD patch when this stack
+    # owns it and host-config has
+    # deployments.positronic-control.launchCommand set. Mirrors the
+    # cmd_get_deployment_patches_json path. (FIR-407)
+    if stack == POSITRONIC_CONFIGMAP_TARGET["stack"]:
+        pc_block = deployments.get("positronic-control")
+        if isinstance(pc_block, dict):
+            launch_command = pc_block.get("launchCommand")
+            if launch_command is not None:
+                tgt = POSITRONIC_CONFIGMAP_TARGET
+                patches_block.append({
+                    "patch": _build_positronic_phantom_cmd_patch(
+                        str(launch_command)
+                    ),
+                    "target": {
+                        "kind": tgt["kind"],
+                        "name": tgt["name"],
+                        "namespace": tgt["namespace"],
+                    },
+                })
 
     # Inject under spec.source.kustomize. Preserve siblings in case the
     # template gains other kustomize keys later.
@@ -1548,31 +1606,17 @@ def cmd_validate(cfg: dict) -> int:
                 f"gitSource={git_source!r}: must be 'local' or 'remote'"
             )
 
-    # positronic: optional top-level block. Currently exposes a single
-    # field — launchCommand — which makes PHANTOM_CMD declarative (every
-    # bootstrap re-applies it via a kustomize.patches strategic-merge on
-    # the positronic-config ConfigMap). When absent, the base manifest's
-    # `PHANTOM_CMD: ""` wins and the pod runs sleep infinity (legacy /
-    # dev-mode behavior). See docs/internal/phantom-cmd-persistence.md.
-    positronic_block = cfg.get("positronic")
-    if positronic_block is not None:
-        if not isinstance(positronic_block, dict):
-            errors.append("'positronic' must be a mapping")
-        else:
-            lc = positronic_block.get("launchCommand")
-            if lc is not None and not isinstance(lc, str):
-                errors.append(
-                    f"positronic.launchCommand: must be a string "
-                    f"(got: {lc!r})"
-                )
-            # Surface unknown keys so typos like `launchCmd` don't
-            # silently fall through to "no patch emitted".
-            for key in positronic_block.keys():
-                if key not in ("launchCommand",):
-                    errors.append(
-                        f"positronic.{key}: unknown field "
-                        f"(known: launchCommand)"
-                    )
+    # Reject the legacy top-level `positronic:` block (FIR-407). The
+    # field moved under deployments.positronic-control.launchCommand so
+    # all positronic-control deployment-side config sits together.
+    if "positronic" in cfg:
+        errors.append(
+            "'positronic' is no longer a top-level block (FIR-407). "
+            "Move launchCommand under "
+            "deployments.positronic-control.launchCommand. See "
+            "host-config-templates/_template/host-config.yaml for the "
+            "current schema."
+        )
 
     # stacks: must be a mapping; only known stack names; required
     # stacks cannot be disabled; per-stack fields type-checked.
@@ -2113,6 +2157,25 @@ def cmd_validate(cfg: dict) -> int:
                         errors.append(
                             f"deployments.{name}.queueMemoryLimitMb: "
                             f"must be >= 1 MB"
+                        )
+            # launchCommand: declarative PHANTOM_CMD persistence (FIR-407).
+            # Only meaningful on positronic-control; lives nested under
+            # deployments alongside mounts: so all positronic-control
+            # deployment-side config sits together. Emits a strategic-
+            # merge patch on the positronic-config ConfigMap (not the
+            # DaemonSet itself). See docs/internal/phantom-cmd-persistence.md.
+            if "launchCommand" in spec:
+                if name != "positronic-control":
+                    errors.append(
+                        f"deployments.{name}.launchCommand: only "
+                        f"supported on positronic-control"
+                    )
+                else:
+                    lc = spec["launchCommand"]
+                    if lc is not None and not isinstance(lc, str):
+                        errors.append(
+                            f"deployments.{name}.launchCommand: must be "
+                            f"a string (got: {lc!r})"
                         )
             mounts = spec.get("mounts") or []
             if not isinstance(mounts, list):
