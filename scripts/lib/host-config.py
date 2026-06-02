@@ -23,6 +23,8 @@ Usage:
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
+  host-config.py <path> set-positronic-launch-command <value>
+  host-config.py <path> clear-positronic-launch-command
   host-config.py <path> get-enabled-stacks            # one stack name per line
   host-config.py <path> get-stack-selfheal <stack>    # 'true' | 'false'
   host-config.py <path> get-git-source                # 'local' | 'remote' (default 'local')
@@ -268,6 +270,208 @@ def cmd_set_dma_ethercat_config_path(path: str, value: str) -> int:
         out[-1] = out[-1] + "\n"
     out.append("dmaEthercat:\n")
     out.append(f"  configPath: {value}\n")
+
+    p.write_text("".join(out))
+    return 0
+
+
+def _json_string_literal(value: str) -> str:
+    """Render `value` as a YAML-safe double-quoted string literal.
+    JSON's escaping rules are a strict subset of YAML's double-quoted
+    flow-scalar rules, so json.dumps() output is always valid YAML.
+    Used by the launchCommand setter to round-trip arbitrary command
+    strings (with colons, quotes, dollars) without bespoke escaping."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def cmd_set_positronic_launch_command(path: str, value: str) -> int:
+    """Persist deployments.positronic-control.launchCommand into the
+    host-config file in place. Used by positronic.sh set-cmd's durable
+    mode (FIR-408): the operator's runtime override becomes the
+    declarative source-of-truth so the next Argo sync doesn't revert it.
+
+    Line-based rewrite. Cases handled:
+      (a) launchCommand already exists under
+          deployments.positronic-control -> replace value in place.
+      (b) deployments.positronic-control exists but has no
+          launchCommand -> insert as the first child of the block.
+      (c) deployments: exists but no positronic-control entry ->
+          append a positronic-control: child with launchCommand.
+      (d) deployments: block absent entirely -> append a fresh
+          deployments: block at EOF with positronic-control:
+          launchCommand: <value>.
+
+    Existing comments / ordering outside the touched lines are
+    preserved. Pass an empty string to clear the value (writes
+    'launchCommand: \"\"' rather than removing the key — see
+    cmd_clear_positronic_launch_command for full removal)."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+    if not isinstance(value, str):
+        print("error: launchCommand value must be a string", file=sys.stderr)
+        return 2
+
+    lit = _json_string_literal(value)
+    src = p.read_text().splitlines(keepends=True)
+
+    # Locate deployments:, positronic-control:, launchCommand: line spans.
+    # Line indices are 0-based; we record the END of each block (last
+    # line of indented children) so inserts go at the right position.
+    deployments_line: "int | None" = None
+    positronic_line: "int | None" = None
+    launch_line: "int | None" = None
+    positronic_block_end: "int | None" = None  # inclusive
+
+    def _line_indent(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    def _is_yaml_key_line(line: str) -> bool:
+        stripped = line.lstrip(" ")
+        return bool(stripped.strip()) and not stripped.startswith("#")
+
+    n = len(src)
+    i = 0
+    while i < n:
+        line = src[i]
+        if _line_indent(line) == 0 and line.lstrip(" ").startswith("deployments:"):
+            deployments_line = i
+            # Walk forward over the deployments block (indent > 0).
+            j = i + 1
+            while j < n:
+                if _is_yaml_key_line(src[j]) and _line_indent(src[j]) == 0:
+                    break
+                stripped_j = src[j].lstrip(" ")
+                if (
+                    _line_indent(src[j]) == 2
+                    and stripped_j.startswith("positronic-control:")
+                ):
+                    positronic_line = j
+                    # Walk over positronic-control block (indent >= 4).
+                    k = j + 1
+                    while k < n:
+                        if (
+                            _is_yaml_key_line(src[k])
+                            and _line_indent(src[k]) <= 2
+                        ):
+                            break
+                        stripped_k = src[k].lstrip(" ")
+                        if (
+                            _line_indent(src[k]) == 4
+                            and stripped_k.startswith("launchCommand:")
+                        ):
+                            launch_line = k
+                        k += 1
+                    positronic_block_end = k - 1
+                j += 1
+            break
+        i += 1
+
+    # Case (a): launchCommand already exists — replace in place.
+    if launch_line is not None:
+        src[launch_line] = f"    launchCommand: {lit}\n"
+        p.write_text("".join(src))
+        return 0
+
+    # Case (b): positronic-control exists, no launchCommand — insert.
+    if positronic_line is not None:
+        insert_at = positronic_line + 1
+        src.insert(insert_at, f"    launchCommand: {lit}\n")
+        p.write_text("".join(src))
+        return 0
+
+    # Case (c): deployments: exists, no positronic-control — append entry.
+    if deployments_line is not None:
+        # Append after the last line of the deployments block. We can
+        # compute that by finding the next zero-indent key line after
+        # deployments_line (or EOF).
+        j = deployments_line + 1
+        while j < n:
+            if _is_yaml_key_line(src[j]) and _line_indent(src[j]) == 0:
+                break
+            j += 1
+        block = (
+            "  positronic-control:\n"
+            f"    launchCommand: {lit}\n"
+        )
+        src.insert(j, block)
+        p.write_text("".join(src))
+        return 0
+
+    # Case (d): no deployments: block — append at EOF.
+    if src and not src[-1].endswith("\n"):
+        src[-1] = src[-1] + "\n"
+    src.append("\n")
+    src.append("# deployments.positronic-control.launchCommand persisted\n")
+    src.append("# by positronic.sh set-cmd (FIR-408).\n")
+    src.append("deployments:\n")
+    src.append("  positronic-control:\n")
+    src.append(f"    launchCommand: {lit}\n")
+    p.write_text("".join(src))
+    return 0
+
+
+def cmd_clear_positronic_launch_command(path: str) -> int:
+    """Remove deployments.positronic-control.launchCommand from the
+    host-config file. Used by positronic.sh clear-cmd's durable mode.
+
+    Removes ONLY the launchCommand line; the surrounding
+    positronic-control block (mounts, etc.) is left intact. Returns 0
+    whether or not the field was present (idempotent)."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+
+    src = p.read_text().splitlines(keepends=True)
+
+    def _line_indent(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    def _is_yaml_key_line(line: str) -> bool:
+        stripped = line.lstrip(" ")
+        return bool(stripped.strip()) and not stripped.startswith("#")
+
+    n = len(src)
+    out: list[str] = []
+    in_deployments = False
+    in_positronic = False
+    for i, line in enumerate(src):
+        if _line_indent(line) == 0 and line.lstrip(" ").startswith("deployments:"):
+            in_deployments = True
+            in_positronic = False
+            out.append(line)
+            continue
+        if in_deployments:
+            if _is_yaml_key_line(line) and _line_indent(line) == 0:
+                in_deployments = False
+                in_positronic = False
+            elif (
+                _line_indent(line) == 2
+                and line.lstrip(" ").startswith("positronic-control:")
+            ):
+                in_positronic = True
+                out.append(line)
+                continue
+            elif _is_yaml_key_line(line) and _line_indent(line) == 2:
+                # New deployment entry — leave positronic-control scope.
+                in_positronic = False
+        if (
+            in_positronic
+            and _line_indent(line) == 4
+            and line.lstrip(" ").startswith("launchCommand:")
+        ):
+            # Drop this line. Also drop the preceding comment line if it
+            # exists and is the marker we wrote (keeps round-trips clean).
+            if (
+                out
+                and out[-1].lstrip(" ").startswith("#")
+                and "FIR-407" in out[-1]
+            ):
+                out.pop()
+            continue
+        out.append(line)
 
     p.write_text("".join(out))
     return 0
@@ -2386,6 +2590,17 @@ def main() -> int:
         return cmd_set_dma_ethercat_config_path(path, sys.argv[3])
     if cmd == "get-deployment-patches-json":
         return cmd_get_deployment_patches_json(cfg)
+    if cmd == "set-positronic-launch-command":
+        if len(sys.argv) != 4:
+            print(
+                "usage: host-config.py <path> "
+                "set-positronic-launch-command <value>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_set_positronic_launch_command(path, sys.argv[3])
+    if cmd == "clear-positronic-launch-command":
+        return cmd_clear_positronic_launch_command(path)
     if cmd == "get-enabled-stacks":
         return cmd_get_enabled_stacks(cfg)
     if cmd == "get-stack-selfheal":
