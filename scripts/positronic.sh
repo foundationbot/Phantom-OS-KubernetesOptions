@@ -199,8 +199,14 @@ ${C_BOLD}Subcommands:${C_RESET}
   set-cmd <command...>         Set PHANTOM_CMD in $CONFIGMAP_NAME to the
                                joined args, then rollout restart the
                                DaemonSet so the new command takes effect.
+                               TRANSIENT — the next bootstrap sync
+                               (--image-overrides / --deployments)
+                               overwrites this with positronic.launchCommand
+                               from /etc/phantomos/host-config.yaml. For
+                               persistence, set that field instead.
   clear-cmd                    Set PHANTOM_CMD to empty (interactive dev
                                mode → sleep infinity), rollout restart.
+                               Same transience caveat as set-cmd.
   push-image <src> [--tag <dest-tag>] [--no-redeploy]
                                Tag local docker image <src> as
                                $IMAGE_NAME:<dest-tag>, push it, and bump
@@ -657,6 +663,9 @@ print(json.dumps({"data": {"PHANTOM_CMD": os.environ["VALUE"]}}))
   fi
 
   printf '\n  next: bash scripts/positronic.sh logs -f\n'
+  printf '\n  %sheads up:%s this patch is transient — the next bootstrap sync\n' "$C_YELLOW" "$C_RESET"
+  printf '  overwrites it with positronic.launchCommand from /etc/phantomos/host-config.yaml.\n'
+  printf '  For persistence, set that field and re-run bootstrap-robot.sh --image-overrides.\n'
 }
 
 cmd_set_cmd() {

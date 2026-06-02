@@ -56,6 +56,28 @@ targetRevision: main
 # CLI override: --production / --no-production.
 production: false
 
+# Optional. positronic-control launch configuration.
+#
+#   launchCommand — the command the positronic-control pod's entrypoint
+#                   runs (exec'd via PHANTOM_CMD env). When unset, the
+#                   pod runs `sleep infinity` (interactive dev mode).
+#
+# The launchCommand value flows into a strategic-merge patch on the
+# positronic-config ConfigMap (data.PHANTOM_CMD), injected into the
+# core Argo Application's spec.source.kustomize.patches by
+# bootstrap-robot.sh phase 12 (image-overrides) and phase 13
+# (deployments). This makes PHANTOM_CMD declarative — every Argo sync
+# re-applies it, so the value survives `kubectl apply -k` cycles, pod
+# rolls, and operator-side ConfigMap edits.
+#
+# Operators can still override at runtime with `positronic.sh set-cmd`,
+# but that patch is transient: the next bootstrap sync overwrites it
+# with whatever this field says. Treat set-cmd as a debug knob, not a
+# persistence mechanism. See docs/internal/phantom-cmd-persistence.md.
+#
+# positronic:
+#   launchCommand: "ros2 launch phantom_policies dma_policy_launch.py policy_path:=/root/models/walking-imu-hard-railing"
+
 # Stack toggles + per-stack selfHeal overrides.
 #
 #   stacks.core      always required; cannot be disabled.
