@@ -88,6 +88,9 @@
 #   --skip-cpu-isolation skip the phase 8 cpu-isolation setup
 #   --skip-log-management skip the phase 8.5 log-management setup
 #   --skip-validate      skip the final validate-local-registry.sh run
+#   --no-tailscale       ignore Tailscale when resolving the cluster API
+#                        address; bind spec.api.address to the
+#                        default-gateway IPv4 even if tailscaled is up
 #
 # Other flags:
 #   -y, --yes          skip confirmation prompts
@@ -314,6 +317,7 @@ SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
 SKIP_VALIDATE=0
 SKIP_NVIDIA=0
+NO_TAILSCALE=0
 
 # Pre-phase + dma-ethercat skip flags (default-on phases, hence the
 # inverted polarity from the per-phase opt-in flags above).
@@ -380,6 +384,7 @@ while [ $# -gt 0 ]; do
     # Targeted overrides that compose with both modes.
     --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
     --skip-validate)     SKIP_VALIDATE=1; shift ;;
+    --no-tailscale)      NO_TAILSCALE=1; shift ;;
     --skip-purge-pods)   SKIP_PURGE_PODS=1; shift ;;
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
     --skip-stop-services) SKIP_STOP_SERVICES=1; shift ;;
@@ -1343,6 +1348,10 @@ host_config() {
 # tailscale state so an operator who EXPECTED Tailscale to be up sees
 # the diagnostic.
 _require_tailscale() {
+  if [ "$NO_TAILSCALE" = 1 ]; then
+    info "tailscale opt-out (--no-tailscale); cluster API will bind to default-gateway IP"
+    return 0
+  fi
   if ! command -v tailscale >/dev/null 2>&1; then
     info "tailscale not installed; cluster API will bind to default-gateway IP"
     return 0
@@ -1391,6 +1400,13 @@ _resolve_default_gateway_ip() {
 _resolve_api_address() {
   local wait_secs=${API_ADDRESS_WAIT_SECS:-60}
   local elapsed=0
+
+  # Operator opted out of Tailscale (--no-tailscale) — go straight to
+  # LAN fallback regardless of whether tailscaled is up.
+  if [ "$NO_TAILSCALE" = 1 ]; then
+    _resolve_default_gateway_ip || return 1
+    return 0
+  fi
 
   # No tailscale CLI at all — go straight to LAN fallback.
   if ! command -v tailscale >/dev/null 2>&1; then
@@ -1675,7 +1691,10 @@ cluster() {
     info "image bundles dir $_img_dir/ does not exist yet (k0s will create it)"
   fi
 
-  # Tailscale is a hard prerequisite — spec.api.address pins to it.
+  # Tailscale is preferred (spec.api.address pins to its mesh IP when
+  # available) but not required: _resolve_api_address falls back to the
+  # default-gateway IP, and --no-tailscale skips it entirely. This call
+  # only surfaces the tailscale state as a diagnostic; it always succeeds.
   if [ "$DRY_RUN" = 0 ]; then
     _require_tailscale || return
   fi
@@ -1701,8 +1720,8 @@ cluster() {
       skip "k0s already running ($(systemctl is-active k0scontroller k0sworker 2>/dev/null | tr '\n' ' '))"
     fi
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  require tailscale + resolve api IP"
-    info "DRY-RUN  write /etc/k0s/k0s.yaml with spec.api.address=<tailscale_ip>"
+    info "DRY-RUN  resolve api IP ($([ "$NO_TAILSCALE" = 1 ] && echo "default-gateway; --no-tailscale" || echo "tailscale-first, default-gateway fallback"))"
+    info "DRY-RUN  write /etc/k0s/k0s.yaml with spec.api.address=<resolved_ip>"
     info "DRY-RUN  k0s install controller --single --enable-worker -c /etc/k0s/k0s.yaml"
     info "DRY-RUN  systemctl enable --now k0scontroller"
   else
