@@ -139,7 +139,7 @@ with the host-specific overrides. ArgoCD takes it from there.
 | `host-config-templates/_template/phantomos-app.yaml.tpl` | ArgoCD Application CR template. Substitutions: `{{ROBOT}}`, `{{STACK}}`, `{{REPO_URL}}`, `{{TARGET_REVISION}}`, `{{SELF_HEAL}}`. |
 | `host-config-templates/_template/operator-ui-pairing.yaml` | Reference for the operator-ui pairing ConfigMap (AI_PC_URL). |
 | `manifests/base/<workload>/` | Universal workload manifests. Deployments/DaemonSets here carry only kernel/runtime mounts (`/dev`, `/dev/shm`, `/tmp`); EVERY other host path is host-injected. |
-| `manifests/stacks/core/kustomization.yaml` | Required stack. Bundles `runtime-classes`, `registry`, `dma-video`, `positronic`, `phantomos-api-server`, `yovariable-server`. |
+| `manifests/stacks/core/kustomization.yaml` | Required stack. Bundles `runtime-classes`, `registry`, `dma-video`, `positronic`, `phantomos-api-server`, `yovariable-server`, `dma-streams`, `dma-bridge`, `phantom-locomotion`, `cpp-robot-state-estimator`. |
 | `manifests/stacks/operator/kustomization.yaml` | Toggleable stack. Bundles `argus`, `nimbus` (operator UI + episode storage). |
 | `terraform/main.tf` | Installs the argocd Helm chart. Does NOT apply Application CRs — those are rendered + applied by bootstrap from the per-host template. |
 | `docs/rfcs/0001-fleet-control-plane.md` | Long-term destination: fleet control plane queried by serial. |
@@ -470,6 +470,7 @@ argocd namespace
   |       positronic/       (Deployment positronic-control)
   |       phantomos-api-server/ (DaemonSet api)
   |       yovariable-server/    (Deployment)
+  |       dma-bridge/           (DaemonSet bridge, :9098 FE WebSocket)
   |
   +-- Application phantomos-mk09-operator
         labels: part-of=phantomos-mk09, stack=operator

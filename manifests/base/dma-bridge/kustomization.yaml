@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# dma-bridge — non-ROS WebSocket bridge over /dev/shm (:9098), the FE wire
+# for argus.vr.web.react. Always rendered, gated on
+# foundation.bot/has-dma-bridge (default-on). Namespace `phantom` (shared
+# with yovariable-server / dma-recorder) is created by the Argo
+# Application's CreateNamespace=true sync option.
+resources:
+  - dma-bridge.yaml
