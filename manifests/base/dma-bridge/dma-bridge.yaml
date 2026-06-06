@@ -80,7 +80,12 @@ spec:
         - name: bridge
           # ENTRYPOINT dma-bridge-server, CMD --host 0.0.0.0 --port 9098 are
           # baked into the image — no command/args override needed here.
-          image: foundationbot/dma_bridge:main-latest
+          # `main` is the multi-arch manifest the positronic_control CI
+          # publishes (combines -amd64 + -arm64), so it auto-selects arm64
+          # on the Jetson. Pin an immutable tag per-robot via
+          # images.dma-bridge in host-config.yaml (e.g. <version>-arm64 or
+          # <sha>-arm64). There is no `-latest` tag.
+          image: foundationbot/dma_bridge:main
           imagePullPolicy: IfNotPresent
           env:
             - { name: PYTHONUNBUFFERED, value: "1" }
