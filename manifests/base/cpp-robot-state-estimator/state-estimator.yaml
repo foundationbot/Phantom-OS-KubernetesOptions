@@ -17,9 +17,18 @@
 # docker-compose:
 #   --urdf, --config — paths to files baked into the image at
 #                      /usr/local/share/phantom/urdf|config/.
-#   --body-frame-rotation enabled — expect DMA.ethercat to publish IMU
-#                      body-frame fields. Pair with DMA.ethercat's
-#                      --enable-body-frame-rotation flag.
+#   --mujoco-model — MuJoCo XML (baked at config/mujoco/) whose
+#                      <site name="*_imu" quat=...> entries give the IMU
+#                      sensor->body mount rotations. The SE applies these
+#                      itself (recomputes body-frame accel/gyro/proj_gravity/
+#                      so3 from the always-raw sensor fields), so it is the
+#                      single authority for the rotation — DMA.ethercat's
+#                      --enable-body-frame-rotation is NOT required (and must
+#                      not be relied on; the SE overwrites from raw).
+#   --body-frame-rotation enabled — consume the body-frame IMU fields
+#                      (now populated by the SE's own --mujoco-model
+#                      preprocessing). Keep ENABLED so the updaters read the
+#                      rotated fields; do NOT set disabled (that reads raw).
 #
 # Override per-robot by adding cpp-robot-state-estimator to the
 # host-config deployments block once DEPLOYMENT_TARGETS gets it (not
@@ -75,6 +84,8 @@ spec:
             - /usr/local/share/phantom/urdf/20250206_phantom_mk1_clean.urdf
             - --config
             - /usr/local/share/phantom/config/state_estimator_params.json
+            - --mujoco-model
+            - /usr/local/share/phantom/config/mujoco/phantom_mk1.xml
             - --body-frame-rotation
             - enabled
           env:
