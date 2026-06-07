@@ -621,8 +621,27 @@ nodeLabels:
 #   phantomos-api-server   core stack, container 'api'
 #   phantom-locomotion     core stack, container 'phantom-locomotion'
 #                                       (default /recordings mount, override host path here)
+#   cpp-robot-state-estimator
+#                          core stack, container 'state-estimator'
+#                                       (accepts extraArgs — see below)
 #   dma-recorder           core stack, container 'recorder' (DMA.streams .rrd writer)
 #   rerun-streamer         core stack, container 'streamer' (DMA.streams live viewer)
+#
+# deployments.cpp-robot-state-estimator.extraArgs (optional):
+#   List of additional CLI flags appended after the SE's base args. Use
+#   when a per-robot hardware configuration differs from the default SE
+#   flag set — for example, robots without F/T sensors (e.g. mk11000009)
+#   whose contact source diverges from the default ft_sensors source:
+#
+#     deployments:
+#       cpp-robot-state-estimator:
+#         extraArgs: [--foot-contact-source, kinematic]
+#
+#   Strategic-merge replaces the args list wholesale (Kubernetes cannot
+#   merge a list of scalars), so the full base args are always re-emitted
+#   before the extraArgs. Do not repeat base flags here — just the new
+#   ones. Only supported on cpp-robot-state-estimator; the validator
+#   rejects this field on other deployments.
 #
 # deployments.positronic-control.launchCommand (optional):
 #   The command the positronic-control pod's entrypoint runs (exec'd via
@@ -707,3 +726,9 @@ nodeLabels:
 #     # Raise only if frame loss during transient viewer stalls is a
 #     # bigger problem than RSS growth.
 #     queueMemoryLimitMb: 8
+#
+#   # cpp-robot-state-estimator: on robots without F/T sensors (0-F/T
+#   # hardware like mk11000009), the default ft_sensors contact source
+#   # disagrees with the missing hardware — use kinematic instead:
+#   cpp-robot-state-estimator:
+#     extraArgs: [--foot-contact-source, kinematic]
