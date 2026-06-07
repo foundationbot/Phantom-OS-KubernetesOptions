@@ -1183,6 +1183,20 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "positronic",
         "container": "phantom-locomotion",
     },
+    # cpp-robot-state-estimator DaemonSet — IMU + kinematic state estimator.
+    # Override channels:
+    #   * extraArgs: list of additional CLI flags appended after the base
+    #     args (e.g. [--foot-contact-source, kinematic] on robots without
+    #     F/T sensors, where the default ft_sensors contact source would
+    #     disagree with the missing hardware). Append-only — base args are
+    #     always re-emitted so strategic-merge replaces the whole list.
+    #   * mounts: host-path overlays.
+    "cpp-robot-state-estimator": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "state-estimator",
+    },
     # DMA.streams recorder DaemonSet — patches go to the `recorder` container
     # (not the `janitor` sidecar). Override channels:
     #   * variant: mk1 | mk2 | mk2_lowerbody — picks the bundled URDF the
@@ -1216,15 +1230,15 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
 
 # Base args for argv-overlaying deployments. The strategic-merge patches
 # emitted when host-config sets argv-shaped fields (variant,
-# queueMemoryLimitMb) REPLACE args wholesale — strategic-merge cannot
-# merge a list of scalar strings — so each entry below is the contract
-# between host-config.py and the matching base manifest under
-# manifests/base/dma-streams/. If a base manifest gains another flag,
-# mirror it here so per-host overrides don't silently drop it.
+# queueMemoryLimitMb, extraArgs) REPLACE args wholesale — strategic-merge
+# cannot merge a list of scalar strings — so each entry below is the
+# contract between host-config.py and the matching base manifest under
+# manifests/base/. If a base manifest gains another flag, mirror it here
+# so per-host overrides don't silently drop it.
 #
 # Each list is exactly what the manifest's `args:` contains EXCEPT for
-# the fields we project from host-config (variant, queueMemoryLimitMb).
-# Those are appended onto the base list when set.
+# the fields we project from host-config (variant, queueMemoryLimitMb,
+# extraArgs). Those are appended onto the base list when set.
 RERUN_STREAMER_BASE_ARGS: list[str] = ["--port", "9788"]
 DMA_RECORDER_BASE_ARGS: list[str] = [
     "--output", "/recordings",
@@ -1233,9 +1247,20 @@ DMA_RECORDER_BASE_ARGS: list[str] = [
     "--decimate", "1",
     "--manual-arm",
 ]
+# MUST stay in sync with manifests/base/cpp-robot-state-estimator/
+# state-estimator.yaml args:. If the base manifest gains or drops a
+# flag, mirror the change here — otherwise extraArgs-bearing patches
+# will silently restore the old arg list.
+CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS: list[str] = [
+    "--urdf", "/usr/local/share/phantom/urdf/20250206_phantom_mk1_clean.urdf",
+    "--config", "/usr/local/share/phantom/config/state_estimator_params.json",
+    "--mujoco-model", "/usr/local/share/phantom/config/mujoco/phantom_mk1.xml",
+    "--body-frame-rotation", "enabled",
+]
 DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
     "rerun-streamer": RERUN_STREAMER_BASE_ARGS,
     "dma-recorder": DMA_RECORDER_BASE_ARGS,
+    "cpp-robot-state-estimator": CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS,
 }
 
 # Allowlist for deployments.{rerun-streamer,dma-recorder}.variant. Add
@@ -1265,6 +1290,14 @@ VARIANT_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"rerun-streamer", "dm
 # Only meaningful on dma-recorder.
 EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"})
 
+# Allowlist for deployments.<name>.extraArgs. A generic escape hatch for
+# appending additional CLI flags to the deployment's base args without
+# adding a named field per flag. Currently supported only on
+# cpp-robot-state-estimator — the motivating case is robots without F/T
+# sensors (e.g. mk11000009) that need --foot-contact-source kinematic
+# instead of the default ft_sensors contact source.
+EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"cpp-robot-state-estimator"})
+
 
 # Fields under a deployments.<name> entry that target the workload
 # resource itself (volumes, container args, securityContext). Used by
@@ -1275,6 +1308,7 @@ EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"
 # an empty no-op patch on the workload.
 _WORKLOAD_PATCH_FIELDS: frozenset[str] = frozenset({
     "mounts", "privileged", "variant", "queueMemoryLimitMb", "explodeJoints",
+    "extraArgs",
 })
 
 
@@ -1337,15 +1371,16 @@ def _build_deployment_patch(
         )
         container_spec["securityContext"] = {"privileged": True}
 
-    # Argv-overlay fields (variant, queueMemoryLimitMb, explodeJoints).
-    # When any of these are set, strategic-merge REPLACES the whole args
-    # list, so we re-emit the base manifest's args from
+    # Argv-overlay fields (variant, queueMemoryLimitMb, explodeJoints,
+    # extraArgs). When any of these are set, strategic-merge REPLACES the
+    # whole args list, so we re-emit the base manifest's args from
     # DEPLOYMENT_BASE_ARGS and append the overlay flags. validate()
     # rejects each field on deployments where it isn't supported.
     variant = spec.get("variant")
     queue_limit_mb = spec.get("queueMemoryLimitMb")
     explode_joints = spec.get("explodeJoints")
-    if variant is not None or queue_limit_mb is not None or explode_joints:
+    extra_args = spec.get("extraArgs") or []
+    if variant is not None or queue_limit_mb is not None or explode_joints or extra_args:
         base_args = DEPLOYMENT_BASE_ARGS.get(deployment_name)
         if base_args is None:
             # Defensive — validate() should have caught this. Skip silently
@@ -1362,6 +1397,12 @@ def _build_deployment_patch(
                 # ("SpineYaw,RightAnklePitch"), so flatten the list here.
                 # The "all" sentinel passes through unchanged.
                 args_out += ["--explode-joints", ",".join(str(n) for n in explode_joints)]
+            if extra_args:
+                # extraArgs is a list of additional flags to append verbatim
+                # after the base args. validate() ensures each element is a
+                # scalar (str/int/float/bool); coerce to str here so YAML
+                # integers like port numbers pass through cleanly.
+                args_out += [str(a) for a in extra_args]
             container_spec["args"] = args_out
 
     api_version = "apps/v1"
@@ -2362,6 +2403,35 @@ def cmd_validate(cfg: dict) -> int:
                             f"deployments.{name}.queueMemoryLimitMb: "
                             f"must be >= 1 MB"
                         )
+            # extraArgs: generic append-only argv escape hatch. Supported
+            # only on EXTRA_ARGS_SUPPORTED_DEPLOYMENTS (currently
+            # cpp-robot-state-estimator). Must be a list of scalars
+            # (strings, integers, floats). The motivating case is robots
+            # without F/T sensors (e.g. mk11000009) that need
+            # --foot-contact-source kinematic instead of the default
+            # ft_sensors source.
+            if "extraArgs" in spec:
+                if name not in EXTRA_ARGS_SUPPORTED_DEPLOYMENTS:
+                    errors.append(
+                        f"deployments.{name}.extraArgs: only "
+                        f"supported on {sorted(EXTRA_ARGS_SUPPORTED_DEPLOYMENTS)}"
+                    )
+                else:
+                    ea = spec["extraArgs"]
+                    if not isinstance(ea, list):
+                        errors.append(
+                            f"deployments.{name}.extraArgs: must be a "
+                            f"list of strings"
+                        )
+                    else:
+                        for k, item in enumerate(ea):
+                            if isinstance(item, (dict, list)):
+                                errors.append(
+                                    f"deployments.{name}.extraArgs[{k}]:"
+                                    f" must be a scalar (string, integer,"
+                                    f" or float), got {type(item).__name__}"
+                                )
+                                break
             # launchCommand: declarative PHANTOM_CMD persistence (FIR-407).
             # Only meaningful on positronic-control; lives nested under
             # deployments alongside mounts: so all positronic-control
