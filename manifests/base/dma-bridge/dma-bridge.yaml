@@ -1,0 +1,137 @@
+# dma-bridge — DaemonSet for the non-ROS WebSocket bridge over /dev/shm.
+#
+# Replaces rosbridge :9090 for argus.vr.web.react and the other FE apps
+# that used to talk to ROS topics in positronic_control's qa-candidate.
+# Reads /actuals + /video_* and writes /desired / /taskspace via the same
+# dma_common shm queues the policy + IK loop uses, then serves them to the
+# FE as rosbridge-style op-based JSON on :9098. Source lives in
+# positronic_control/workspace/dma_bridge (image foundationbot/dma_bridge,
+# published per-arch by that repo's CI).
+#
+# ── Shape (mirrors rerun-streamer / yovariable-server) ───────────────────
+# A DaemonSet, not a Deployment, for symmetry with the other shm-reader
+# robot workloads. hostNetwork so the :9098 websocket binds the robot's
+# real iface (the FE dials the robot IP directly); hostIPC + privileged so
+# the bridge can mmap the /dev/shm POSIX segments that DMA.ethercat,
+# DMA.video and Georgi's phantom_runtime publish from other IPC namespaces.
+#
+# ── Default-on, gated ────────────────────────────────────────────────────
+# Gated on TWO node labels:
+#   foundation.bot/robot:          "true"  — only schedule on robot nodes
+#   foundation.bot/has-dma-bridge: "true"  — default-on (the cluster phase
+#       reconciler injects "true" on every robot unless host-config's
+#       nodeLabels: sets it to "false"). Take it off a host by flipping
+#       has-dma-bridge to "false" in /etc/phantomos/host-config.yaml.
+#
+# ── Source mounts come from host-config, not baked ───────────────────────
+# The image deliberately does NOT bake its sibling repos — PYTHONPATH points
+# at /ai.inference, /src/services/phantom_runtime, /src/workspace/phantom_policies
+# (etc.), all mounted at runtime so bumping those repos doesn't force a
+# bridge rebuild. Only the universal /dev/shm mount lives here; the per-host
+# /src (positronic_control checkout) and /ai.inference paths are injected as
+# a strategic-merge patch from deployments.dma-bridge.mounts in
+# /etc/phantomos/host-config.yaml at bootstrap, exactly like positronic-control.
+#
+# Image tag is rewritten per-robot via the overlay's kustomize images:
+# transformer (bootstrap reads images.dma-bridge.image from host-config).
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dma-bridge
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: dma-bridge
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dma-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dma-bridge
+    spec:
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-dma-bridge: "true"   # ← default-on; "false" to opt out
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # The FE dials the bridge directly via the robot's IP; sit in the
+      # host network namespace so :9098 binds the host iface.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # hostIPC: share the POSIX IPC namespace so the bridge sees the same
+      # /dev/shm segments as DMA.ethercat / DMA.video / phantom_runtime.
+      hostIPC: true
+
+      terminationGracePeriodSeconds: 10
+
+      # foundationbot/dma_bridge is a private DockerHub repo; the pull needs
+      # the deployment-account PAT. dockerhub-creds is seeded per-namespace
+      # by bootstrap phase 5 (seed-pull-secrets).
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        - name: bridge
+          # ENTRYPOINT dma-bridge-server, CMD --host 0.0.0.0 --port 9098 are
+          # baked into the image — no command/args override needed here.
+          # `main` is the multi-arch manifest the positronic_control CI
+          # publishes (combines -amd64 + -arm64), so it auto-selects arm64
+          # on the Jetson. Pin an immutable tag per-robot via
+          # images.dma-bridge in host-config.yaml (e.g. <version>-arm64 or
+          # <sha>-arm64). There is no `-latest` tag.
+          image: foundationbot/dma_bridge:main
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PYTHONUNBUFFERED, value: "1" }
+
+          ports:
+            - name: ws
+              containerPort: 9098
+              hostPort: 9098
+
+          securityContext:
+            runAsUser: 0      # /dev/shm segments are root-owned on the host
+            privileged: true  # required for cross-IPC-namespace shm mmap
+
+          resources:
+            # Pure I/O fan-out (video frames pass through without re-encode),
+            # so the same modest envelope as rerun-streamer.
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+          # The bridge has no /health endpoint — probe the websocket port
+          # with a TCP connect, same as rerun-streamer.
+          livenessProbe:
+            tcpSocket:
+              port: 9098
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 9098
+            initialDelaySeconds: 2
+            periodSeconds: 10
+
+          volumeMounts:
+            # Universal mount only. Per-host /src + /ai.inference come from
+            # deployments.dma-bridge.mounts in host-config.yaml as a
+            # strategic-merge patch (see header).
+            - name: dev-shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

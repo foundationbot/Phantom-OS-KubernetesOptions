@@ -27,5 +27,6 @@ resources:
   - ../../base/phantomos-api-server
   - ../../base/yovariable-server
   - ../../base/dma-streams
+  - ../../base/dma-bridge
   - ../../base/phantom-locomotion
   - ../../base/cpp-robot-state-estimator

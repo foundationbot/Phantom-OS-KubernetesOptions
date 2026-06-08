@@ -7,7 +7,10 @@
 #
 #   operator-ui  AI_PC_URL          http://$(AI_PC_HOST):5000
 #   vr-web       CAMERA_SERVER_URL  http://$(AI_PC_HOST):8889
-#   vr-web       ROSBRIDGE_URL      ws://$(AI_PC_HOST):9090
+#
+# vr-web's ROSBRIDGE_URL is NOT derived from this CM anymore — it points
+# at the dma-bridge DaemonSet on the robot (ws://$(NODE_IP):9098, via the
+# downward-API node IP), which replaced the AI PC's rosbridge_server.
 #
 # So a robot move (new AI PC) is a single-line change here — every
 # downstream URL re-renders automatically on the next pod start.

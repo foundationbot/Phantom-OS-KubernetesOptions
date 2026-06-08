@@ -732,3 +732,15 @@ nodeLabels:
 #   # disagrees with the missing hardware — use kinematic instead:
 #   cpp-robot-state-estimator:
 #     extraArgs: [--foot-contact-source, kinematic]
+#   # dma-bridge: the FE WebSocket bridge (:9098) over /dev/shm. Default-on
+#   # (foundation.bot/has-dma-bridge); take it off a host by setting that
+#   # label to 'false' in nodeLabels: below. The base manifest mounts only
+#   # /dev/shm — the bridge's PYTHONPATH sibling repos are per-host and MUST
+#   # be supplied here for it to import phantom_runtime / ai_inference /
+#   # phantom_policies. host = the on-robot checkout paths (mirror whatever
+#   # positronic-control's `src` mount uses on this host).
+#   dma-bridge:
+#     privileged: true
+#     mounts:
+#       - {name: src,          host: /opt/positronic_control, container: /src}
+#       - {name: ai-inference, host: /opt/ai.inference,       container: /ai.inference}

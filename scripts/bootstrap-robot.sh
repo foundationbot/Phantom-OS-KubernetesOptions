@@ -2010,8 +2010,10 @@ _url_to_host() {
 # Three keys land in the CM:
 #   AI_PC_HOST       — the AI PC's per-host Tailscale IP / FQDN
 #                      (operator-ui composes AI_PC_URL=http://$(AI_PC_HOST):5000;
-#                      vr-web composes CAMERA_SERVER_URL=http://$(AI_PC_HOST):8889
-#                      and ROSBRIDGE_URL=ws://$(AI_PC_HOST):9090).
+#                      vr-web composes CAMERA_SERVER_URL=http://$(AI_PC_HOST):8889).
+#                      vr-web's ROSBRIDGE_URL is no longer AI-PC-derived —
+#                      it targets the on-robot dma-bridge at
+#                      ws://$(NODE_IP):9098 (downward-API node IP).
 #   CONTROL_PC_HOST  — the robot's own externally-reachable address
 #                      (operator-ui composes CONTROL_PC_URL=http://$(CONTROL_PC_HOST):5000;
 #                      phantomos-api-server runs hostNetwork in the

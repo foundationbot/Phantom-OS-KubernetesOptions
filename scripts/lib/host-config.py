@@ -117,6 +117,9 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-cameras",
      "true",
      "dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)"),
+    ("foundation.bot/has-dma-bridge",
+     "true",
+     "dma-bridge DaemonSet (FE WebSocket bridge :9098)"),
     ("foundation.bot/has-locomotion",
      "false",
      "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
@@ -1034,6 +1037,17 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/dma-streams",
     },
+    "dma-bridge": {
+        # Non-ROS WebSocket bridge (:9098) — the FE wire for
+        # argus.vr.web.react. has-dma-bridge gated, default-on.
+        # Key uses the hyphenated workload name (matches DaemonSet +
+        # has-dma-bridge label); the published image repo is underscored
+        # (foundationbot/dma_bridge) — same key/image indirection as
+        # operator-ui and phantom-locomotion. CI in positronic_control
+        # publishes <branch>-<arch> tags.
+        "stack": "core",
+        "manifest_image": "foundationbot/dma_bridge",
+    },
 }
 
 
@@ -1224,6 +1238,26 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "kind": "DaemonSet",
         "namespace": "phantom",
         "container": "streamer",
+    },
+    # dma-bridge DaemonSet — the FE WebSocket bridge over /dev/shm. The base
+    # manifest declares only the universal /dev/shm mount; the bridge's
+    # PYTHONPATH sibling repos (/src = positronic_control checkout,
+    # /ai.inference) are per-host, so every robot supplies them via:
+    #
+    #   deployments:
+    #     dma-bridge:
+    #       privileged: true
+    #       mounts:
+    #         - {name: src,          host: /opt/positronic_control, container: /src}
+    #         - {name: ai-inference, host: /opt/ai.inference,       container: /ai.inference}
+    #
+    # Same strategic-merge-by-volume-name mechanism positronic-control uses
+    # for its /src mount.
+    "dma-bridge": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "phantom",
+        "container": "bridge",
     },
 }
 

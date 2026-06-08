@@ -8,12 +8,14 @@
 # Per-host inputs:
 #
 #   /etc/phantomos/operator-ui-pairing.yaml
-#       operator-ui-pairing ConfigMap. Holds AI_PC_URL plus derived
-#       CAMERA_SERVER_URL (:8889 MediaMTX) and ROSBRIDGE_URL (:9090
-#       rosbridge_server). Rendered by bootstrap-robot.sh phase 6 from
-#       host-config.yaml's aiPcUrl. NOT in the GitOps tree, so ArgoCD
-#       doesn't reset per-host changes. The vr-web Pod reads the two
-#       derived keys via configMapKeyRef.
+#       operator-ui-pairing ConfigMap. Holds AI_PC_HOST, from which
+#       CAMERA_SERVER_URL (:8889 MediaMTX on the AI PC) is derived.
+#       Rendered by bootstrap-robot.sh phase 6 from host-config.yaml's
+#       aiPcUrl. NOT in the GitOps tree, so ArgoCD doesn't reset per-host
+#       changes. The vr-web Pod reads AI_PC_HOST via configMapKeyRef.
+#       ROSBRIDGE_URL is NO LONGER AI-PC-derived: it now points at the
+#       dma-bridge DaemonSet on this robot (ws://$(NODE_IP):9098), so it
+#       comes from the downward-API node IP, not this ConfigMap.
 #
 #   /opt/certs/*.crt + /opt/certs/*.key
 #       Tailscale-issued TLS cert + key for this robot's Tailscale FQDN
@@ -85,7 +87,8 @@ data:
           try_files $uri =404;
         }
 
-        # Same-origin proxy to ROS bridge on the paired AI PC.
+        # Same-origin proxy to the dma-bridge WebSocket on this robot
+        # (:9098, core stack) — the non-ROS replacement for rosbridge.
         location /api/rosbridge {
           proxy_pass __ROSBRIDGE_PROXY__/;
           proxy_http_version 1.1;
@@ -228,8 +231,24 @@ spec:
                   key: AI_PC_HOST
             - name: CAMERA_SERVER_URL
               value: "http://$(AI_PC_HOST):8889"
+            # NODE_IP is this robot node's own address (downward API).
+            # The /api/rosbridge upstream now targets the dma-bridge
+            # DaemonSet (core stack), which replaced rosbridge_server and
+            # runs on THIS robot's host network (:9098), not the AI PC.
+            # vr-web is hostPort (not hostNetwork), so its pod loopback is
+            # NOT the node — we must dial the node IP to reach a
+            # host-network port. status.hostIP is the node-local
+            # equivalent of "localhost on the robot".
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            # Kept the ROSBRIDGE_URL name + /api/rosbridge path: dma-bridge
+            # is a drop-in, same rosbridge-style op-based JSON wire shape,
+            # so the FE and the nginx template are unchanged — only the
+            # endpoint moves from ws://AI_PC_HOST:9090 to the local bridge.
             - name: ROSBRIDGE_URL
-              value: "ws://$(AI_PC_HOST):9090"
+              value: "ws://$(NODE_IP):9098"
             # In-cluster Vosk recognizer. vr-web's nginx proxies
             # /api/voice to this so the browser only ever talks to vr-web.
             - name: VOICE_SERVER_URL
