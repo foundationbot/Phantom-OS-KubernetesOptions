@@ -41,7 +41,13 @@ spec:
           # install_dma_ethercat phase, using the foundationbot/dma-ethercat
           # newTag from /etc/phantomos/host-config.yaml's images: list.
           image: foundationbot/dma-ethercat:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
+          # Always, not IfNotPresent: the substituted tag is mutable
+          # (foundationbot/dma-ethercat:<branch>-latest-aarch64). CI
+          # re-pushes a new digest at the same tag, so IfNotPresent would
+          # run against the host's stale containerd cache and extract the
+          # old .deb. Always consults the registry every run, eliminating
+          # the manual `k0s ctr images rm` cache-bust. (FIR-409)
+          imagePullPolicy: Always
           command: ["/bin/sh", "-c"]
           args:
             - |
