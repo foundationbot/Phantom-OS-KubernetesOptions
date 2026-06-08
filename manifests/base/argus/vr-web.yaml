@@ -89,6 +89,21 @@ data:
 
         # Same-origin proxy to the dma-bridge WebSocket on this robot
         # (:9098, core stack) — the non-ROS replacement for rosbridge.
+        # Both /api/dma_bridge (new) and /api/rosbridge (legacy) proxy to
+        # the same backend during the rename migration; the image renders
+        # __DMA_BRIDGE_PROXY__ from DMA_BRIDGE_URL and __ROSBRIDGE_PROXY__
+        # from ROSBRIDGE_URL. Drop the rosbridge block once the FE only
+        # calls /api/dma_bridge. WebSocket upgrade headers are required on
+        # both or nginx returns 200 (SPA fallback) instead of 101.
+        location /api/dma_bridge {
+          proxy_pass __DMA_BRIDGE_PROXY__/;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_read_timeout 3600;
+        }
+
         location /api/rosbridge {
           proxy_pass __ROSBRIDGE_PROXY__/;
           proxy_http_version 1.1;
