@@ -11,16 +11,18 @@
 # to the upper_body_cmd SHM queue as a residual base for the WBC policy.
 #
 # ── Image ────────────────────────────────────────────────────────────────
-# foundationbot/ik-service — the ROS-free, CPU-only service image built from
+# foundationbot/ik-mk2 — the ROS-free, CPU-only service image built from
 # IK_MK2 services/ik_service/Dockerfile (ubuntu:24.04 + mink/mujoco/numpy +
-# dma_common cp312 wheels). NO GPU, NO ROS — hence no runtimeClassName: nvidia.
-# Per-robot tag is rewritten by Kustomize from host-config.yaml's
-# images.ik-service entry; do not pin the tag here.
+# dma_common cp312 wheels; ENTRYPOINT ik-service-runner). NO GPU, NO ROS —
+# hence no runtimeClassName: nvidia. The :PLACEHOLDER tag is rewritten per-robot
+# by Kustomize from host-config.yaml's images.ik-mk2 entry (bootstrap
+# --image-overrides); set it to the published service tag, e.g.
+# foundationbot/ik-mk2:V-0-1-0-YYYYMMDD-HHMMSS.
 #
-# NOTE: IK_MK2 CI currently publishes the *placeholder* foundationbot/ik-mk2
-# teleop-demo image, not this service image. The services/ik_service/Dockerfile
-# build must be wired into .circleci/config.yml (tag foundationbot/ik-service)
-# before this DaemonSet has a real image to pull.
+# NOTE: the ik-mk2 repo's V-*-... tags must be the services/ik_service build
+# (entrypoint ik-service-runner), NOT the earlier placeholder teleop-demo
+# image (CMD python examples/teleop_demo.py) — the args below assume the
+# service runner. IK_MK2 .circleci/config.yml builds services/ik_service/Dockerfile.
 #
 # ── Lifecycle / gating ─────────────────────────────────────────────────────
 # Schedules only on robot nodes that opt in via
@@ -81,8 +83,8 @@ spec:
       containers:
         - name: ik-service
           # Built from IK_MK2 services/ik_service/Dockerfile. Bump the tag
-          # through host-config kustomize.images, not here.
-          image: foundationbot/ik-service:PLACEHOLDER
+          # through host-config images.ik-mk2, not here.
+          image: foundationbot/ik-mk2:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           # ENTRYPOINT is ik-service-runner; these args mirror the image's
           # default CMD (seed from /actuals via dma_ipc). For a robot whose
