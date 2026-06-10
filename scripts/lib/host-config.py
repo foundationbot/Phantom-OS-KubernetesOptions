@@ -120,6 +120,9 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-dma-bridge",
      "true",
      "dma-bridge DaemonSet (FE WebSocket bridge :9098)"),
+    ("foundation.bot/has-ik-mk2",
+     "false",
+     "ik-mk2 DaemonSet (MK2 upper-body IK shim, positronic ns)"),
     ("foundation.bot/has-locomotion",
      "false",
      "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
@@ -1028,6 +1031,16 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/cpp-robot-state-estimator",
     },
+    "ik-mk2": {
+        # MK2 upper-body IK shim DaemonSet (foundation.bot/has-ik-mk2,
+        # positronic ns). Key matches the DaemonSet + has-ik-mk2 label and
+        # the published image repo (no key/image indirection). CI in the
+        # IK_MK2 repo publishes a multi-arch manifest tag
+        # foundationbot/ik-mk2:V-<x-y-z>-<ts> (per-arch -amd64/-arm64
+        # siblings merged by the manifest job).
+        "stack": "core",
+        "manifest_image": "foundationbot/ik-mk2",
+    },
     "dma-streams": {
         # Single image, two DaemonSets — dma-recorder (has-recorder) and
         # rerun-streamer (has-streamer) — both run a different binary
@@ -1259,6 +1272,24 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "phantom",
         "container": "bridge",
     },
+    # ik-mk2 DaemonSet — MK2 upper-body IK shim (positronic ns, default-off).
+    # Override channels:
+    #   * extraArgs: append CLI flags to the base args. The motivating case
+    #     is per-host loop mode — a robot with no DMA master runs open-loop:
+    #
+    #       deployments:
+    #         ik-mk2:
+    #           extraArgs: [--no-actuals]
+    #
+    #     (also useful: [--log-level, DEBUG], or [--rate, "100"] — argparse
+    #     last-wins, so a re-specified flag overrides the base value).
+    #   * mounts: host-path overlays (the base manifest mounts only /dev/shm).
+    "ik-mk2": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "ik-mk2",
+    },
 }
 
 
@@ -1291,10 +1322,21 @@ CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS: list[str] = [
     "--mujoco-model", "/usr/local/share/phantom/config/mujoco/phantom_mk1.xml",
     "--body-frame-rotation", "enabled",
 ]
+# MUST stay in sync with manifests/base/ik-mk2/ik-mk2.yaml args:. An
+# extraArgs-bearing patch re-emits this whole list (strategic-merge can't
+# merge scalar-string lists), then appends the operator's flags — so if the
+# base manifest's args change, mirror them here or per-host overrides will
+# silently restore the old list.
+IK_MK2_BASE_ARGS: list[str] = [
+    "--taskspace", "taskspace_command",
+    "--command-out", "upper_body_cmd",
+    "--rate", "50",
+]
 DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
     "rerun-streamer": RERUN_STREAMER_BASE_ARGS,
     "dma-recorder": DMA_RECORDER_BASE_ARGS,
     "cpp-robot-state-estimator": CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS,
+    "ik-mk2": IK_MK2_BASE_ARGS,
 }
 
 # Allowlist for deployments.{rerun-streamer,dma-recorder}.variant. Add
@@ -1330,7 +1372,9 @@ EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"
 # cpp-robot-state-estimator — the motivating case is robots without F/T
 # sensors (e.g. mk11000009) that need --foot-contact-source kinematic
 # instead of the default ft_sensors contact source.
-EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"cpp-robot-state-estimator"})
+EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
+    {"cpp-robot-state-estimator", "ik-mk2"}
+)
 
 
 # Fields under a deployments.<name> entry that target the workload

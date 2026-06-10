@@ -132,6 +132,11 @@ stacks:
 #                          viz on :9788. manifest uses
 #                          foundationbot/dma-streams. One entry here
 #                          rewrites both. Tag convention <branch>-latest-<arch>.
+#   ik-mk2                 core stack — ik-mk2 DaemonSet (MK2 upper-body IK
+#                          shim, has-ik-mk2, default-off). Multi-arch
+#                          manifest tag foundationbot/ik-mk2:V-<x-y-z>-<ts>
+#                          from the IK_MK2 repo CI. Only needed on hosts
+#                          that opt in via nodeLabels has-ik-mk2: 'true'.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -141,6 +146,10 @@ images:
     image: foundationbot/argus.operator-ui:REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
   dma-ethercat:
     image: foundationbot/dma-ethercat:main-latest-aarch64
+  # ik-mk2 is default-off (nodeLabels has-ik-mk2: 'false'); uncomment and
+  # pin a real CI tag only on hosts that opt in.
+  # ik-mk2:
+  #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

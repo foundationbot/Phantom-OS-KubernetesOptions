@@ -428,6 +428,7 @@ Known labels and the workloads they gate:
 | `foundation.bot/has-state-estimator` | `cpp-robot-state-estimator` DaemonSet | off |
 | `foundation.bot/has-recorder` | `dma-recorder` DaemonSet | off |
 | `foundation.bot/has-streamer` | `rerun-streamer` DaemonSet | off |
+| `foundation.bot/has-ik-mk2` | `ik-mk2` DaemonSet (upper-body IK shim, `positronic` ns) | off |
 
 `has-positronic` is **default-on** — the cluster phase reconciler
 injects it on every robot unless host-config explicitly sets it
