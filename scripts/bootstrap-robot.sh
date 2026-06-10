@@ -87,9 +87,9 @@
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
-#   --skip-ecat-interface skip the phase 7 ecat-interface setup
-#   --skip-cpu-isolation skip the phase 8 cpu-isolation setup
-#   --skip-log-management skip the phase 8.5 log-management setup
+#   --skip-ecat-interface skip the phase 9 ecat-interface setup
+#   --skip-cpu-isolation skip the phase 10 cpu-isolation setup
+#   --skip-log-management skip the phase 11 log-management setup
 #   --skip-validate      skip the final validate-local-registry.sh run
 #   --no-tailscale       ignore Tailscale when resolving the cluster API
 #                        address; bind spec.api.address to the
@@ -216,7 +216,16 @@
 #                    the flag preserve AI_PC_HOST from the local file
 #                    and re-resolve CONTROL_PC_HOST fresh. Rolls out
 #                    operator-ui to pick up either change.
-#    7. ecat-interface (gates phase 8)
+#    7. locomotion-config
+#                    render+apply the phantom-locomotion-config ConfigMap
+#                    from host-config's phantomLocomotion block (mode /
+#                    policy / diagnostic tunables). Rolls the
+#                    phantom-locomotion DaemonSet if present.
+#    8. sonic-config  render+apply the phantom-sonic-config ConfigMap from
+#                    host-config's phantomSonic block (ROS domain, walking
+#                    policy, encoder mode, ZMQ/web ports, ramp). Rolls the
+#                    phantom-sonic DaemonSet if present.
+#    9. ecat-interface (gates phase 10)
 #                    resolve the EtherCAT NIC adapter and rename it to
 #                    cpuIsolation.nic.iface via a persistent udev rule
 #                    (/etc/udev/rules.d/70-ecat.rules). Driven by
@@ -225,7 +234,7 @@
 #                    interactive picker on a TTY. Idempotent — fast-paths
 #                    when `ip link show <iface>` already succeeds.
 #                    See docs/internal/cpu-isolation.md.
-#    8. cpu-isolation (gates phase 9)
+#   10. cpu-isolation (gates phase 12)
 #                    activate cgroup v2 cpuset partitions; install
 #                    cpusets.service so they reactivate at boot
 #                    (ordered Before docker / user@ / k0scontroller /
@@ -235,7 +244,10 @@
 #                    Default-on: missing cpuIsolation: block prompts on
 #                    a TTY and persists answers. enabled: false skips.
 #                    See docs/internal/cpu-isolation.md.
-#    9. install dma-ethercat (gates phase 10)
+#   11. log-management
+#                    install journald + logrotate drop-ins capping disk
+#                    use (default-on; --skip-log-management to opt out).
+#   12. install dma-ethercat (gates phase 13)
 #                    Default-on. Pass --skip-ethercat-install to bypass.
 #                    Renders the bootstrap-managed installer Job from
 #                    the foundationbot/dma-ethercat tag in host-config
@@ -245,7 +257,7 @@
 #                    /etc/dma/dma-ethercat.env (preserving operator
 #                    edits) and `systemctl enable --now
 #                    dma-ethercat.service`. ANY failure halts bootstrap.
-#   10. gitops       cd terraform && terraform init && terraform apply
+#   13. gitops       cd terraform && terraform init && terraform apply
 #                    (installs ArgoCD via the official Helm chart). Then
 #                    render per-host Application CRs (one per enabled
 #                    stack — phantomos-<robot>-core, phantomos-<robot>-operator)
@@ -254,28 +266,28 @@
 #                    kubectl-apply each. Migrates from any pre-existing
 #                    root-app + child-app topology without pruning workload
 #                    state.
-#   11. argocd admin install argocd CLI (latest release) under
+#   14. argocd admin install argocd CLI (latest release) under
 #                    /usr/local/bin/argocd and reset the admin password
 #                    to "1984" by patching argocd-secret with a bcrypt
 #                    hash. Idempotent (always rewrites the hash). Also
 #                    removes argocd-initial-admin-secret since it is no
 #                    longer authoritative.
-#   12. image overrides
+#   15. image overrides
 #                    inject host-config.yaml's images: list into the live
 #                    per-stack Argo Applications via
 #                    spec.source.kustomize.images. Filtered per stack —
 #                    each Application only sees images its manifests
 #                    actually reference. foundationbot/dma-ethercat is
 #                    NOT routed (consumed directly by phase 9).
-#   13. deployments  inject host-config.yaml's deployments: block as
+#   16. deployments  inject host-config.yaml's deployments: block as
 #                    strategic-merge patches into the live per-stack
 #                    Applications via spec.source.kustomize.patches.
 #                    Currently routes positronic-control + phantomos-api-server
 #                    mounts onto the core stack. Alias: --dev-mounts.
-#   14. setup-positronic (optional, --setup-positronic)
+#   17. setup-positronic (optional, --setup-positronic)
 #                    push positronic-control image to local registry,
 #                    build phantom-models, and redeploy the pod.
-#   15. validate     bash scripts/validate-local-registry.sh
+#   18. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
@@ -356,7 +368,7 @@ PULL_SECRET_NAME="dockerhub-creds"
 # Each entry is an ERE substring matched case-insensitively against
 # `systemctl list-unit-files --state=enabled` output. Append to extend.
 #   - api.*server   — host-systemd copy of phantomos-api-server (replaced by pod)
-#   - dma.*ethercat — replaced by phase 9 .deb install
+#   - dma.*ethercat — replaced by phase 12 .deb install
 SYSTEM_SERVICE_PATTERNS=(
   'api.*server'
   'dma.*ethercat'
@@ -527,7 +539,7 @@ cd "$REPO_ROOT" || die "cd $REPO_ROOT"
 # shellcheck source=scripts/lib/cpusets.sh
 . "$SCRIPT_DIR/lib/cpusets.sh"
 
-# EtherCAT NIC setup library — phase 7 sources these helpers and drives
+# EtherCAT NIC setup library — phase 9 sources these helpers and drives
 # the workflow directly rather than shelling out to
 # setup_ethercat_interface.sh (which kept its own decision tree). Lets
 # bootstrap make the idempotency call (rule already present + iface
@@ -839,7 +851,7 @@ stop_existing_services() {
 
 # ---- pre-phase: uninstall dma-ethercat (DEFAULT ON; --skip-ethercat-uninstall) -
 
-# Tear down the dma-ethercat realtime control service so phase 9's
+# Tear down the dma-ethercat realtime control service so phase 12's
 # install lands on a clean slate.
 #   1. systemctl stop dma-ethercat.service     (if active)
 #   2. systemctl disable dma-ethercat.service  (if enabled)
@@ -1002,11 +1014,11 @@ EOF
 
 # Tear down the dma-ethercat realtime control service. DEFAULT ON —
 # routine bootstrap re-runs tear down the realtime stack so a fresh
-# phase 9 install (when --with-ethercat-install is passed) lands on a
+# phase 12 install (when --with-ethercat-install is passed) lands on a
 # clean slate. WARNING: the .deb's dma-ethercat-uninstall script wipes
 # /etc/dma/, removing operator-placed config JSONs. If your robot has
 # hand-edited config you don't want to lose, pass --skip-ethercat-uninstall
-# to keep the existing /etc/dma/ tree untouched (phase 9 still refreshes
+# to keep the existing /etc/dma/ tree untouched (phase 12 still refreshes
 # the env file to point DMA_CONFIG at whatever host-config
 # dmaEthercat.configPath specifies). Designed to run AFTER purge_docker
 # and reset_cluster so the pods that talk to ethercat are already gone
@@ -1518,7 +1530,7 @@ EOF
 # returns something different. Symptom in journalctl is endless
 # "nodes \"<new>\" not found" + "leases ... cannot get resource"
 # because kubelet identifies as the old name and can't claim the new
-# node's lease. Cluster never goes Ready -> phase 9's `kubectl wait`
+# node's lease. Cluster never goes Ready -> phase 12's `kubectl wait`
 # times out -> bootstrap halts with a misleading dma-ethercat banner.
 #
 # Returns 0 if a mismatch is detected, 1 otherwise (cert missing,
@@ -1954,7 +1966,7 @@ seed_pull_secrets() {
     # pre-staged via the phantomos-k0s-images .deb doesn't need
     # DockerHub credentials at all (pods with imagePullPolicy:
     # IfNotPresent reuse what k0s imported into containerd at worker
-    # startup). Halting bootstrap here would also halt phase 10 (gitops)
+    # startup). Halting bootstrap here would also halt phase 13 (gitops)
     # and leave the cluster with no Applications. If any pod actually
     # needs a DockerHub pull, it'll surface as ImagePullBackOff later —
     # the right place for that signal, not the bootstrap.
@@ -2362,7 +2374,7 @@ _vr_web_tls_issue() {
   return 0
 }
 
-# ---- phase 6.5: locomotion-config (LOCOMOTION_POLICY ConfigMap) -----
+# ---- phase 7: locomotion-config (LOCOMOTION_POLICY ConfigMap) -----
 
 # Per-host locomotion policy file. Holds a ConfigMap manifest the
 # phantom-locomotion DaemonSet's main container reads via envFrom.
@@ -2404,10 +2416,10 @@ EOF
 
 locomotion_config() {
   if [ "${SKIP_LOCOMOTION_CONFIG:-0}" = 1 ]; then
-    phase "phase 6.5: locomotion-config  (skipped)"
+    phase "phase 7: locomotion-config  (skipped)"
     return
   fi
-  phase "phase 6.5: locomotion-config (LOCOMOTION_POLICY ConfigMap)"
+  phase "phase 7: locomotion-config (LOCOMOTION_POLICY ConfigMap)"
 
   local hc="$HOST_CONFIG_FILE"
   if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
@@ -2476,7 +2488,7 @@ LOCOMOTION_POLICY=mk2-walking-lower-body-1imu"
   fi
 }
 
-# ---- phase 6.6: sonic-config (phantom-sonic-config ConfigMap) -------
+# ---- phase 8: sonic-config (phantom-sonic-config ConfigMap) -------
 
 # Per-host phantom-sonic options file. Holds a ConfigMap manifest the
 # four phantom-sonic containers read via envFrom. Same host-resident,
@@ -2516,10 +2528,10 @@ EOF
 
 sonic_config() {
   if [ "${SKIP_SONIC_CONFIG:-0}" = 1 ]; then
-    phase "phase 6.6: sonic-config  (skipped)"
+    phase "phase 8: sonic-config  (skipped)"
     return
   fi
-  phase "phase 6.6: sonic-config (phantom-sonic-config ConfigMap)"
+  phase "phase 8: sonic-config (phantom-sonic-config ConfigMap)"
 
   local hc="$HOST_CONFIG_FILE"
   if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
@@ -2593,10 +2605,10 @@ MOTION_RAMP_SECS=1.0"
 
 # On first bringup the cpuIsolation: block doesn't exist in
 # host-config.yaml yet. Phase 7 (below) reads cpuIsolation.nic.iface
-# to know what to name the NIC; phase 8 reads partitions/dmaRtCpu/etc.
+# to know what to name the NIC; phase 10 reads partitions/dmaRtCpu/etc.
 # Before this hoist, the prompt that populates the block lived inside
-# phase 8 — so phase 7 ran first, saw an empty block, skipped, then
-# phase 8 prompted, persisted, and immediately tried to pin IRQs on a
+# phase 10 — so phase 9 ran first, saw an empty block, skipped, then
+# phase 10 prompted, persisted, and immediately tried to pin IRQs on a
 # NIC that nothing had named. Operators had to re-run bootstrap to
 # unstick the loop.
 #
@@ -2626,11 +2638,11 @@ ensure_cpu_isolation_block() {
   fi
 }
 
-# ---- phase 7: ecat-interface (gates phase 8) -------------------------
+# ---- phase 9: ecat-interface (gates phase 10) -------------------------
 
 # Resolve the EtherCAT NIC adapter and rename it to the requested
 # kernel iface name (e.g. ecat0 / ecat1) via persistent udev rules.
-# Runs BEFORE phase 8's cpu-isolation because phase 8's NIC IRQ pin
+# Runs BEFORE phase 10's cpu-isolation because phase 10's NIC IRQ pin
 # step (`ethercat-rt --nic <iface>`) requires the named iface to
 # already exist.
 #
@@ -2655,7 +2667,7 @@ ensure_cpu_isolation_block() {
 # correctly-named interface.
 ecat_interface() {
   if [ "$SKIP_ECAT_INTERFACE" = 1 ]; then
-    phase "phase 7: ecat-interface  (skipped — --skip-ecat-interface)"
+    phase "phase 9: ecat-interface  (skipped — --skip-ecat-interface)"
     return
   fi
 
@@ -2664,24 +2676,24 @@ ecat_interface() {
     hc="$HOST_CONFIG_INPUT"
   fi
   if [ ! -r "$hc" ]; then
-    phase "phase 7: ecat-interface  (skipped — no host-config.yaml)"
+    phase "phase 9: ecat-interface  (skipped — no host-config.yaml)"
     return
   fi
 
   local ci_json iface
   ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
   if [ -z "$ci_json" ] || [ "$ci_json" = "{}" ]; then
-    phase "phase 7: ecat-interface  (skipped — no cpuIsolation block)"
+    phase "phase 9: ecat-interface  (skipped — no cpuIsolation block)"
     info "the pre-phase prompt populates this on a TTY; non-interactive"
     info "runs must hand-edit $hc (see docs/internal/cpu-isolation.md) and re-run."
     return
   fi
   { read -r iface; } < <(cpusets_json_nic "$ci_json")
   if [ -z "$iface" ]; then
-    phase "phase 7: ecat-interface  (skipped — cpuIsolation.nic.iface not set)"
+    phase "phase 9: ecat-interface  (skipped — cpuIsolation.nic.iface not set)"
     return
   fi
-  phase "phase 7: ecat-interface (gates phase 8)"
+  phase "phase 9: ecat-interface (gates phase 10)"
 
   # --- Step 1: resolve target MAC --------------------------------------
   local mac="" sel_kind sel_value sel_index
@@ -2816,16 +2828,16 @@ PY
   _cpu_isolation_persist "$hc" "$merged"
 }
 
-# ---- phase 8: cpu-isolation (gates phase 9) --------------------------
+# ---- phase 10: cpu-isolation (gates phase 12) --------------------------
 
 # Carve isolated cpuset partitions out of the running kernel, pin the
 # EtherCAT NIC's IRQs (optional), and persist via systemd. Runs BEFORE
-# phase 9's dma-ethercat install because the .deb's systemd unit pins
+# phase 12's dma-ethercat install because the .deb's systemd unit pins
 # itself to the RT cores — if the partition isn't there yet, the unit
 # starts unisolated.
 #
 # Host-config-driven. The cpuIsolation: block in host-config.yaml is
-# the source of truth. The pre-phase prompt above (run before phase 7)
+# the source of truth. The pre-phase prompt above (run before phase 9)
 # normally populates the block on first bringup; the prompt here is a
 # defensive fallback for runs that bypass the pre-phase (e.g., the
 # operator answered N at the pre-phase prompt, or someone hand-rolled
@@ -2838,7 +2850,7 @@ PY
 # install-affinity-defaults overwrite their target files in place.
 cpu_isolation() {
   if [ "$SKIP_CPU_ISOLATION" = 1 ]; then
-    phase "phase 8: cpu-isolation  (skipped — --skip-cpu-isolation)"
+    phase "phase 10: cpu-isolation  (skipped — --skip-cpu-isolation)"
     return
   fi
 
@@ -2848,7 +2860,7 @@ cpu_isolation() {
     hc="$HOST_CONFIG_INPUT"
   fi
   if [ ! -r "$hc" ]; then
-    phase "phase 8: cpu-isolation  (skipped — no host-config.yaml)"
+    phase "phase 10: cpu-isolation  (skipped — no host-config.yaml)"
     return
   fi
   local ci_json enabled
@@ -2860,11 +2872,11 @@ cpu_isolation() {
   #   - else   : skip with a clear actionable message
   if [ "$ci_json" = "{}" ]; then
     if [ "$DRY_RUN" = 1 ]; then
-      phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block, dry-run won't prompt)"
+      phase "phase 10: cpu-isolation  (skipped — no cpuIsolation block, dry-run won't prompt)"
       return
     fi
     if [ -t 0 ] && [ -t 2 ]; then
-      phase "phase 8: cpu-isolation (first-bringup setup)"
+      phase "phase 10: cpu-isolation (first-bringup setup)"
       if ! _cpu_isolation_prompt "$hc"; then
         fail "cpu-isolation interactive setup aborted"
         info "rerun and complete the prompts, or set cpuIsolation.enabled=false in $hc to opt out"
@@ -2872,7 +2884,7 @@ cpu_isolation() {
       fi
       ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
     else
-      phase "phase 8: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
+      phase "phase 10: cpu-isolation  (skipped — no cpuIsolation block; non-interactive shell)"
       info "first bringup needs an interactive shell to configure CPU isolation,"
       info "OR hand-edit $hc to add a cpuIsolation: block (see docs/internal/cpu-isolation.md),"
       info "OR set cpuIsolation.enabled=false to opt out persistently."
@@ -2884,10 +2896,10 @@ cpu_isolation() {
   # `enabled: false` opts out. Matches stacks.<name>.enabled semantics.
   enabled="$(cpusets_json_field "$ci_json" enabled)"
   if [ -n "$enabled" ] && [ "$enabled" != "true" ]; then
-    phase "phase 8: cpu-isolation  (skipped — cpuIsolation.enabled=false)"
+    phase "phase 10: cpu-isolation  (skipped — cpuIsolation.enabled=false)"
     return
   fi
-  phase "phase 8: cpu-isolation (gates phase 9)"
+  phase "phase 10: cpu-isolation (gates phase 12)"
 
   # Detect legacy single-core configs (cpuIsolation.nic.irqCore set,
   # but no top-level cpuIsolation.dmaRtCpu). These typically come from
@@ -3213,7 +3225,7 @@ _install_cpuaffinity_dropin() {
   local tmp
   tmp="$(mktemp)"
   cat > "$tmp" <<EOF
-# Managed by scripts/bootstrap-robot.sh phase 8 (cpu-isolation).
+# Managed by scripts/bootstrap-robot.sh phase 10 (cpu-isolation).
 # Restricts default CPU affinity for systemd-spawned services to the
 # k8s pool (online cpus minus host-RT partitions minus cpu 0). cpu 0
 # is left for kernel housekeeping (kworker/0, ksoftirqd/0, default
@@ -3236,7 +3248,7 @@ EOF
   return 0
 }
 
-# ---- phase 8.5: log management ----------------------------------------
+# ---- phase 11: log management ----------------------------------------
 #
 # Caps journald + rsyslog disk usage via drop-in config files. Real
 # incident: a Thor robot filled its 937 GB root partition with a single
@@ -3257,10 +3269,10 @@ EOF
 
 log_management() {
   if [ "${SKIP_LOG_MANAGEMENT:-0}" = 1 ]; then
-    phase "phase 8.5: log management  (skipped — --skip-log-management)"
+    phase "phase 11: log management  (skipped — --skip-log-management)"
     return
   fi
-  phase "phase 8.5: log management"
+  phase "phase 11: log management"
 
   local hc_path="/etc/phantomos/host-config.yaml"
   if [ ! -f "$hc_path" ]; then
@@ -3464,11 +3476,11 @@ EOF
   fi
 }
 
-# ---- phase 9: install dma-ethercat (gates phase 10) -------------------
+# ---- phase 12: install dma-ethercat (gates phase 13) -------------------
 
 # Install the dma-ethercat .deb baked into the foundationbot/dma-ethercat
 # container image, then enable+start the bare-metal service. Runs strictly
-# BEFORE phase 10 (gitops) — the realtime stack must be up before
+# BEFORE phase 13 (gitops) — the realtime stack must be up before
 # positronic-control / dma-video / nimbus pods come up because they read
 # EtherCAT shared memory via hostIPC.
 #
@@ -3489,10 +3501,10 @@ DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-inst
 
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
-    phase "phase 9: install dma-ethercat  (skipped — --skip-ethercat-install)"
+    phase "phase 12: install dma-ethercat  (skipped — --skip-ethercat-install)"
     return
   fi
-  phase "phase 9: install dma-ethercat (gates phase 10)"
+  phase "phase 12: install dma-ethercat (gates phase 13)"
 
   if [ ! -f "$DMA_ETHERCAT_TEMPLATE" ]; then
     fail "$DMA_ETHERCAT_TEMPLATE missing"
@@ -3622,13 +3634,13 @@ install_dma_ethercat() {
   configure_dma_ethercat_env "$hc"
 
   # Place dma-ethercat.service in the cpuset partition's slice (rendered
-  # in phase 8 step 3b) so it can actually run on the isolated cpus.
+  # in phase 10 step 3b) so it can actually run on the isolated cpus.
   # Without this, the service inherits system.slice's housekeeping
   # cpuset.cpus ceiling and the unit's ExecStart `taskset -c 11-13`
   # fails with EINVAL because the cgroup-v2 cpuset ceiling forbids it.
   # The slice name is resolved from cpuIsolation.partitions[] — find
   # the partition whose cpus range contains nic.irqCore (matches
-  # ethercat-rt's partition lookup in phase 8 step 6).
+  # ethercat-rt's partition lookup in phase 10 step 6).
   local _ci_json _nic_irq _slice_name
   _ci_json="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-cpu-isolation-json 2>/dev/null || echo '{}')"
   { read -r _ ; read -r _nic_irq; } < <(cpusets_json_nic "$_ci_json")
@@ -3773,8 +3785,8 @@ _cpu_isolation_prompt() {
 
   # If the chosen iface isn't currently visible to the kernel, show a
   # list of real interfaces and let the operator pick one. Common case:
-  # `ecat0` doesn't exist yet because phase 7's udev rename hasn't run
-  # — phase 7 will create it on the next bootstrap. Operators can keep
+  # `ecat0` doesn't exist yet because phase 9's udev rename hasn't run
+  # — phase 9 will create it on the next bootstrap. Operators can keep
   # the default (rename later) or pick a real interface to use directly.
   if ! ip link show dev "$nic_iface" >/dev/null 2>&1; then
     printf '\n  iface "%s" is not present on this host. Available interfaces:\n' "$nic_iface" >&2
@@ -3793,12 +3805,12 @@ _cpu_isolation_prompt() {
                    }'
     )
     if [ "${#_iface_names[@]}" -eq 0 ]; then
-      printf '  (no other interfaces detected; keeping "%s" — phase 7 will set it up later)\n' "$nic_iface" >&2
+      printf '  (no other interfaces detected; keeping "%s" — phase 9 will set it up later)\n' "$nic_iface" >&2
     else
       printf '\n  Pick a number [1-%d] to use that interface, or press Enter to keep "%s".\n' \
         "${#_iface_names[@]}" "$nic_iface" >&2
-      printf '  Pressing Enter only makes sense if you have phase 7 selectors set\n' >&2
-      printf '  (mac/pci/driver) so phase 7 can rename a real NIC to "%s".\n' "$nic_iface" >&2
+      printf '  Pressing Enter only makes sense if you have phase 9 selectors set\n' >&2
+      printf '  (mac/pci/driver) so phase 9 can rename a real NIC to "%s".\n' "$nic_iface" >&2
       local _pick
       printf '  > ' >&2
       IFS= read -r _pick </dev/tty || return 1
@@ -4091,7 +4103,7 @@ configure_dma_ethercat_env() {
   # Resolve cpuset values from host-config cpuIsolation (read by phase
   # 7). The .deb's dma-ethercat.service unit reads INTERFACE,
   # DMA_CPU_AFFINITY, and DMA_RT_CPU from /etc/dma/dma-ethercat.env;
-  # phase 9 here is the place to land them so the unit's first start
+  # phase 12 here is the place to land them so the unit's first start
   # has the right pinning. Empty when cpuIsolation is absent — those
   # keys are simply not written (existing values in the conffile are
   # preserved if they predate this run).
@@ -4108,7 +4120,7 @@ configure_dma_ethercat_env() {
     # still produce a usable env file (matches old same-core behaviour).
     # Phase 8 should have already converted such configs by prompting
     # the operator for dmaRtCpu — if we still hit this path (e.g.
-    # phase 8 was --skipped), surface a visible warning so it's never
+    # phase 10 was --skipped), surface a visible warning so it's never
     # silent.
     rt_cpu="$(cpusets_json_dma_rt_cpu "$ci_json")"
     if [ -z "$rt_cpu" ]; then
@@ -4201,7 +4213,7 @@ print(chosen.get("cpus", ""))
 PY
 }
 
-# ---- phase 10: gitops ----------------------------------------------------
+# ---- phase 13: gitops ----------------------------------------------------
 
 # Phase 6 has two pieces:
 #   6a. terraform install of argocd Helm chart
@@ -4464,8 +4476,8 @@ _gitops_render_app() {
 }
 
 gitops() {
-  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 10: gitops  (skipped)"; return; fi
-  phase "phase 10: gitops (install argocd + apply per-host Application)"
+  if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 13: gitops  (skipped)"; return; fi
+  phase "phase 13: gitops (install argocd + apply per-host Application)"
 
   # argocd-repo-server mounts $LOCAL_GIT_TREE (/opt/Phantom-OS-KubernetesOptions)
   # as a hostPath volume (terraform/main.tf). Stage that path here — for
@@ -4679,7 +4691,7 @@ PY
   # place. The validate phase confirms Healthy.
 }
 
-# ---- phase 12: kustomize image overrides (per-host, per-stack) ---------
+# ---- phase 15: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
 # Bootstrap discovers the mapping by running kustomize on each enabled
@@ -4791,8 +4803,8 @@ _stack_for_image() {
 }
 
 image_overrides() {
-  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 12: image overrides  (skipped)"; return; fi
-  phase "phase 12: image overrides (inject kustomize.images per stack)"
+  if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 15: image overrides  (skipped)"; return; fi
+  phase "phase 15: image overrides (inject kustomize.images per stack)"
 
   # In dry-run before --host-config has actually been installed, fall
   # back to the input path the operator passed.
@@ -4867,7 +4879,7 @@ for line in mapping_raw.splitlines():
 # Job) and intentionally don't route to a stack's kustomize.images.
 # Skip silently rather than warn.
 NON_STACK_IMAGES = {
-    "foundationbot/dma-ethercat",  # phase 9 install_dma_ethercat
+    "foundationbot/dma-ethercat",  # phase 12 install_dma_ethercat
 }
 
 # Seed every enabled stack with an empty list. This makes per_stack
@@ -5002,7 +5014,7 @@ print(json.dumps(d["per_stack"]["'"$stack"'"]))
 # filter out any prior entry targeting ConfigMap/positronic-config, then
 # either append a new entry (if
 # deployments.positronic-control.launchCommand is set) or leave the rest
-# untouched. Designed to be safe to run from phase 12 — does not touch
+# untouched. Designed to be safe to run from phase 15 — does not touch
 # image overrides or other patches.
 _patch_positronic_phantom_cmd() {
   local hc="$1"
@@ -5144,7 +5156,7 @@ PY
   # PHANTOM_CMD until something else kills it. We poll the live CM for up
   # to a few seconds to let Argo sync land, then compare and rollout-
   # restart only on actual change. No-op re-runs (same desired value)
-  # skip the restart so phase 12 stays idempotent.
+  # skip the restart so phase 15 stays idempotent.
   local desired_phantom_cmd="$launch_command"
   if [ "$field_absent" = 1 ]; then desired_phantom_cmd=""; fi
   local current_phantom_cmd=""
@@ -5175,7 +5187,7 @@ PY
   fi
 }
 
-# ---- phase 13: dev hostPath mounts (per-host) --------------------------
+# ---- phase 16: dev hostPath mounts (per-host) --------------------------
 
 # Inject strategic-merge patches derived from
 # /etc/phantomos/host-config.yaml's `deployments:` block into the live
@@ -5190,8 +5202,8 @@ PY
 # fewer mounts in host-config reverts the cluster to that smaller set.
 
 deployments_phase() {
-  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 13: deployments  (skipped)"; return; fi
-  phase "phase 13: deployments (inject kustomize.patches per stack)"
+  if [ "$SKIP_DEV_MOUNTS" = 1 ]; then phase "phase 16: deployments  (skipped)"; return; fi
+  phase "phase 16: deployments (inject kustomize.patches per stack)"
 
   # Same dry-run/canonical fallback as image_overrides.
   local hc="$HOST_CONFIG_FILE"
@@ -5288,7 +5300,7 @@ PY
   done <<< "$entries"
 }
 
-# ---- phase 11: argocd admin (install CLI + reset password) -------------
+# ---- phase 14: argocd admin (install CLI + reset password) -------------
 
 # Installs the argocd CLI binary (latest release from GitHub) and resets
 # the admin password by writing a bcrypt hash into argocd-secret. Done
@@ -5306,8 +5318,8 @@ PY
 _argocd_default_password="1984"
 
 argocd_admin() {
-  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 11: argocd admin  (skipped)"; return; fi
-  phase "phase 11: argocd admin (install CLI + set admin password)"
+  if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 14: argocd admin  (skipped)"; return; fi
+  phase "phase 14: argocd admin (install CLI + set admin password)"
 
   # 1) install argocd CLI if missing
   #
@@ -5435,11 +5447,11 @@ argocd_admin() {
   fi
 }
 
-# ---- phase 14: setup-positronic (optional) --------------------------------
+# ---- phase 17: setup-positronic (optional) --------------------------------
 
 setup_positronic() {
   if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 14: setup-positronic"
+  phase "phase 17: setup-positronic"
 
   if [ -z "$POSITRONIC_IMAGE" ]; then
     fail "--setup-positronic requires --positronic-image <image>"
@@ -5492,11 +5504,11 @@ setup_positronic() {
   fi
 }
 
-# ---- phase 15: validate --------------------------------------------------
+# ---- phase 18: validate --------------------------------------------------
 
 validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 15: validate  (skipped)"; return; fi
-  phase "phase 15: validate"
+  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 18: validate  (skipped)"; return; fi
+  phase "phase 18: validate"
 
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
@@ -5561,18 +5573,18 @@ print_plan() {
   _step $([ "$SKIP_HOST"                 = 0 ] && echo 1 || echo 0) "phase  4  host config"                  "--host not selected"
   _step $([ "$SKIP_SEED_PULL_SECRETS"    = 0 ] && echo 1 || echo 0) "phase  5  seed pull secrets"            "--seed-pull-secrets not selected"
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
-  _step $([ "$SKIP_LOCOMOTION_CONFIG"    = 0 ] && echo 1 || echo 0) "phase  6.5 locomotion-config"           "--locomotion-config not selected"
-  _step $([ "$SKIP_SONIC_CONFIG"         = 0 ] && echo 1 || echo 0) "phase  6.6 sonic-config"                "--sonic-config not selected"
-  _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  7  ecat-interface (gates 8)"     "--skip-ecat-interface"
-  _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase  8  cpu-isolation (gates 9)"      "--skip-cpu-isolation"
-  _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase  8.5 log-management"             "--skip-log-management"
-  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase  9  install dma-ethercat (gates 10)" "--skip-ethercat-install passed"
-  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 10  gitops"                       "--gitops not selected"
-  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 11  argocd-admin"                 "--argocd-admin not selected"
-  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 12  image-overrides"              "--image-overrides not selected"
-  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 13  deployments"                  "--deployments not selected"
-  _step "$SETUP_POSITRONIC"                                         "phase 14  setup-positronic"             "--setup-positronic not set"
-  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 15  validate"                     "--validate not selected"
+  _step $([ "$SKIP_LOCOMOTION_CONFIG"    = 0 ] && echo 1 || echo 0) "phase  7  locomotion-config"               "--locomotion-config not selected"
+  _step $([ "$SKIP_SONIC_CONFIG"         = 0 ] && echo 1 || echo 0) "phase  8  sonic-config"                    "--sonic-config not selected"
+  _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  9  ecat-interface (gates 10)"       "--skip-ecat-interface"
+  _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
+  _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
+  _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
+  _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
+  _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
+  _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 15  image-overrides"                 "--image-overrides not selected"
+  _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 16  deployments"                     "--deployments not selected"
+  _step "$SETUP_POSITRONIC"                                         "phase 17  setup-positronic"             "--setup-positronic not set"
+  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 18  validate"                        "--validate not selected"
   printf '\n'
 }
 

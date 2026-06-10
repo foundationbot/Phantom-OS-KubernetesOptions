@@ -12,13 +12,13 @@ internals, verification phases). This file is the runbook.
 >
 > - **Hands-on (this runbook):** invoke `scripts/cpusets/manage_cpusets.sh`
 >   directly. Covers debugging, exploration, and one-off changes.
-> - **Bootstrap-driven (default-on):** `bootstrap-robot.sh` phase 8
+> - **Bootstrap-driven (default-on):** `bootstrap-robot.sh` phase 10
 >   (cpu-isolation) prompts the operator on first bringup if no
 >   `cpuIsolation:` block exists in `/etc/phantomos/host-config.yaml`,
 >   persists the answers, and drives every subcommand non-interactively
 >   on subsequent runs. See
 >   [the Bootstrap-driven setup](#bootstrap-driven-setup) section near
->   the end of this file. Phase 8 gates phase 9 (install dma-ethercat)
+>   the end of this file. Phase 10 gates phase 12 (install dma-ethercat)
 >   so the .deb's systemd unit comes up with the partition already active.
 
 ---
@@ -351,9 +351,9 @@ file under `/etc/systemd/system/`).
 
 ## Bootstrap-driven setup
 
-`bootstrap-robot.sh` phase 8 (`cpu-isolation`) drives every subcommand
+`bootstrap-robot.sh` phase 10 (`cpu-isolation`) drives every subcommand
 above non-interactively, reading `cpuIsolation:` from
-`/etc/phantomos/host-config.yaml`. Phase 8 gates phase 9
+`/etc/phantomos/host-config.yaml`. Phase 10 gates phase 12
 (`install-dma-ethercat`) so the .deb's `dma-ethercat.service` unit is
 started with the partition already active.
 
@@ -374,7 +374,7 @@ cpuIsolation:
   nic:                          # optional — only when this host pins a NIC
     iface: ecat0
     irqCore: 12                 # NIC IRQs / NAPI / softirq handling
-    selector:                   # optional — drives phase 7 ecat-interface
+    selector:                   # optional — drives phase 9 ecat-interface
       mac: aa:bb:cc:dd:ee:ff    # OR pci: "0000:01:00.0"
                                 # OR {driver: igc, index: 0}
   dmaRtCpu: 11                  # SOEM cyclic loop (DMA_RT_CPU)
@@ -382,13 +382,13 @@ cpuIsolation:
   migrateCmdline: false         # default: false. DESTRUCTIVE on Jetson.
 ```
 
-`cpuIsolation.nic.selector` is consumed by **phase 7 (ecat-interface)**,
+`cpuIsolation.nic.selector` is consumed by **phase 9 (ecat-interface)**,
 which renames the NIC adapter to `nic.iface` via persistent udev rules
 (`/etc/udev/rules.d/70-ecat.rules`). On a TTY first bringup the
 operator can omit `selector` and let the vendored
 `setup_ethercat_interface.sh` drive its interactive picker; on
 re-runs and unattended bootstraps, fill in `selector` so the phase
-runs non-interactively. Phase 7 is idempotent: if `ip link show <iface>`
+runs non-interactively. Phase 9 is idempotent: if `ip link show <iface>`
 already succeeds, it short-circuits without touching udev.
 
 The full schema (with validation rules) lives at
@@ -413,7 +413,7 @@ The legacy `nic.rtCore` field is still accepted (with a deprecation
 warning) and treated as `irqCore`. New configs should use the split
 fields.
 
-### What phase 8 does
+### What phase 10 does
 
 1. Validates cgroup v2 is mounted.
 2. Renders `/etc/cpusets.conf` from `cpuIsolation.partitions`.
@@ -456,7 +456,7 @@ fields.
    (whichever entry covers `nic.irqCore`), replacing the historical
    hardcoded `ecat-cmdline`. The `--rt-core` flag is a Phantom-OS local
    addition — see [`scripts/cpusets/VENDORED.md`](../scripts/cpusets/VENDORED.md).
-9. (Phase 9, **after dma-ethercat .deb installs**) — renders
+9. (Phase 12, **after dma-ethercat .deb installs**) — renders
    `/etc/systemd/system/dma-ethercat.service.d/10-slice.conf` with
    `Slice=<partition-containing-nic.irqCore>.slice` and `CPUAffinity=`
    (empty, overrides the manager-wide drop-in from step 7). This is the
@@ -482,7 +482,7 @@ cgroup that carries the kernel partition flag — the slice IS the partition.
 Systemd routes any unit with `Slice=<name>.slice` into that cgroup at
 start time, where the unit gets full access to the isolated cpus.
 
-For `dma-ethercat.service`, phase 9 (`install-dma-ethercat`) writes the
+For `dma-ethercat.service`, phase 12 (`install-dma-ethercat`) writes the
 drop-in that does this. For **any other service** that needs isolated
 cores, you have two options:
 
@@ -537,7 +537,7 @@ Without ordering, this cgroup claims the cores you want isolated and
 the partition fails to activate (`isolated invalid (Cpu list in
 cpuset.cpus not exclusive)`).
 
-Phase 8 handles this two ways:
+Phase 10 handles this two ways:
 
 - The vendored `manage_cpusets.sh` lists `kubepods` and
   `kubepods.slice` in `MANAGED_SLICES`, so its runtime shrink step
@@ -556,7 +556,7 @@ production robots to clean it up; reboot is required.
 
 ### Re-runs
 
-Phase 8 is idempotent. The vendored `manage_cpusets.sh apply` skips
+Phase 10 is idempotent. The vendored `manage_cpusets.sh apply` skips
 already-active partitions whose CPUs match the config. Re-bootstrapping
 after editing `cpuIsolation.partitions` will tear down and recreate
 only the partitions whose CPUs changed.

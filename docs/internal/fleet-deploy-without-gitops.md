@@ -15,7 +15,7 @@ against full context.
 
 ## 1. What "gitops" means in this repo today
 
-Phase 10 of `scripts/bootstrap-robot.sh` (`gitops()`, lines 3446–3593) does
+Phase 13 of `scripts/bootstrap-robot.sh` (`gitops()`, lines 3446–3593) does
 three things:
 
 1. Installs ArgoCD via the `terraform/` module.
@@ -28,7 +28,7 @@ three things:
    `phantomos-<robot>` umbrella) without cascade-deleting their
    workloads, so the per-stack Applications can claim existing resources.
 
-After phase 10, ArgoCD does the actual work: it clones this repo, renders
+After phase 13, ArgoCD does the actual work: it clones this repo, renders
 `manifests/stacks/<stack>/` through kustomize, and applies the resulting
 Deployments / DaemonSets / Services / etc. to the cluster. Phases 12 and
 13 patch `spec.source.kustomize.{images,patches}` on the live Application
@@ -101,16 +101,16 @@ Phases 10/12/13 collapse into one:
 
 | Today | Without ArgoCD |
 |---|---|
-| Phase 10: install ArgoCD via terraform; create Applications pointing at `manifests/stacks/<stack>` on `main` | Phase 10: render the kustomize overlay locally, baking host-config images/patches in |
-| Phase 12: inject `kustomize.images` from host-config into the live Application CR | Phase 12: write `kustomize.images` into the rendered overlay at render time |
-| Phase 13: inject `kustomize.patches` from host-config | Phase 13: write `kustomize.patches` into the rendered overlay at render time |
-| ArgoCD reconciles every 3 min from git | One-shot `kubectl apply -k <overlay>` at end of phase 13 |
+| Phase 13: install ArgoCD via terraform; create Applications pointing at `manifests/stacks/<stack>` on `main` | Phase 13: render the kustomize overlay locally, baking host-config images/patches in |
+| Phase 15: inject `kustomize.images` from host-config into the live Application CR | Phase 15: write `kustomize.images` into the rendered overlay at render time |
+| Phase 16: inject `kustomize.patches` from host-config | Phase 16: write `kustomize.patches` into the rendered overlay at render time |
+| ArgoCD reconciles every 3 min from git | One-shot `kubectl apply -k <overlay>` at end of phase 16 |
 | Update flow: edit manifest → `git push` → robot picks up automatically | Update flow: fleet pushes new host-config.yaml + new .deb → trigger `bootstrap-robot.sh --reapply` |
 
-Concrete sketch of the new phase 10:
+Concrete sketch of the new phase 13:
 
 ```bash
-# Phase 10 (replaces gitops + image-overrides + deployments-injection):
+# Phase 13 (replaces gitops + image-overrides + deployments-injection):
 #   1. Render manifests/stacks/<enabled-stacks> through kustomize, with
 #      images and patches from host-config.yaml baked in.
 #   2. kubectl apply --prune -l phantomos.foundation.bot/managed=true
@@ -202,7 +202,7 @@ fit:
 ### Variant A: drop ArgoCD entirely (the version this doc has been describing)
 
 `bootstrap-robot.sh` does `kubectl apply -k <staged-overlay>` directly.
-Phase 10 collapses as shown above.
+Phase 13 collapses as shown above.
 
 ### Variant B: keep ArgoCD, point it at a local directory
 

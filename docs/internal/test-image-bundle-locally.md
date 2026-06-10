@@ -143,7 +143,7 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
 ```
 
 Expected log lines:
-- `phase 12: image overrides (inject kustomize.images per stack)`
+- `phase 15: image overrides (inject kustomize.images per stack)`
 - `injected: stack=core images=2 ...`  (positronic-control + phantom-models route to core)
 - `patched phantomos-mk09-core kustomize.images: ["localhost:5443/positronic-control=foundationbot/phantom-cuda:0.2.42-dp", "localhost:5443/phantom-models:2026-05-09"]`
 - No `unrouted` warnings for these two.
@@ -197,7 +197,7 @@ Pass criteria:
   → same drill. Note that this ref is `localhost:5443/*` so on a miss
   containerd talks to the registry pod (which is empty) — no
   DockerHub fallback. Local-store import is the only path.
-- `unrouted` warning in phase 12 for either entry
+- `unrouted` warning in phase 15 for either entry
   → the manifest was changed and `CONTAINER_TARGETS` in
   `scripts/lib/host-config.py:362` is stale. Update the
   `manifest_image` field for the affected container.

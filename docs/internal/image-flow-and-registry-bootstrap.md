@@ -47,12 +47,12 @@ populate it with content:
 | Docker daemon insecure-registries | same script                                                                                      | merges `localhost:5443` into `/etc/docker/daemon.json` so `docker push` to it works           |
 | Registry pod                      | `manifests/base/registry/registry.yaml`, deployed by Argo as part of the `core` stack            | Deployment + hostPath PV + Service in the `registry` namespace                                |
 
-Phase 10 (`gitops`) is what triggers Argo to deploy the registry pod.
+Phase 13 (`gitops`) is what triggers Argo to deploy the registry pod.
 Once it's Ready, `docker push localhost:5443/<repo>:<tag>` works from
 the host shell.
 
 **Nothing in the bootstrap path pushes anything into the registry
-pod by default.** Phase 14 (`setup-positronic`, opt-in via
+pod by default.** Phase 17 (`setup-positronic`, opt-in via
 `--setup-positronic --positronic-image <ref>`) is the only
 in-tree mechanism that pushes content (positronic-control via
 `scripts/positronic.sh push-image`, phantom-models via
@@ -137,7 +137,7 @@ images:
     image: foundationbot/dma-ethercat:<tag>
 ```
 
-`bootstrap-robot.sh` phase 12 (`image_overrides`) reads this via
+`bootstrap-robot.sh` phase 15 (`image_overrides`) reads this via
 `scripts/lib/host-config.py get-images-json`, routes each entry to
 its owning Argo Application by scanning manifests for the
 `manifest_image` find-key (`scripts/lib/host-config.py:362-417`
@@ -149,7 +149,7 @@ tag — including any in-manifest defaults.
 `dma-ethercat` is special-cased: its image is **not** routed to a
 stack's kustomize.images (`scripts/lib/host-config.py:485` —
 `CONTAINER_TARGETS["dma-ethercat"]["stack"] is None`). Instead,
-phase 9 (`install_dma_ethercat`) sed-substitutes the tag into the
+phase 12 (`install_dma_ethercat`) sed-substitutes the tag into the
 installer Job manifest at apply time
 (`scripts/bootstrap-robot.sh:2920`).
 
@@ -232,7 +232,7 @@ Failure path on a "press-Enter" run:
 1. Operator runs configure wizard, hits Enter through every image
    prompt.
 2. Wizard writes `images: { positronic-control: {image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG}, ... }`.
-3. Bootstrap phase 12 successfully patches `phantomos-<robot>-{core,operator}` Applications with these literals.
+3. Bootstrap phase 15 successfully patches `phantomos-<robot>-{core,operator}` Applications with these literals.
 4. Kustomize retags every `localhost:5443/positronic-control` reference to `:REPLACE-WITH-LOCAL-BUILD-TAG`. Same for `phantom-models` and `foundationbot/argus.operator-ui` (which would otherwise have worked because `:qa` is in the bundled `.deb`).
 5. Pods start. ImagePullBackOff.
 
@@ -377,6 +377,6 @@ curl -s http://localhost:5443/v2/_catalog
 ```
 
 If `kustomize.images` contains `REPLACE-WITH-*`, the wizard wrote
-placeholders and phase 12 patched them in. Edit
+placeholders and phase 15 patched them in. Edit
 `/etc/phantomos/host-config.yaml` to remove the offending entries
 (or set real tags) and re-run `bootstrap-robot.sh --image-overrides`.

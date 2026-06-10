@@ -163,7 +163,7 @@ Bootstrap runs ~15 phases. Two prompts during the run:
 - **CPU isolation** (only when you said `y` in step 3): partition CPUs,
   partition name, NIC interface, NIC IRQ core, realtime loop core,
   systemd CPUAffinity drop-in. Defaults match most setups.
-- **Realtime hardware config** (phase 9, only when CPU isolation is
+- **Realtime hardware config** (phase 12, only when CPU isolation is
   enabled): a numbered list of JSON configs. Pick the one matching the
   robot's hardware.
 
@@ -226,7 +226,7 @@ ArgoCD picks up the new commit SHA within seconds.
 
 ## About the dma-ethercat realtime service
 
-Bootstrap's phase 9 installs **dma-ethercat**, the realtime motor
+Bootstrap's phase 12 installs **dma-ethercat**, the realtime motor
 control service the robot needs to talk to its EtherCAT slaves (motor
 drives, IMUs, sensors). Skip this section if you set
 `cpuIsolation.enabled: false` in host-config — the whole subsystem is
@@ -253,14 +253,14 @@ Bootstrap runs it on the host (not in a pod) because the EtherCAT
 master needs:
 - Direct raw-socket access to the NIC.
 - Hard-realtime kernel scheduling (the `isolcpus=` cores from
-  phase 8's CPU isolation).
+  phase 10's CPU isolation).
 - IRQ pinning on the NIC's interrupt to a specific core.
 
 Kubernetes pods running with `runtimeClassName: nvidia` or even
 privileged would still suffer from CFS scheduler latency that's
 incompatible with EtherCAT's microsecond-scale timing budget.
 
-### How bootstrap installs it (phase 9)
+### How bootstrap installs it (phase 12)
 
 The install is a two-stage dance — a one-shot Kubernetes Job extracts
 a `.deb` onto the host, then the bootstrap script `dpkg -i`s it. This
@@ -283,7 +283,7 @@ manifests/installers/dma-ethercat/base/job.yaml
                           exit 0
        │ (Job reaches Complete, pod reaps in 30s via TTL controller)
        ▼
-bootstrap-robot.sh phase 9 (host side, as root):
+bootstrap-robot.sh phase 12 (host side, as root):
   1. wait for .ready
   2. dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb
   3. write /etc/dma/dma-ethercat.env from host-config:
@@ -294,13 +294,13 @@ bootstrap-robot.sh phase 9 (host side, as root):
   4. systemctl enable --now dma-ethercat.service
 ```
 
-Bootstrap is intentionally strict here — phase 9 is `gates phase 10`,
+Bootstrap is intentionally strict here — phase 12 is `gates phase 13`,
 meaning if the realtime service can't come up the GitOps phase doesn't
 run either. The robot is non-functional without working motor
 control; deploying ArgoCD on top of a broken realtime stack just
 hides the failure.
 
-Pass `--skip-ethercat-install` to bypass phase 9 on a re-run. The
+Pass `--skip-ethercat-install` to bypass phase 12 on a re-run. The
 flag preserves the previously-installed service if any.
 
 ### Configuration
@@ -310,7 +310,7 @@ Three host-config fields drive the install:
 ```yaml
 cpuIsolation:
   nic:
-    iface: ecat1                   # the NIC after phase 7 renames it
+    iface: ecat1                   # the NIC after phase 9 renames it
   dmaRtCpu: 13                     # CPU pinned to the SOEM cyclic loop
   partitions:
     - name: ecat
@@ -354,7 +354,7 @@ then loads the JSON named in `DMA_CONFIG`. Re-reads on restart.
 # Update the tag in host-config
 sudo vim /etc/phantomos/host-config.yaml      # bump images.dma-ethercat.image
 
-# Re-run phase 9 only
+# Re-run phase 12 only
 sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
   --install-dma-ethercat
 ```
@@ -377,12 +377,12 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
 
 | Symptom | Likely cause / fix |
 |---|---|
-| Phase 9 Job pod `Pending` for 5+ min (`untolerated taint`) | Node has `disk-pressure` taint. Run `post-install-cleanup.sh` to free 15-18 GB. |
-| Phase 9 Job pod `ImagePullBackOff` | Bundle has wrong-arch tag, OR containerd doesn't have the image. Check `k0s ctr -n k8s.io images list \| grep dma-ethercat` matches host-config's `images.dma-ethercat.image`. |
-| Phase 9 succeeds but `systemctl status dma-ethercat` shows failed | NIC rename didn't happen (phase 7) — `INTERFACE=ecat1` in the env file but no such interface. Run `bootstrap-robot.sh --ecat-interface`. |
+| Phase 12 Job pod `Pending` for 5+ min (`untolerated taint`) | Node has `disk-pressure` taint. Run `post-install-cleanup.sh` to free 15-18 GB. |
+| Phase 12 Job pod `ImagePullBackOff` | Bundle has wrong-arch tag, OR containerd doesn't have the image. Check `k0s ctr -n k8s.io images list \| grep dma-ethercat` matches host-config's `images.dma-ethercat.image`. |
+| Phase 12 succeeds but `systemctl status dma-ethercat` shows failed | NIC rename didn't happen (phase 9) — `INTERFACE=ecat1` in the env file but no such interface. Run `bootstrap-robot.sh --ecat-interface`. |
 | `dma_main: bus error / no slaves found` in journal | EtherCAT bus is unplugged, slaves are unpowered, or the wrong NIC was picked. Verify with `sudo dma_main --scan -i ecat1` (lists discovered slaves). |
-| Phase 8 says `Interface ecat1 not found` | Phase 7 didn't run or didn't pick a NIC. Re-run wizard's cpu-isolation prompt to set `nic.selector`, OR (dev host) set `cpuIsolation.enabled: false`. |
-| Bootstrap halts at phase 9 — "ANY failure halts bootstrap" | Intentional — realtime stack must be healthy before GitOps. Resolve the underlying issue (one of the above), then re-run bootstrap. Pass `--skip-ethercat-install` only if you intentionally want a no-realtime cluster. |
+| Phase 10 says `Interface ecat1 not found` | Phase 9 didn't run or didn't pick a NIC. Re-run wizard's cpu-isolation prompt to set `nic.selector`, OR (dev host) set `cpuIsolation.enabled: false`. |
+| Bootstrap halts at phase 12 — "ANY failure halts bootstrap" | Intentional — realtime stack must be healthy before GitOps. Resolve the underlying issue (one of the above), then re-run bootstrap. Pass `--skip-ethercat-install` only if you intentionally want a no-realtime cluster. |
 
 ### When to disable
 
@@ -414,11 +414,11 @@ by default:
 
 Useful flags:
 
-- `--skip-ethercat-install` — skip phase 9 on a re-run.
+- `--skip-ethercat-install` — skip phase 12 on a re-run.
 - `--skip-ethercat-uninstall` — preserve existing `/etc/dma/` tree.
-- `--gitops` — re-run only phase 10 (Argo Application render+apply).
+- `--gitops` — re-run only phase 13 (Argo Application render+apply).
   Useful after editing host-config to change `gitSource` or `images:`.
-- `--image-overrides` — re-run only phase 12 (kustomize.images patches
+- `--image-overrides` — re-run only phase 15 (kustomize.images patches
   on the live Applications). Useful after re-running the wizard to
   change image refs without a full bootstrap cycle.
 
@@ -467,7 +467,7 @@ Pass `--dry-run` to see what would be deleted before doing it.
 If you SKIP this step, you may eventually hit a
 `node.kubernetes.io/disk-pressure` taint when disk usage on `/` crosses
 the kubelet's eviction threshold (default 90% used). Pods stop
-scheduling, bootstrap halts on phase 9 (dma-ethercat installer pod
+scheduling, bootstrap halts on phase 12 (dma-ethercat installer pod
 goes Pending and never starts). See "Common things that bite" below.
 
 ---
@@ -554,7 +554,7 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-o
   `/opt/.../.git/` exists (it should, from the `.deb` install). If
   `remote`, confirm the GitHub URL is reachable from the
   argocd-repo-server pod.
-- **Phase 8 cpu-isolation fails on `ecat1 not found`** — the host has no
+- **Phase 10 cpu-isolation fails on `ecat1 not found`** — the host has no
   EtherCAT NIC and the wizard's CPU-isolation prompt was answered as
   enabled. Edit host-config: `cpuIsolation.enabled: false`, then re-run
   bootstrap.
@@ -562,7 +562,7 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-o
   workload pulls a private DockerHub image not in the bundled set.
   With the image `.deb` installed, every standard image is on disk and
   the missing secret is a no-op.
-- **Phase 9 (dma-ethercat installer) Job stuck in `Pending`, pod
+- **Phase 12 (dma-ethercat installer) Job stuck in `Pending`, pod
   describe says `0/1 nodes are available: 1 node(s) had untolerated
   taint(s)`** — the kubelet auto-tainted the node with
   `node.kubernetes.io/disk-pressure:NoSchedule` because disk usage on
@@ -578,7 +578,7 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-o
   bootstrap proceeds. **Always run post-install-cleanup.sh after a
   successful first bootstrap** — see the "Post-install cleanup"
   section above.
-- **Phase 8 (cpu-isolation) fails with `cpuIsolation.partitions and
+- **Phase 10 (cpu-isolation) fails with `cpuIsolation.partitions and
   cpuIsolation.dmaRtCpu are required`** — host-config has a partial
   `cpuIsolation:` block (e.g. `enabled: true` plus a partition name
   but no cpus / dmaRtCpu / nic.iface). The pre-phase prompt fires when
