@@ -379,7 +379,7 @@ run `--gitops` instead.
 
 ### 3.8 Bump dma-ethercat installer image
 
-The bare-metal `dma-ethercat` service is installed by phase 9 from a
+The bare-metal `dma-ethercat` service is installed by phase 12 from a
 `.deb` baked into the `foundationbot/dma-ethercat` container image. To
 roll a new version of the realtime stack:
 
@@ -425,6 +425,7 @@ Known labels and the workloads they gate:
 |---|---|---|
 | `foundation.bot/has-positronic` | `positronic-control` Deployment | **on** |
 | `foundation.bot/has-locomotion` | `phantom-locomotion` DaemonSet | off |
+| `foundation.bot/has-sonic` | `phantom-sonic` DaemonSet (Walking ↔ SONIC) | off |
 | `foundation.bot/has-state-estimator` | `cpp-robot-state-estimator` DaemonSet | off |
 | `foundation.bot/has-recorder` | `dma-recorder` DaemonSet | off |
 | `foundation.bot/has-streamer` | `rerun-streamer` DaemonSet | off |
@@ -432,12 +433,14 @@ Known labels and the workloads they gate:
 
 `has-positronic` is **default-on** — the cluster phase reconciler
 injects it on every robot unless host-config explicitly sets it
-`"false"`. Migrating a robot from positronic to locomotion is a
+`"false"`. Migrating a robot from positronic to locomotion/sonic is a
 two-label change.
 
-**Locomotion vs positronic** are mutually exclusive — the validator
-rejects setting only `has-locomotion: "true"` (positronic would still
-be on by default and both controllers would try to drive the robot).
+**positronic, locomotion, and sonic are mutually exclusive** — each
+drives `/desired`, so the validator rejects enabling more than one. In
+particular, setting only `has-locomotion: "true"` or `has-sonic: "true"`
+is rejected because positronic is still on by default; you must also set
+`has-positronic: "false"` in the same edit.
 
 Enable a default-off workload on `<robot>`:
 
@@ -467,14 +470,92 @@ nodeLabels:
 sudo bash scripts/bootstrap-robot.sh --cluster -y
 ```
 
+Migrate `<robot>` to the Walking ↔ SONIC stack (clear both competing
+drivers, enable sonic):
+
+```yaml
+nodeLabels:
+  foundation.bot/has-positronic: "false"
+  foundation.bot/has-locomotion: "false"
+  foundation.bot/has-sonic: "true"
+```
+
+```bash
+sudo bash scripts/bootstrap-robot.sh --cluster --sonic-config -y
+```
+
+`--sonic-config` also renders the `phantom-sonic-config` ConfigMap from
+the optional `phantomSonic:` block (ROS domain, walking policy, encoder
+mode, ZMQ/web ports, ramp). See [§3.11](#311-phantom-sonic-walking--sonic)
+for operating it.
+
 To disable a default-off workload: remove the entry and re-run the
-cluster phase. To disable positronic without enabling locomotion: set
-`foundation.bot/has-positronic: "false"` (no robot will be running a
-controller until you also enable locomotion).
+cluster phase. To disable positronic without enabling locomotion/sonic:
+set `foundation.bot/has-positronic: "false"` (no robot will be running a
+controller until you also enable one of the others).
 
 Bootstrap only manages the `foundation.bot/` prefix. Labels outside
 that prefix (`kubernetes.io/*`, k0s built-ins, ad-hoc operator labels)
 are never touched.
+
+---
+
+### 3.11 phantom-sonic (Walking ↔ SONIC)
+
+The `phantom-sonic` DaemonSet runs the MK1 Walking ↔ SONIC stack as a
+**single pod with four containers** (gated on `foundation.bot/has-sonic`,
+see [§3.10](#310-toggle-an-optional-workload-on-a-robot) to enable):
+
+| Container | Image | Role |
+|---|---|---|
+| `control` | `phantom-dma-inference` | joystick + mode-manager FSM (IDLE/WALKING/SONIC); owns `/dev/input` |
+| `walking` | `phantom-dma-inference` | MK1 walking IMU policy (`mk1-walking-1imu-1`); boots idle |
+| `sonic` | `phantom-dma-inference` | SONIC whole-body policy; gated off until engaged |
+| `motion-replay` | `phantom-motion-replay` | web UI (:7865) + ZMQ motion streamer (:5557); clips baked in |
+
+The three inference containers share the `phantom-dma-inference` image,
+rewritten from `host-config.yaml`'s `images.phantom-locomotion` entry
+(same published image — one kustomize find-key serves both workloads).
+`motion-replay` is rewritten from `images.phantom-motion-replay`.
+
+**Joystick:** X = start walking · Triangle = toggle walking ↔ SONIC ·
+Square+Triangle = kill to idle. Boots **idle** (nothing commands the
+robot until you press X).
+
+**Dependency:** the policy nodes attach to DMA.ethercat's `/dev/shm` IPC
+queues (`/actuals`, `/desired`, …). DMA.ethercat (the bare-metal
+`dma-ethercat.service`) must be running first, or `walking`/`sonic` will
+CrashLoop on `shm_open failed` — see
+[§7.19](#719-phantom-sonic-walkingsonic-crashloop-on-shm_open).
+
+**Per-host options** (`phantomSonic:` block → `phantom-sonic-config`
+ConfigMap, applied by `--sonic-config`):
+
+```yaml
+phantomSonic:
+  rosDomainId: "43"             # ROS_DOMAIN_ID (control + walking)
+  walkingPolicy: mk1-walking-1imu-1
+  encoderMode: "0"              # sonic --encoder-mode
+  motionZmqPort: "5557"
+  controlZmqPort: "5558"
+  webPort: "7865"               # motion-replay UI
+  motionRampSecs: "1.0"
+```
+
+All fields optional; omitted ones fall back to the defaults shown. After
+editing, apply with `sudo bash scripts/bootstrap-robot.sh --sonic-config`
+(rolls the DaemonSet to pick up the new ConfigMap).
+
+**Convenience commands** ([`positronic.sh`](../scripts/positronic.sh)):
+
+```bash
+bash scripts/positronic.sh sonic status              # DaemonSet + 4-container state
+bash scripts/positronic.sh sonic logs walking -f     # per-container logs
+bash scripts/positronic.sh sonic logs                # all containers, prefixed
+bash scripts/positronic.sh sonic exec sonic          # shell into a container
+bash scripts/positronic.sh sonic restart             # roll the DaemonSet
+bash scripts/positronic.sh sonic web                 # print the UI URL
+```
 
 ---
 
@@ -488,16 +569,18 @@ are never touched.
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
 | 6. operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
-| 7. ecat-interface | `--ecat-interface` (default-on; `--skip-ecat-interface` to opt out) | resolve the EtherCAT NIC adapter and rename it to `cpuIsolation.nic.iface` via persistent udev rules. Driven by `cpuIsolation.nic.selector` (mac/pci/driver+index); falls back to the vendored interactive picker on a TTY. **Gates phase 8.** |
-| 8. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | render `/etc/cpusets.conf` from `cpuIsolation.partitions[]`, reconcile orphan partitions, activate cpuset partitions, install `cpusets.service` (boot persistence), render per-partition systemd slice units (`/etc/systemd/system/<name>.slice` with `AllowedCPUs=<cpus>`) so services needing isolated cores can join via `Slice=`, migrate kernel cmdline, write systemd `CPUAffinity` drop-in, pin EtherCAT NIC IRQs. The cmdline migration adds `rcu_nocb_poll`, `skew_tick=1`, `irqaffinity=<housekeeping>`, and `isolcpus=managed_irq,<rt-cpus>` (the only knob excluding isolated CPUs from driver-managed PCIe/MSI-X IRQ allocation). The EtherCAT RT boot service also disables `kernel.timer_migration`, restricts `kernel.watchdog_cpumask` to housekeeping (strictly better than `nosoftlockup`/`nowatchdog` — keeps the safety net), and on Thor / other Tegra hosts best-effort reaffines `nvgpu_*`/`nvhost-*`/`tegra*`/`nv-*` kthreads to housekeeping. **Gates phase 9.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. To pick up these behaviors on an existing deployment: `sudo bash scripts/bootstrap-robot.sh --cpu-isolation --yes` and reboot. The cmdline migration sets `/etc/phantomos/cpu-isolation.reboot-pending`. |
-| 8.5 log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.18](#718-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
-| 9. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the `.deb`, write `/etc/dma/dma-ethercat.env` (INTERFACE/DMA_RT_CPU/DMA_CPU_AFFINITY from `cpuIsolation`), render the `dma-ethercat.service` drop-in `Slice=<partition>.slice` + `CPUAffinity=` (so the service can actually run on the isolated cores under cgroup-v2), then enable + start. **Gates phase 10.** |
-| 10. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
-| 11. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
-| 12. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
-| 13. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
-| 14. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
-| 15. validate | `--validate` | `scripts/validate-local-registry.sh` |
+| 7. locomotion-config | `--locomotion-config` | render+apply the `phantom-locomotion-config` ConfigMap from `phantomLocomotion:` (mode/policy/diagnostic); roll the `phantom-locomotion` DaemonSet if present |
+| 8. sonic-config | `--sonic-config` | render+apply the `phantom-sonic-config` ConfigMap from `phantomSonic:` (ROS domain, walking policy, encoder mode, ZMQ/web ports, ramp); roll the `phantom-sonic` DaemonSet if present |
+| 9. ecat-interface | `--ecat-interface` (default-on; `--skip-ecat-interface` to opt out) | resolve the EtherCAT NIC adapter and rename it to `cpuIsolation.nic.iface` via persistent udev rules. Driven by `cpuIsolation.nic.selector` (mac/pci/driver+index); falls back to the vendored interactive picker on a TTY. **Gates phase 10.** |
+| 10. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | render `/etc/cpusets.conf` from `cpuIsolation.partitions[]`, reconcile orphan partitions, activate cpuset partitions, install `cpusets.service` (boot persistence), render per-partition systemd slice units (`/etc/systemd/system/<name>.slice` with `AllowedCPUs=<cpus>`) so services needing isolated cores can join via `Slice=`, migrate kernel cmdline, write systemd `CPUAffinity` drop-in, pin EtherCAT NIC IRQs. The cmdline migration adds `rcu_nocb_poll`, `skew_tick=1`, `irqaffinity=<housekeeping>`, and `isolcpus=managed_irq,<rt-cpus>` (the only knob excluding isolated CPUs from driver-managed PCIe/MSI-X IRQ allocation). The EtherCAT RT boot service also disables `kernel.timer_migration`, restricts `kernel.watchdog_cpumask` to housekeeping (strictly better than `nosoftlockup`/`nowatchdog` — keeps the safety net), and on Thor / other Tegra hosts best-effort reaffines `nvgpu_*`/`nvhost-*`/`tegra*`/`nv-*` kthreads to housekeeping. **Gates phase 12.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. To pick up these behaviors on an existing deployment: `sudo bash scripts/bootstrap-robot.sh --cpu-isolation --yes` and reboot. The cmdline migration sets `/etc/phantomos/cpu-isolation.reboot-pending`. |
+| 11. log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.18](#718-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
+| 12. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the `.deb`, write `/etc/dma/dma-ethercat.env` (INTERFACE/DMA_RT_CPU/DMA_CPU_AFFINITY from `cpuIsolation`), render the `dma-ethercat.service` drop-in `Slice=<partition>.slice` + `CPUAffinity=` (so the service can actually run on the isolated cores under cgroup-v2), then enable + start. **Gates phase 13.** |
+| 13. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
+| 14. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
+| 15. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
+| 16. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
+| 17. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
+| 18. validate | `--validate` | `scripts/validate-local-registry.sh` |
 
 With **no** `--<phase>` flag, every phase runs (full bootstrap).
 With **one or more** `--<phase>` flags, only those phases run
@@ -936,7 +1019,7 @@ sudo bash scripts/bootstrap-robot.sh --host --skip-nvidia
 
 ### 7.15 dma-ethercat installer Job stuck or service won't start
 
-Phase 9 (`--install-dma-ethercat`) gates phase 10 (gitops): a failure
+Phase 12 (`--install-dma-ethercat`) gates phase 13 (gitops): a failure
 halts the bootstrap with a `DMA-ETHERCAT FAILURE` banner. Diagnose by
 sub-step.
 
@@ -1066,6 +1149,50 @@ To customise the caps per host, add a `logManagement:` block to
 template at `host-config-templates/_template/host-config.yaml` for
 the full schema and defaults.
 
+### 7.19 `phantom-sonic` walking/sonic CrashLoop on `shm_open`
+
+**Symptom:** the `phantom-sonic` pod is `Running` but the `walking`
+and/or `sonic` containers restart-loop. Their logs end with:
+
+```
+dma_common.errors.DmaIpcNotAttachedError: failed to attach to IPC
+queue '/actuals': shm_open failed (reader): No such file or directory
+```
+
+`control` and `motion-replay` stay up (they don't attach to `/actuals`
+at boot), so the pod still shows e.g. `4/4` between restarts.
+
+**Cause:** the policy nodes read DMA.ethercat's shared-memory queues
+under `/dev/shm`. Those queues don't exist because **DMA.ethercat isn't
+running** — the bare-metal `dma-ethercat.service` is the producer, not a
+pod.
+
+```bash
+# Confirm the producer is down and the queues are absent:
+systemctl is-active dma-ethercat            # expect: inactive
+ls /dev/shm/                                # expect: no actuals/desired/config
+```
+
+**Fix:** start DMA.ethercat, then let the containers recover (they're
+already restarting, so they reattach within ~30s — or force it):
+
+```bash
+sudo systemctl start dma-ethercat
+ls /dev/shm/                                # now shows actuals, desired, config, ...
+kubectl -n positronic delete pod -l app.kubernetes.io/name=phantom-sonic
+```
+
+> ⚠️ Starting `dma-ethercat` engages the EtherCAT master to the real
+> actuators. The robot boots **idle** (no `/desired` writes until you
+> press X on the joystick), but keep the e-stop in reach.
+
+If `dma-ethercat` itself won't start, see
+[§7.15](#715-dma-ethercat-installer-job-stuck-or-service-wont-start).
+Note the `restartCount` on `walking`/`sonic` stays elevated after
+recovery — that's the historical count, not ongoing failure; check the
+container's current **state** (`Running`) and **start time**, not the
+counter. The same missing-`/dev/shm` cause also CrashLoops `dma-bridge`.
+
 ---
 
 ## 8. Reference
@@ -1108,6 +1235,7 @@ the full schema and defaults.
 | Wipe cluster | `sudo bash scripts/bootstrap-robot.sh --reset` |
 | Validate registry | `sudo bash scripts/validate-local-registry.sh` |
 | Pod state / logs / exec | `bash scripts/positronic.sh status\|logs\|exec` |
+| phantom-sonic state / logs / exec | `bash scripts/positronic.sh sonic status\|logs\|exec\|restart\|web` |
 | Force-sync an Application | `sudo k0s kubectl -n argocd patch app phantomos-<robot>-core --type merge -p '{"operation":{"sync":{}}}'` |
 | ArgoCD UI port-forward | `sudo k0s kubectl -n argocd port-forward svc/argocd-server 8080:443` |
 | Operator UI | `http://<robot-ip>:30080` |
@@ -1140,7 +1268,10 @@ land directly on the host):
 | 9997 | TCP | `mediamtx` API | `manifests/base/dma-video/mediamtx.yaml` (`MTX_APIADDRESS`) |
 | 9299 | TCP | `viewer` (`--port 9299`) | `manifests/base/dma-video/viewer.yaml` |
 | 8420 | TCP | `camera-params` (`--port 8420`) | `manifests/base/dma-video/camera-params.yaml` |
-| dynamic 7400+ | UDP | `positronic-control`, `cpp-robot-state-estimator` ROS 2 / DDS | respective deployment YAMLs |
+| 7865 | TCP | `phantom-sonic` / `motion-replay` web UI (`WEB_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
+| 5557 | TCP | `phantom-sonic` motion ZMQ stream (`MOTION_ZMQ_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
+| 5558 | TCP | `phantom-sonic` mode-control ZMQ (`CONTROL_ZMQ_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
+| dynamic 7400+ | UDP | `positronic-control`, `phantom-sonic`, `cpp-robot-state-estimator` ROS 2 / DDS | respective deployment YAMLs |
 
 `producer` and `rtsp-streamer` use `hostNetwork: true` for USB / IPC
 access but only publish outbound to `mediamtx`; neither opens a

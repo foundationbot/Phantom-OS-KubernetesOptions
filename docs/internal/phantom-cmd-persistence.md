@@ -33,7 +33,7 @@ deployments:
       - {name: recordings, host: /root/recordings, container: /recordings}
 ```
 
-When set, `bootstrap-robot.sh`'s phase 12 (`--image-overrides`) and phase 13
+When set, `bootstrap-robot.sh`'s phase 15 (`--image-overrides`) and phase 16
 (`--deployments`) inject a **strategic-merge patch** on
 `ConfigMap/positronic-config` into the core Argo Application's
 `spec.source.kustomize.patches`. The patch body looks like:
@@ -65,7 +65,7 @@ other key in the base ConfigMap flow through untouched. We only stamp
 
 Both phases are idempotent and consistent: re-running either, or both,
 produces the same live state. A full `bootstrap-robot.sh` invocation
-runs phase 12 followed by phase 13, so the final list is whatever phase
+runs phase 15 followed by phase 16, so the final list is whatever phase
 13's emitter built (which already includes the PHANTOM_CMD patch).
 
 ## Backward compatibility

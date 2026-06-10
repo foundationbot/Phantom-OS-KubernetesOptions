@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# phantom-sonic DaemonSet — gated on foundation.bot/has-sonic. Mutually
+# exclusive with phantom-locomotion and positronic-control (host-config
+# validator enforces). See phantom-sonic.yaml for the full design notes.
+resources:
+  - phantom-sonic.yaml

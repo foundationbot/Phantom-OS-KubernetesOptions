@@ -153,8 +153,8 @@ Everything in this directory is **per-device** and not in git.
 | `robot` | One-line robot identity (DNS-1123). Persisted at first bringup so subsequent runs don't need `--robot`. | `bootstrap-robot.sh` (`persist_robot`) | `bootstrap-robot.sh`, `positronic.sh`, any tool sourcing `scripts/lib/robot-id.sh` |
 | `host-config.yaml` | Single per-host source-of-truth. Robot identity, AI PC URL, target revision, production flag, stack toggles, image overrides, deployment mounts. | `configure-host.sh` (interactive) or operator (manual) or `bootstrap-robot.sh --host-config <path>` (copy) | `bootstrap-robot.sh`, `configure-host.sh`, `host-config.py` |
 | `operator-ui-pairing.yaml` | The AI_PC_URL value for the operator-ui pod. Rendered into a ConfigMap in the `argus` namespace. | `bootstrap-robot.sh` phase 6 (`operator_ui_config`) | `kubectl apply` -> `argus/operator-ui-pairing` ConfigMap; operator-ui Deployment via `configMapKeyRef` |
-| `phantomos-app-core.yaml` | Rendered ArgoCD Application CR for the `core` stack (`phantomos-<robot>-core`). | `bootstrap-robot.sh` phase 10 (`gitops` -> `_gitops_render_app`) | `kubectl apply -f` |
-| `phantomos-app-operator.yaml` | Rendered ArgoCD Application CR for the `operator` stack (`phantomos-<robot>-operator`). Absent when `stacks.operator.enabled: false`. | `bootstrap-robot.sh` phase 10 | `kubectl apply -f` |
+| `phantomos-app-core.yaml` | Rendered ArgoCD Application CR for the `core` stack (`phantomos-<robot>-core`). | `bootstrap-robot.sh` phase 13 (`gitops` -> `_gitops_render_app`) | `kubectl apply -f` |
+| `phantomos-app-operator.yaml` | Rendered ArgoCD Application CR for the `operator` stack (`phantomos-<robot>-operator`). Absent when `stacks.operator.enabled: false`. | `bootstrap-robot.sh` phase 13 | `kubectl apply -f` |
 
 ```
 +----------------------------------------------------------------+
@@ -165,7 +165,7 @@ Everything in this directory is **per-device** and not in git.
                            |                                      |
                            v                                      v
        +----------------------------------+   +----------------------------------+
-       | bootstrap-robot.sh phase 6     |   | bootstrap-robot.sh phase 10        |
+       | bootstrap-robot.sh phase 6     |   | bootstrap-robot.sh phase 13        |
        | renders                          |   | renders one Application per stack |
        | /etc/phantomos/                  |   | /etc/phantomos/                   |
        |   operator-ui-pairing.yaml       |   |   phantomos-app-core.yaml         |
@@ -179,9 +179,9 @@ Everything in this directory is **per-device** and not in git.
                                               +----------------------------------+
                                                               |
                                               +---------------+---------------+
-                                              | phase 12 image-overrides:    |
+                                              | phase 15 image-overrides:    |
                                               |   patch kustomize.images      |
-                                              | phase 13 deployments:        |
+                                              | phase 16 deployments:        |
                                               |   patch kustomize.patches     |
                                               +-------------------------------+
                                                               |
@@ -229,7 +229,7 @@ List of mappings; each is a kustomize image override.
 | `newName` | string | optional | Replacement image name. When omitted, only the tag changes. |
 
 The list overrides anything declared in `manifests/stacks/<stack>/`. Bootstrap
-phase 12 indexes which stack each image belongs to (by running kustomize on
+phase 15 indexes which stack each image belongs to (by running kustomize on
 the stack and scanning rendered container image references), then patches
 each stack's Application with only the entries it owns.
 
@@ -314,7 +314,7 @@ images:
   - name: foundationbot/argus.operator-ui      # routed to operator stack
     newTag: 7af9c2b
   - name: foundationbot/dma-ethercat            # special case: not a stack image;
-    newTag: main-latest-aarch64                 # phase 9 reads it directly to
+    newTag: main-latest-aarch64                 # phase 12 reads it directly to
                                                 # render the installer Job
 
 deployments:
@@ -358,7 +358,7 @@ compose with both modes.
 | 12 | `setup-positronic` (optional) | `--positronic-image`, local Docker | pushes positronic-control image; builds phantom-models; redeploys pod | `--setup-positronic` |
 | 13 | `validate` | local registry | nothing (smoke test) | `--validate` |
 
-### Why phase 9 gates phase 10
+### Why phase 12 gates phase 13
 
 `dma-ethercat` runs **bare metal**, not in k0s. It owns the EtherCAT
 NIC, runs at SCHED_FIFO priority on isolated RT cores, and exposes
@@ -368,7 +368,7 @@ the `positronic-control`, `dma-video`, and `nimbus` pods read through
 installed and the service is healthy, they crashloop on missing IPC
 and DockerHub rate-limits the namespace inside ten minutes.
 
-Phase 9 closes the gate. The installer Job is bootstrap-managed (lives
+Phase 12 closes the gate. The installer Job is bootstrap-managed (lives
 under `manifests/installers/dma-ethercat/`, deliberately outside any
 ArgoCD stack) so it can be force-deleted-and-reapplied on every run
 without racing the reconciler — same pattern as `--seed-pull-secrets`.
@@ -379,8 +379,8 @@ the bootstrap, leaving gitops un-run. Operators who installed the `.deb`
 manually pass `--skip-ethercat-install` to bypass the gate.
 
 The `foundationbot/dma-ethercat` image is the only entry under
-`host-config.yaml:images` that is **not** routed to a stack. Phase 8
-(image-overrides) silently skips it; phase 9 reads it directly via
+`host-config.yaml:images` that is **not** routed to a stack. Phase 15
+(image-overrides) silently skips it; phase 12 reads it directly via
 the host-config helper and substitutes the tag into the rendered
 installer Job before applying.
 
@@ -396,7 +396,7 @@ running realtime service. Skip with `--skip-docker-stop`,
 | --- | --- |
 | `purge_docker` | `docker stop $(docker ps -q)` — stop every running container |
 | `stop_existing_services` | walk `systemctl list-unit-files --state=enabled --type=service`; stop+disable any unit name matching `SYSTEM_SERVICE_PATTERNS` (today: `api.*server`, `dma.*ethercat`) |
-| `uninstall_ethercat` | stop+disable `dma-ethercat.service`; run `/usr/sbin/dma-ethercat-uninstall` if present. Phase 9 reinstalls fresh from the image |
+| `uninstall_ethercat` | stop+disable `dma-ethercat.service`; run `/usr/sbin/dma-ethercat-uninstall` if present. Phase 12 reinstalls fresh from the image |
 
 Phase ordering with file I/O:
 
@@ -468,8 +468,8 @@ argocd namespace
   |       targetRevision: main
   |       path: manifests/stacks/core
   |       kustomize:
-  |         images:   [...]   # injected by phase 12
-  |         patches:  [...]   # injected by phase 13
+  |         images:   [...]   # injected by phase 15
+  |         patches:  [...]   # injected by phase 16
   |     destination: in-cluster, namespace=default (CreateNamespace=true)
   |     syncPolicy.automated.selfHeal: false (production: flag)
   |
@@ -505,7 +505,7 @@ argocd namespace
 
 Each child Application stands alone. There is no umbrella "app-of-apps"
 parent (Stage D removed it). Disabling a stack via
-`stacks.<name>.enabled: false` makes phase 10 delete that Application and its
+`stacks.<name>.enabled: false` makes phase 13 delete that Application and its
 rendered file; the workloads under it are pruned by ArgoCD because the
 Application carries `prune: true`.
 
@@ -556,7 +556,7 @@ operator                  configure-host.sh         /etc/phantomos/        boots
    |                            |                          |                       |    by owning stack      |
    |                            |                          |                       |--- kubectl patch app -->| Application.spec.source.kustomize.patches
    |                            |                          |                       |                         |
-   |                            |                          |                       |--- phase 15: validate -->|
+   |                            |                          |                       |--- phase 18: validate -->|
 ```
 
 ArgoCD then re-runs `kustomize build manifests/stacks/<stack>/` against the
@@ -571,7 +571,7 @@ ArgoCD's Application CR has a `spec.source.kustomize` object with two fields
 that bootstrap drives at runtime. Both are arrays inside a single CR; both
 are read by ArgoCD's kustomize backend at every reconcile.
 
-### `spec.source.kustomize.images` — image overrides (phase 12)
+### `spec.source.kustomize.images` — image overrides (phase 15)
 
 Each entry is a string of the form `name=newName:newTag` or `name:newTag`.
 ArgoCD passes them to `kustomize edit set image` before running the build,
@@ -593,15 +593,15 @@ Code: `bootstrap-robot.sh:_build_image_stack_map`, `_stack_for_image`,
 
 **Special case: `foundationbot/dma-ethercat`.** This image is the one
 entry under `host-config.yaml:images` that is *not* routed to a stack.
-Phase 8 silently skips it (the routing helper carries a
-`NON_STACK_IMAGES` skip-set). Instead, phase 9 (`install-dma-ethercat`)
+Phase 15 silently skips it (the routing helper carries a
+`NON_STACK_IMAGES` skip-set). Instead, phase 12 (`install-dma-ethercat`)
 reads the tag directly via the host-config Python helper and
 substitutes it into the rendered installer Job at
 `/etc/phantomos/dma-ethercat-installer.yaml`. The Job is
 bootstrap-managed (under `manifests/installers/dma-ethercat/`, outside
 any kustomize stack) so ArgoCD never touches it.
 
-### `spec.source.kustomize.patches` — strategic-merge patches (phase 13)
+### `spec.source.kustomize.patches` — strategic-merge patches (phase 16)
 
 Each entry is a `{target, patch}` mapping where `target` selects the
 resource (kind/name/namespace) and `patch` is a YAML strategic-merge
@@ -688,14 +688,14 @@ didn't eliminate per-robot directories yet.
 **Stage D — Application CR rendered per-host.**
 `gitops/apps/<robot>/` was deleted from git. The Application CR template
 moved to `host-config-templates/_template/phantomos-app.yaml.tpl`. Bootstrap
-phase 10 started rendering it with sed substitutions and applying the result
+phase 13 started rendering it with sed substitutions and applying the result
 from `/etc/phantomos/phantomos-app.yaml`. Repo lost the umbrella-app reference
 to robot identity. Stage D was the first version of the codebase where adding
 a new robot did not require a git commit.
 
 **Stage E — image-overrides + dev-mode mounts.**
 Per-host kustomize image tags moved into `host-config.yaml:images` and were
-injected into the live Application via `spec.source.kustomize.images` (phase 12).
+injected into the live Application via `spec.source.kustomize.images` (phase 15).
 First cut of mount injection landed as `host-config.yaml:devMode` (single
 flat list of dev-only mounts on positronic-control). Same patch path
 (`spec.source.kustomize.patches`), narrower schema.

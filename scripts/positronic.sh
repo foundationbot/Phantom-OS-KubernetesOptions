@@ -32,6 +32,13 @@ CONTAINER_NAME="${CONTAINER_NAME:-positronic-control}"
 INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
 IMAGE_NAME="${IMAGE_NAME:-localhost:5443/positronic-control}"
 
+# phantom-sonic DaemonSet (Walking ↔ SONIC) — a single pod with four
+# containers in the positronic namespace. The `sonic` subcommand group
+# wraps the per-container kubectl incantations.
+SONIC_NAMESPACE="${SONIC_NAMESPACE:-positronic}"
+SONIC_APP_LABEL="${SONIC_APP_LABEL:-app.kubernetes.io/name=phantom-sonic}"
+SONIC_CONTAINERS="control walking sonic motion-replay"
+
 ARGO_NS="${ARGO_NS:-argocd}"
 
 # Per-host source-of-truth — track-branch / argo-pause / argo-resume
@@ -194,6 +201,11 @@ ${C_BOLD}Subcommands:${C_RESET}
                                'locomotion'. Args after '--' run instead
                                of bash. 'positronic.sh exec --help' for
                                examples.
+  sonic <action> [args...]     Helpers for the phantom-sonic DaemonSet
+                               (Walking ↔ SONIC; one pod, four containers).
+                               Actions: status | logs [<container>] [-f]
+                               [--previous] | exec <container> [-- cmd] |
+                               restart | web. 'sonic --help' for details.
   gpu-test                     Run a PyTorch CUDA matmul inside the pod;
                                PASS iff cuda is available and result != 0.
   set-cmd [--transient] <command...>
@@ -274,6 +286,9 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh exec locomotion
   bash scripts/positronic.sh exec -- ros2 topic list
   bash scripts/positronic.sh exec locomotion -- sh
+  bash scripts/positronic.sh sonic status
+  bash scripts/positronic.sh sonic logs walking -f
+  bash scripts/positronic.sh sonic exec sonic -- ros2 topic list
   bash scripts/positronic.sh gpu-test
   bash scripts/positronic.sh set-cmd ros2 launch srg_localization global_positioning_launch.py
   bash scripts/positronic.sh set-cmd --transient sleep 60     # one-off
@@ -575,6 +590,165 @@ HELP
     return 0
   fi
   exec $KUBECTL "${args[@]}"
+}
+
+# ---------- subcommand: sonic ---------------------------------------------
+# The phantom-sonic DaemonSet is a single pod with four containers
+# (control, walking, sonic, motion-replay). These helpers wrap the
+# per-container kubectl incantations so operators don't have to remember
+# -c <name> and the label selector.
+
+_sonic_pod() {
+  $KUBECTL -n "$SONIC_NAMESPACE" get pod -l "$SONIC_APP_LABEL" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+_sonic_valid_container() {
+  case " $SONIC_CONTAINERS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+cmd_sonic_status() {
+  require_kubectl
+  bold "DaemonSet ($SONIC_NAMESPACE/phantom-sonic)"
+  if ! $KUBECTL -n "$SONIC_NAMESPACE" get ds phantom-sonic >/dev/null 2>&1; then
+    fail "DaemonSet phantom-sonic not found in $SONIC_NAMESPACE — not deployed"
+    info "is foundation.bot/has-sonic=true on this node? (mutually exclusive with has-locomotion/has-positronic)"
+    return 1
+  fi
+  $KUBECTL -n "$SONIC_NAMESPACE" get ds phantom-sonic -o wide 2>/dev/null | sed 's/^/    /'
+
+  local pod
+  pod="$(_sonic_pod)"
+  if [ -z "$pod" ]; then
+    warn "no phantom-sonic pod scheduled yet"
+    return 0
+  fi
+  bold "Pod ($pod)"
+  $KUBECTL -n "$SONIC_NAMESPACE" get pod "$pod" -o wide 2>/dev/null | sed 's/^/    /'
+  bold "Containers"
+  $KUBECTL -n "$SONIC_NAMESPACE" get pod "$pod" -o jsonpath='{range .status.containerStatuses[*]}    {.name}{"  ready="}{.ready}{"  restarts="}{.restartCount}{"  started="}{.state.running.startedAt}{"\n"}{end}' 2>/dev/null
+}
+
+cmd_sonic_logs() {
+  require_kubectl
+  local container="" follow=0 previous=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow)   follow=1; shift ;;
+      --previous|-p) previous=1; shift ;;
+      -h|--help)     echo "sonic logs [<container>] [-f|--follow] [--previous]   (container: $SONIC_CONTAINERS; omit for all)"; return 0 ;;
+      -*)            die "unknown logs flag: $1" ;;
+      *)             container="$1"; shift ;;
+    esac
+  done
+
+  local pod
+  pod="$(_sonic_pod)"
+  [ -n "$pod" ] || die "no phantom-sonic pod found (label=$SONIC_APP_LABEL ns=$SONIC_NAMESPACE)"
+
+  local args=(-n "$SONIC_NAMESPACE" logs "$pod")
+  if [ -n "$container" ]; then
+    _sonic_valid_container "$container" || die "unknown container: $container (one of: $SONIC_CONTAINERS)"
+    args+=(-c "$container")
+  else
+    # No container named → all four, each line prefixed with [pod/container].
+    args+=(--all-containers --prefix)
+  fi
+  [ "$follow" = 1 ]   && args+=(-f)
+  [ "$previous" = 1 ] && args+=(--previous)
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"; for a in "${args[@]}"; do printf ' %q' "$a"; done; printf '\n'
+    return 0
+  fi
+  exec $KUBECTL "${args[@]}"
+}
+
+cmd_sonic_exec() {
+  if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    echo "sonic exec <container> [-- command...]   (container: $SONIC_CONTAINERS)"
+    return 0
+  fi
+  require_kubectl
+  local container=""
+  if [ $# -gt 0 ] && [ "$1" != "--" ]; then container="$1"; shift; fi
+  [ -n "$container" ] || die "sonic exec requires a container (one of: $SONIC_CONTAINERS)"
+  _sonic_valid_container "$container" || die "unknown container: $container (one of: $SONIC_CONTAINERS)"
+
+  local rest=()
+  if [ $# -gt 0 ]; then
+    [ "$1" = "--" ] || die "unexpected arg: $1 (use '--' before the command)"
+    shift; rest=("$@")
+  fi
+  [ "${#rest[@]}" -eq 0 ] && rest=(bash --norc --noprofile)
+
+  local pod
+  pod="$(_sonic_pod)"
+  [ -n "$pod" ] || die "no phantom-sonic pod found (label=$SONIC_APP_LABEL ns=$SONIC_NAMESPACE)"
+
+  local args=(-n "$SONIC_NAMESPACE" exec -it "$pod" -c "$container" -- "${rest[@]}")
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"; for a in "${args[@]}"; do printf ' %q' "$a"; done; printf '\n'
+    return 0
+  fi
+  exec $KUBECTL "${args[@]}"
+}
+
+cmd_sonic_restart() {
+  require_kubectl
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s -n %s rollout restart ds/phantom-sonic\n' "$KUBECTL" "$SONIC_NAMESPACE"
+    return 0
+  fi
+  $KUBECTL -n "$SONIC_NAMESPACE" rollout restart ds/phantom-sonic && ok "rolled out phantom-sonic"
+}
+
+cmd_sonic_web() {
+  require_kubectl
+  local ip port
+  ip="$($KUBECTL get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null)"
+  port="$($KUBECTL -n "$SONIC_NAMESPACE" get cm phantom-sonic-config -o jsonpath='{.data.WEB_PORT}' 2>/dev/null)"
+  [ -n "$port" ] || port=7865
+  echo "http://${ip:-<robot-ip>}:${port}"
+}
+
+cmd_sonic() {
+  local action="${1:-status}"
+  [ $# -gt 0 ] && shift
+  case "$action" in
+    -h|--help|help)
+      cat <<HELP
+sonic <action> — helpers for the phantom-sonic DaemonSet.
+One pod, four containers: $SONIC_CONTAINERS (positronic ns).
+
+Actions:
+  status                       DaemonSet + pod + per-container state/restarts.
+  logs [<container>] [-f] [--previous]
+                               Per-container logs. <container> is one of
+                               $SONIC_CONTAINERS.
+                               Omit <container> for all (each line prefixed).
+  exec <container> [-- cmd]    Shell (or one-off cmd) in <container>.
+  restart                      Roll the DaemonSet (rollout restart).
+  web                          Print the motion-replay web UI URL.
+
+Examples:
+  bash scripts/positronic.sh sonic status
+  bash scripts/positronic.sh sonic logs walking -f
+  bash scripts/positronic.sh sonic logs sonic --previous
+  bash scripts/positronic.sh sonic logs                 # all containers
+  bash scripts/positronic.sh sonic exec control
+  bash scripts/positronic.sh sonic exec sonic -- ros2 topic list
+  bash scripts/positronic.sh sonic restart
+  bash scripts/positronic.sh sonic web
+HELP
+      return 0 ;;
+    status)  cmd_sonic_status  "$@" ;;
+    logs)    cmd_sonic_logs    "$@" ;;
+    exec)    cmd_sonic_exec    "$@" ;;
+    restart) cmd_sonic_restart "$@" ;;
+    web)     cmd_sonic_web     "$@" ;;
+    *) die "unknown sonic action: $action (try: sonic --help)" ;;
+  esac
 }
 
 # ---------- subcommand: gpu-test ------------------------------------------
@@ -1163,6 +1337,7 @@ case "$sub" in
   status)         cmd_status         "$@" ;;
   logs)           cmd_logs           "$@" ;;
   exec)           cmd_exec           "$@" ;;
+  sonic)          cmd_sonic          "$@" ;;
   gpu-test)       cmd_gpu_test       "$@" ;;
   set-cmd)        cmd_set_cmd        "$@" ;;
   clear-cmd)      cmd_clear_cmd      "$@" ;;
