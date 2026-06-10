@@ -152,7 +152,7 @@ never in k0s.
 manifests/
 ├── base/<workload>/      universal Deployment / DaemonSet / StatefulSet definitions
 └── stacks/
-    ├── core/             registry, dma-video, positronic, phantomos-api-server, yovariable-server
+    ├── core/             registry, dma-video, positronic, phantomos-api-server, yovariable-server, okvis2x (SLAM)
     └── operator/         argus, nimbus
 
 host-config-templates/

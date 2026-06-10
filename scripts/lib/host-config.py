@@ -127,6 +127,9 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-locomotion",
      "false",
      "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
+    ("foundation.bot/has-okvis",
+     "false",
+     "okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM, GPU + DMA shm)"),
     ("foundation.bot/has-positronic",
      "true",
      "positronic-control Deployment"),
@@ -1151,6 +1154,23 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/dma_bridge",
     },
+    "okvis2x": {
+        # okvis2x DaemonSet — OKVIS2-X live dense-stereo SLAM (has-okvis
+        # gated, default-off). Multi-arch manifest: the aarch64 image is
+        # the Jetson Thor build. OKVIS2-X CircleCI publishes :<branch> and
+        # :latest (and immutable :<arch>-<version> on release tags).
+        "stack": "core",
+        "manifest_image": "foundationbot/okvis2x",
+    },
+    "okvis2x-models": {
+        # Consumed by okvis2x's load-models initContainer — busybox bundle
+        # of the SLAM model assets (~3.6 GB: SuperPoint/LightGlue
+        # .onnx/.engine, depth/seg .pt, DBoW vocab), staged into a shared
+        # emptyDir. Same load-models pattern as phantom-models. CircleCI's
+        # build-models job content-addresses + publishes it.
+        "stack": "core",
+        "manifest_image": "foundationbot/okvis2x-models",
+    },
 }
 
 
@@ -1380,6 +1400,31 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "positronic",
         "container": "ik-mk2",
     },
+    # okvis2x DaemonSet — OKVIS2-X live dense-stereo SLAM. Override channels:
+    #   * mounts: host-path overlays. The two common ones are a per-robot
+    #     config dir (camera calibration differs per robot) and a persistent
+    #     output dir (trajectories/meshes default to an ephemeral emptyDir):
+    #
+    #       deployments:
+    #         okvis2x:
+    #           mounts:
+    #             - {name: okvis-config, host: /etc/phantomos/okvis, container: /etc/okvis}
+    #             - {name: output,       host: /data/okvis,          container: /output}
+    #           extraArgs: [dma_live, /etc/okvis/okvis_stereo_dense_thor.yaml,
+    #                       /etc/okvis/se2.yaml, /output]
+    #
+    #   * extraArgs: REPLACES the container argv wholesale (the base manifest's
+    #     args:). DEPLOYMENT_BASE_ARGS["okvis2x"] is empty, so extraArgs IS the
+    #     full argv — first element is the app (dma_live | snetwork), then the
+    #     config/output positionals. Repoint to the /etc/okvis mount above, or
+    #     switch to snetwork dataset replay. Omit it to keep the baked Thor
+    #     config the manifest ships.
+    "okvis2x": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "okvis2x",
+    },
 }
 
 
@@ -1422,11 +1467,20 @@ IK_MK2_BASE_ARGS: list[str] = [
     "--command-out", "upper_body_cmd",
     "--rate", "50",
 ]
+# okvis2x's argv is POSITIONAL (<app> <okvis.yaml> <se2.yaml> <output>) — there
+# is nothing to append a flag to, so extraArgs is used as a WHOLESALE argv
+# replacement rather than an append. Keeping the base empty makes the rendered
+# args == extraArgs verbatim. The real default lives in the base manifest's
+# args:; an operator who sets extraArgs is opting into specifying the full argv
+# themselves (typically to repoint at a host-mounted per-robot config, or to
+# switch to snetwork dataset replay).
+OKVIS2X_BASE_ARGS: list[str] = []
 DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
     "rerun-streamer": RERUN_STREAMER_BASE_ARGS,
     "dma-recorder": DMA_RECORDER_BASE_ARGS,
     "cpp-robot-state-estimator": CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS,
     "ik-mk2": IK_MK2_BASE_ARGS,
+    "okvis2x": OKVIS2X_BASE_ARGS,
 }
 
 # Allowlist for deployments.{rerun-streamer,dma-recorder}.variant. Add
@@ -1463,7 +1517,7 @@ EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"
 # sensors (e.g. mk11000009) that need --foot-contact-source kinematic
 # instead of the default ft_sensors contact source.
 EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
-    {"cpp-robot-state-estimator", "ik-mk2"}
+    {"cpp-robot-state-estimator", "okvis2x", "ik-mk2"}
 )
 
 
