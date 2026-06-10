@@ -137,6 +137,16 @@ stacks:
 #                          manifest tag foundationbot/ik-mk2:V-<x-y-z>-<ts>
 #                          from the IK_MK2 repo CI. Only needed on hosts
 #                          that opt in via nodeLabels has-ik-mk2: 'true'.
+#   phantom-motion-replay  core stack — motion-replay container of the
+#                          phantom-sonic DaemonSet (has-sonic). Web UI
+#                          :7865 + ZMQ streamer :5557, clips baked in.
+#                          manifest uses foundationbot/phantom-motion-replay
+#                          (CI publishes -aarch64 for Jetson). The other
+#                          three phantom-sonic containers run
+#                          foundationbot/phantom-dma-inference — rewritten
+#                          via the 'phantom-locomotion' key above (same
+#                          published image; the two workloads are mutually
+#                          exclusive so one find-key serves both).
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -535,6 +545,30 @@ images:
 #     mounts:
 #       - {name: recordings, host: /data2/recordings, container: /recordings}
 
+# Per-host phantom-sonic config (the MK1 Walking ↔ SONIC stack, gated on
+# foundation.bot/has-sonic). Bootstrap phase sonic-config renders
+# /etc/phantomos/phantom-sonic-config.yaml from this block — a ConfigMap
+# the four phantom-sonic containers consume via envFrom. Same host-resident,
+# ArgoCD-unmanaged, --reset-preserved lifecycle as phantomLocomotion.
+#
+# Every field is optional; omitted fields fall back to the defaults below
+# (which match AI/1134854145 and the manifest's shell-defaults), so an
+# absent phantomSonic block still renders a working ConfigMap.
+#
+# Defaults:
+#   rosDomainId:    "43"                  # ROS_DOMAIN_ID (control + walking)
+#   walkingPolicy:  mk1-walking-1imu-1    # SONIC_WALKING_POLICY (dma_launch.sh)
+#   encoderMode:    "0"                   # SONIC_ENCODER_MODE (sonic --encoder-mode)
+#   motionZmqPort:  "5557"                # MOTION_ZMQ_PORT (sonic + motion-replay)
+#   controlZmqPort: "5558"                # CONTROL_ZMQ_PORT (sonic --control-zmq)
+#   webPort:        "7865"                # WEB_PORT (motion-replay UI)
+#   motionRampSecs: "1.0"                 # MOTION_RAMP_SECS (motion-replay)
+#
+# Example — bump the ROS domain and serve the web UI on a custom port:
+# phantomSonic:
+#   rosDomainId: "44"
+#   webPort: "8080"
+
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
 # /var/log/journal and /var/log/syslog from filling the root partition.
@@ -579,9 +613,11 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
-# Mutual exclusion: setting foundation.bot/has-locomotion to 'true'
-# requires foundation.bot/has-positronic: 'false' (the validator
-# rejects has-locomotion=true with default-on positronic).
+# Mutual exclusion: positronic-control, phantom-locomotion, and
+# phantom-sonic each drive /desired, so at most ONE may be 'true' per
+# robot. positronic defaults to on, so enabling has-locomotion OR
+# has-sonic requires foundation.bot/has-positronic: 'false' (the
+# validator rejects the conflict with a pointed error).
 #
 # Values must be strings — quote 'true' / 'false' or the YAML parser
 # turns them into Python booleans, which the validator rejects with
@@ -601,6 +637,9 @@ nodeLabels:
   foundation.bot/has-locomotion: 'false'
   # positronic-control Deployment
   foundation.bot/has-positronic: 'true'
+  # phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with
+  # has-locomotion and has-positronic)
+  foundation.bot/has-sonic: 'false'
   # dma-recorder DaemonSet (dma-streams)
   foundation.bot/has-recorder: 'true'
   # cpp-robot-state-estimator DaemonSet

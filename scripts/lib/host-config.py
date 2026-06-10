@@ -20,6 +20,7 @@ Usage:
   host-config.py <path> get-node-label-defaults       # TSV: key\tdefault\tdescription
   host-config.py <path> get-phantom-locomotion-policy
   host-config.py <path> get-phantom-locomotion-config-kv
+  host-config.py <path> get-phantom-sonic-config-kv
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -132,6 +133,10 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-recorder",
      "true",
      "dma-recorder DaemonSet (dma-streams)"),
+    ("foundation.bot/has-sonic",
+     "false",
+     "phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with "
+     "has-locomotion and has-positronic)"),
     ("foundation.bot/has-state-estimator",
      "false",
      "cpp-robot-state-estimator DaemonSet"),
@@ -719,6 +724,80 @@ DIAGNOSTIC_BOOL_FIELDS: frozenset[str] = frozenset({
 })
 
 
+# ── phantom-sonic (Walking ↔ SONIC) ────────────────────────────────────────
+# Per-host knobs for the phantom-sonic DaemonSet, rendered into the
+# phantom-sonic-config ConfigMap (envFrom'd by all four containers). Keys
+# map host-config camelCase -> the env-var name each container consumes:
+#   - ROS_DOMAIN_ID / SONIC_WALKING_POLICY / SONIC_ENCODER_MODE are read by
+#     dma_launch.sh in the phantom-dma-inference containers (the latter two
+#     via the manifest commands' "${VAR:-default}" shell-defaults).
+#   - MOTION_ZMQ_PORT / CONTROL_ZMQ_PORT thread into the sonic container's
+#     --motion-zmq / --control-zmq args.
+#   - MOTION_ZMQ_PORT / WEB_PORT / MOTION_RAMP_SECS are the names fixed by
+#     the phantom-motion-replay image.
+# Defaults mirror AI/1134854145 and the manifest shell-defaults exactly so
+# a bare (or absent) phantomSonic block renders a working ConfigMap.
+DEFAULT_SONIC: dict[str, str] = {
+    "rosDomainId":    "43",
+    "walkingPolicy":  "mk1-walking-1imu-1",
+    "encoderMode":    "0",
+    "motionZmqPort":  "5557",
+    "controlZmqPort": "5558",
+    "webPort":        "7865",
+    "motionRampSecs": "1.0",
+}
+
+SONIC_FIELD_TO_ENV: dict[str, str] = {
+    "rosDomainId":    "ROS_DOMAIN_ID",
+    "walkingPolicy":  "SONIC_WALKING_POLICY",
+    "encoderMode":    "SONIC_ENCODER_MODE",
+    "motionZmqPort":  "MOTION_ZMQ_PORT",
+    "controlZmqPort": "CONTROL_ZMQ_PORT",
+    "webPort":        "WEB_PORT",
+    "motionRampSecs": "MOTION_RAMP_SECS",
+}
+
+
+def cmd_get_phantom_sonic_config_kv(cfg: dict) -> int:
+    """Emit KEY=VALUE lines for the phantom-sonic-config ConfigMap.
+
+    Operator overrides from the phantomSonic block are layered on top of
+    DEFAULT_SONIC so the pod always has a complete set of knobs. Emitted in
+    the stable order of DEFAULT_SONIC so the rendered ConfigMap diffs
+    cleanly when one field changes. ASCII, no shell quoting — bootstrap's
+    sonic-config phase drops each line into a YAML-quoted KEY: "VALUE".
+    """
+    block = cfg.get("phantomSonic") or {}
+    if not isinstance(block, dict):
+        print("error: 'phantomSonic' must be a mapping", file=sys.stderr)
+        return 2
+
+    merged: dict[str, object] = dict(DEFAULT_SONIC)
+    for k, v in block.items():
+        if k not in DEFAULT_SONIC:
+            print(
+                f"error: phantomSonic: unknown field {k!r} (permitted: "
+                f"{sorted(DEFAULT_SONIC.keys())})",
+                file=sys.stderr,
+            )
+            return 2
+        if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+            print(
+                f"error: phantomSonic.{k}: must be a scalar (str/int/float), "
+                f"got {type(v).__name__}",
+                file=sys.stderr,
+            )
+            return 2
+        merged[k] = v
+
+    lines = [
+        f"{SONIC_FIELD_TO_ENV[field]}={merged[field]}"
+        for field in DEFAULT_SONIC.keys()
+    ]
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
     """Print phantomLocomotion.policy or the documented default.
     Bootstrap's locomotion-config phase consumes this to render the
@@ -1040,6 +1119,17 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # siblings merged by the manifest job).
         "stack": "core",
         "manifest_image": "foundationbot/ik-mk2",
+    },
+    "phantom-motion-replay": {
+        # motion-replay container of the phantom-sonic DaemonSet
+        # (foundation.bot/has-sonic gated): web UI :7865 + ZMQ motion
+        # streamer :5557, curated clips baked in at CI build. The other
+        # three phantom-sonic containers (control/walking/sonic) run
+        # foundationbot/phantom-dma-inference — rewritten via the existing
+        # 'phantom-locomotion' key (same published image, mutually
+        # exclusive workloads). CI publishes a -aarch64 variant for Jetson.
+        "stack": "core",
+        "manifest_image": "foundationbot/phantom-motion-replay",
     },
     "dma-streams": {
         # Single image, two DaemonSets — dma-recorder (has-recorder) and
@@ -2594,28 +2684,51 @@ def cmd_validate(cfg: dict) -> int:
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
                     )
 
-            # Mutual exclusion: positronic-control and phantom-locomotion
-            # are competing options. Operator picks one. has-positronic
-            # defaults to "true" (the cluster phase reconciler injects
-            # it on every robot unless explicitly set false), so
-            # operators enabling locomotion MUST also explicitly disable
-            # positronic — otherwise both would render and try to drive
-            # the robot.
+            # Mutual exclusion: positronic-control, phantom-locomotion, and
+            # phantom-sonic are competing workloads — each drives /desired,
+            # so at most ONE may be enabled per robot. has-positronic
+            # defaults to "true" (the cluster phase reconciler injects it on
+            # every robot unless explicitly set false), so operators
+            # enabling locomotion or sonic MUST also explicitly disable
+            # positronic — otherwise both would render and fight for the
+            # robot.
             effective_pos = nl.get("foundation.bot/has-positronic", "true")
             effective_loc = nl.get("foundation.bot/has-locomotion", "false")
-            if effective_pos == "true" and effective_loc == "true":
-                if "foundation.bot/has-positronic" not in nl:
+            effective_sonic = nl.get("foundation.bot/has-sonic", "false")
+            enabled_drivers = [
+                label
+                for label, eff in (
+                    ("foundation.bot/has-positronic", effective_pos),
+                    ("foundation.bot/has-locomotion", effective_loc),
+                    ("foundation.bot/has-sonic", effective_sonic),
+                )
+                if eff == "true"
+            ]
+            if len(enabled_drivers) > 1:
+                # Common case: operator turned on locomotion/sonic but left
+                # the default-on positronic implicit. Point at the fix.
+                if (
+                    "foundation.bot/has-positronic" in enabled_drivers
+                    and "foundation.bot/has-positronic" not in nl
+                ):
+                    other = [
+                        d for d in enabled_drivers
+                        if d != "foundation.bot/has-positronic"
+                    ]
                     errors.append(
-                        "nodeLabels: enabling foundation.bot/has-locomotion "
-                        "requires explicitly setting "
+                        "nodeLabels: enabling "
+                        f"{' and '.join(other)} requires explicitly setting "
                         "foundation.bot/has-positronic: \"false\" "
                         "(positronic defaults to on)"
                     )
                 else:
                     errors.append(
-                        "nodeLabels: foundation.bot/has-positronic and "
-                        "foundation.bot/has-locomotion are mutually "
-                        "exclusive — only one may be \"true\""
+                        "nodeLabels: the robot-driving workloads "
+                        "foundation.bot/has-positronic, "
+                        "foundation.bot/has-locomotion and "
+                        "foundation.bot/has-sonic are mutually exclusive — "
+                        f"only one may be \"true\" (got: "
+                        f"{', '.join(enabled_drivers)})"
                     )
 
     # phantomLocomotion is optional; .policy must be a non-empty string
@@ -2667,6 +2780,29 @@ def cmd_validate(cfg: dict) -> int:
                             f"scalar (str/int/float/bool), got {type(v).__name__}"
                         )
 
+    # phantomSonic is optional; every field is optional and falls back to
+    # DEFAULT_SONIC. Reject unknown fields (typo guard) and non-scalars
+    # (can't render into a ConfigMap data: entry). Same shape as the
+    # phantomSonic merge in cmd_get_phantom_sonic_config_kv.
+    ps = cfg.get("phantomSonic")
+    if ps is not None:
+        if not isinstance(ps, dict):
+            errors.append("'phantomSonic' must be a mapping")
+        else:
+            permitted = sorted(DEFAULT_SONIC.keys())
+            for k, v in ps.items():
+                if k not in DEFAULT_SONIC:
+                    errors.append(
+                        f"phantomSonic: unknown field {k!r} "
+                        f"(permitted: {permitted})"
+                    )
+                    continue
+                if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+                    errors.append(
+                        f"phantomSonic.{k}: must be a scalar (str/int/float), "
+                        f"got {type(v).__name__}"
+                    )
+
     # Notes are purely informational (e.g. host-config drift from bundle
     # sidecar). They're printed regardless of error/success — operators
     # want to see expected overrides whether or not validation passed —
@@ -2704,6 +2840,8 @@ def main() -> int:
         return cmd_get_phantom_locomotion_policy(cfg)
     if cmd == "get-phantom-locomotion-config-kv":
         return cmd_get_phantom_locomotion_config_kv(cfg)
+    if cmd == "get-phantom-sonic-config-kv":
+        return cmd_get_phantom_sonic_config_kv(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":

@@ -1,0 +1,204 @@
+# phantom-sonic — DaemonSet running the MK1 Walking ↔ SONIC stack with
+# joystick mode-switching. Implements the four-container deployment from
+# AI/1134854145 "MK1: Walking and SONIC Deployment with Joystick Controls".
+#
+# ── Topology ───────────────────────────────────────────────────────────────
+# Four containers share the host's /dev/shm (the DMA queues that
+# DMA.ethercat owns) via hostIPC + a /dev/shm hostPath. A mode-manager
+# FSM in the `control` container owns the gamepad and decides which
+# policy writes /desired, so only one ever drives the robot:
+#   control       — joystick reader + mode-manager (IDLE/WALKING/SONIC).
+#                   Owns /dev/input; privileged for the gamepad.
+#   walking       — MK1 walking IMU policy (mk1-walking-1imu-1). Boots
+#                   idle; X starts it, Triangle hands off.
+#   sonic         — SONIC whole-body motion-replay policy (encoder mode
+#                   0). Always fed the motion stream, gated off until the
+#                   mode-manager engages it.
+#   motion-replay — web UI (:7865) + motion streamer (ZMQ :5557). Clips
+#                   are baked into the foundationbot/phantom-motion-replay
+#                   image at CI build.
+# Ports (host network): web UI 7865, motion stream 5557, mode-control 5558.
+#
+# ── Images ───────────────────────────────────────────────────────────────
+# control/walking/sonic all run foundationbot/phantom-dma-inference (the
+# walking + SONIC ONNX are baked in at CI build — no load-policies init
+# container, unlike phantom-locomotion). Its per-robot tag is rewritten by
+# Kustomize from host-config.yaml's images.phantom-locomotion entry (SAME
+# published image as the locomotion DaemonSet — one find-key rewrites both;
+# the two workloads are mutually exclusive). motion-replay runs
+# foundationbot/phantom-motion-replay, rewritten from
+# images.phantom-motion-replay.
+#
+# ── Mutual exclusion ───────────────────────────────────────────────────────
+# foundation.bot/has-sonic gates this DaemonSet. SONIC, locomotion, and
+# positronic-control all drive /desired, so the host-config validator
+# rejects has-sonic together with has-locomotion or default-on
+# has-positronic. Operators migrating a robot to SONIC MUST set both
+# has-positronic: "false" and has-locomotion: "false" in nodeLabels.
+#
+# ── Options ────────────────────────────────────────────────────────────────
+# Per-host knobs (ROS domain, walking policy, encoder mode, ZMQ/web ports,
+# motion ramp) come from the phantom-sonic-config ConfigMap, rendered by
+# bootstrap's sonic-config phase from host-config.yaml's phantomSonic
+# block. Each container envFrom's it (optional: true) and the commands
+# carry shell-defaults so the pod still starts before the CM is applied.
+# Same lifecycle as phantom-locomotion-config.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: phantom-sonic
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: phantom-sonic
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: phantom-sonic
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: phantom-sonic
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-sonic: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        # ── control — joystick + mode-manager FSM ──────────────────────────
+        - name: control
+          image: foundationbot/phantom-dma-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - /entrypoint.sh
+            - bash
+            - -c
+            - 'exec /workspace/docker/dma_launch.sh --control'
+          # stdin/tty so an operator can `kubectl exec -it` to watch the
+          # IDLE->WALKING->SONIC mode-manager log lines.
+          stdin: true
+          tty: true
+          envFrom:
+            - configMapRef:
+                name: phantom-sonic-config
+                optional: true
+          env:
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+            # SDL needs a (dummy) video driver to open the gamepad headless.
+            - { name: SDL_VIDEODRIVER, value: "dummy" }
+          volumeMounts:
+            - { name: shm,       mountPath: /dev/shm }
+            - { name: dev-input, mountPath: /dev/input }
+            - { name: recordings, mountPath: /recordings }
+          resources:
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "2", memory: "2Gi" }
+          securityContext:
+            # /dev/input gamepad access (mirrors phantom-locomotion posture).
+            privileged: true
+
+        # ── walking — MK1 walking IMU policy (boots idle) ──────────────────
+        - name: walking
+          image: foundationbot/phantom-dma-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - /entrypoint.sh
+            - bash
+            - -c
+            - 'exec /workspace/docker/dma_launch.sh "${SONIC_WALKING_POLICY:-mk1-walking-1imu-1}"'
+          envFrom:
+            - configMapRef:
+                name: phantom-sonic-config
+                optional: true
+          env:
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+            # The mode-manager owns the gamepad; the walking node must not
+            # also grab it (single joystick owner = the control container).
+            - { name: DMA_NO_JOYSTICK, value: "1" }
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "4", memory: "4Gi" }
+          securityContext:
+            privileged: true
+
+        # ── sonic — SONIC whole-body policy (gated off until engaged) ──────
+        - name: sonic
+          image: foundationbot/phantom-dma-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - /entrypoint.sh
+            - bash
+            - -c
+            - >-
+              exec /workspace/docker/dma_launch.sh --sonic
+              --encoder-mode "${SONIC_ENCODER_MODE:-0}"
+              --motion-zmq "localhost:${MOTION_ZMQ_PORT:-5557}"
+              --control-zmq "localhost:${CONTROL_ZMQ_PORT:-5558}"
+          envFrom:
+            - configMapRef:
+                name: phantom-sonic-config
+                optional: true
+          env:
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "4", memory: "4Gi" }
+          securityContext:
+            privileged: true
+
+        # ── motion-replay — web UI (:7865) + motion streamer (ZMQ :5557) ──
+        - name: motion-replay
+          image: foundationbot/phantom-motion-replay:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # Command is the image default (the doc runs it unmodified); the
+          # ports + ramp come from the phantom-sonic-config ConfigMap via
+          # envFrom. The keys MOTION_ZMQ_PORT / WEB_PORT / MOTION_RAMP_SECS
+          # are fixed by the phantom-motion-replay image. NB: do NOT also
+          # set these as explicit `env` entries — `env` overrides `envFrom`,
+          # which would shadow per-host overrides. bootstrap's sonic-config
+          # phase always renders this CM (defaults merged), so the values
+          # are present even when the operator sets no phantomSonic block.
+          envFrom:
+            - configMapRef:
+                name: phantom-sonic-config
+                optional: true
+          ports:
+            - name: web
+              containerPort: 7865
+              protocol: TCP
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm,   type: Directory }
+        - name: dev-input
+          hostPath: { path: /dev/input, type: Directory }
+        # Operator-visible run artifacts (matches phantom-locomotion +
+        # dma-recorder). DirectoryOrCreate so the mount succeeds on robots
+        # that have never run dma-recorder.
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }
