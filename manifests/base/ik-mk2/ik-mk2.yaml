@@ -1,0 +1,122 @@
+# ik-mk2 — DaemonSet running the MK2 upper-body inverse-kinematics shim
+# (foundation/IK_MK2, services/ik_service). It is the teleop→WBC seam:
+#
+#   dma-bridge ──/dev/shm/taskspace_command_*──▶ ik-mk2 ──/dev/shm/upper_body_cmd_*──▶ WBC (phantom-locomotion)
+#                 (VR Cartesian targets)            │  Mk2UpperBodyIK.solve() @ 50 Hz
+#   dma_main   ──/actuals + /config (dma_ipc)───────┘  (measured upper-body joints as the solve seed)
+#
+# The container reads the 33-dim teleop contract from the taskspace_command
+# SHM tensor-queue (written by dma-bridge), seeds the differential solve from
+# /actuals via dma_ipc, and publishes the 17 UPPER_BODY_JOINTS position targets
+# to the upper_body_cmd SHM queue as a residual base for the WBC policy.
+#
+# ── Image ────────────────────────────────────────────────────────────────
+# foundationbot/ik-service — the ROS-free, CPU-only service image built from
+# IK_MK2 services/ik_service/Dockerfile (ubuntu:24.04 + mink/mujoco/numpy +
+# dma_common cp312 wheels). NO GPU, NO ROS — hence no runtimeClassName: nvidia.
+# Per-robot tag is rewritten by Kustomize from host-config.yaml's
+# images.ik-service entry; do not pin the tag here.
+#
+# NOTE: IK_MK2 CI currently publishes the *placeholder* foundationbot/ik-mk2
+# teleop-demo image, not this service image. The services/ik_service/Dockerfile
+# build must be wired into .circleci/config.yml (tag foundationbot/ik-service)
+# before this DaemonSet has a real image to pull.
+#
+# ── Lifecycle / gating ─────────────────────────────────────────────────────
+# Schedules only on robot nodes that opt in via
+#   foundation.bot/has-ik-mk2=true
+# Ships enabled in git but inert (zero pods) until a host sets the label in
+# /etc/phantomos/host-config.yaml > nodeLabels — same pattern as dma-recorder
+# (has-recorder) and phantom-locomotion (has-locomotion). The output queue's
+# consumer is the MK2 WBC (phantom-locomotion); enable this alongside a robot
+# whose WBC has the upper-body command input wired (see IK_MK2 docs/integration.md
+# "WBC-side work required").
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ik-mk2
+  # Co-located with phantom-locomotion (the residual-base consumer); IPC is
+  # host-global via hostIPC + /dev/shm, so the namespace is organizational only.
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: ik-mk2
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ik-mk2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ik-mk2
+    spec:
+      # Schedule only on opted-in robot nodes.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-ik-mk2: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # The shim shares /dev/shm with dma_main (/actuals,/config), dma-bridge
+      # (taskspace_command), and the WBC reader (upper_body_cmd). hostIPC is
+      # required so the POSIX shm primitives (futex sync, named semaphores)
+      # backing the queues see the same kernel IPC namespace as the host
+      # writers; the /dev/shm hostPath alone exposes the files but not the
+      # namespace. CPU-only + shm-only: no host network needed.
+      hostPID: false
+      hostNetwork: false
+      hostIPC: true
+
+      # The runner attaches lazily/with retry and shuts down cleanly on
+      # SIGTERM; a short grace period is plenty.
+      terminationGracePeriodSeconds: 15
+
+      # foundationbot/* is a private DockerHub repo; secret seeded by
+      # bootstrap phase 5 (seed-pull-secrets).
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        - name: ik-service
+          # Built from IK_MK2 services/ik_service/Dockerfile. Bump the tag
+          # through host-config kustomize.images, not here.
+          image: foundationbot/ik-service:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # ENTRYPOINT is ik-service-runner; these args mirror the image's
+          # default CMD (seed from /actuals via dma_ipc). For a robot whose
+          # WBC isn't publishing /actuals yet, add --no-actuals to run the
+          # solver open-loop (seed from the previous output).
+          args:
+            - --taskspace
+            - taskspace_command
+            - --command-out
+            - upper_body_cmd
+            - --rate
+            - "50"
+          securityContext:
+            # /dev/shm segments produced by host dma_main / dma-bridge are
+            # root-owned; run as root to read them. privileged matches the
+            # dma-recorder posture — capability-only (CAP_IPC_OWNER) fails on
+            # k0s/containerd default seccomp for cross-namespace mmap + futex.
+            runAsUser: 0
+            privileged: true
+          resources:
+            # solve() is ~0.4–0.9 ms at 50 Hz, so the loop is not CPU-bound;
+            # the footprint is mostly the mujoco/numpy resident set.
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

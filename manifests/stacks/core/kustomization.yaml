@@ -29,4 +29,5 @@ resources:
   - ../../base/dma-streams
   - ../../base/dma-bridge
   - ../../base/phantom-locomotion
+  - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
