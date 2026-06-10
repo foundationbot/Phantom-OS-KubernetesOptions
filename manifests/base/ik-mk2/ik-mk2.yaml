@@ -1,0 +1,138 @@
+# ik-mk2 — DaemonSet running the MK2 upper-body inverse-kinematics shim.
+#
+# Source: foundation/DMA/IK_MK2 (services/ik_service, console-script
+# ik-service-runner, image foundationbot/ik-mk2). CI in the IK_MK2 repo
+# (.circleci/config.yml) builds services/ik_service/Dockerfile on native
+# amd64 + arm64 runners and publishes a multi-arch manifest tag
+#   foundationbot/ik-mk2:V-<MAJOR>-<MINOR>-<PATCH>-<YYYYMMDD>-<HHMMSS>
+# Per-robot tag is rewritten by Kustomize from host-config.yaml's
+# images.ik-mk2 entry (the PLACEHOLDER below is always overridden).
+#
+# ── What it does ─────────────────────────────────────────────────────────
+# A ROS-free, CPU-only 50 Hz loop over /dev/shm (no GPU, no nvidia runtime,
+# no network port — unlike dma-bridge / rerun-streamer it serves nothing):
+#   read  taskspace_command  (33-dim teleop target, VR/dma_bridge contract)
+#   read  /actuals + /config (measured upper body, via dma_ipc — the seed)
+#   write upper_body_cmd      (17 joint targets, the WBC residual-base feed)
+# See IK_MK2/services/ik_service/README.md + specs/002 for the contract.
+#
+# ── Disabled by default ──────────────────────────────────────────────────
+# Gated on TWO node labels:
+#   foundation.bot/robot:        "true"   — only schedule on robot nodes
+#   foundation.bot/has-ik-mk2:   "true"   — opt-in per host
+# has-ik-mk2 is NOT applied by default (NODE_LABEL_REGISTRY default
+# "false"), so kubectl/ArgoCD render this manifest but no node matches the
+# selector → zero pods scheduled. This is deliberate: the WBC-side consumer
+# of upper_body_cmd is not wired on the robot yet (IK_MK2 specs/002 "WBC
+# gap"), so until it lands the shim produces a feed nothing reads. Activate
+# per-host once the consumer exists:
+#   1) add to /etc/phantomos/host-config.yaml:
+#        nodeLabels:
+#          foundation.bot/has-ik-mk2: "true"
+#   2) re-run /opt/phantom/scripts/bootstrap-robot.sh, OR
+#      kubectl label node <robot> foundation.bot/has-ik-mk2=true
+# Deactivate by removing the label or flipping it to "false".
+#
+# ── Namespace ────────────────────────────────────────────────────────────
+# positronic (NOT phantom): the shim feeds the WBC residual base and runs
+# alongside positronic-control / phantom-locomotion, per IK_MK2
+# docs/docker-and-ci.md "How the image is deployed".
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ik-mk2
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: ik-mk2
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ik-mk2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ik-mk2
+    spec:
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-ik-mk2: "true"   # ← off-switch by default
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # hostIPC: share the POSIX IPC namespace so the shim sees the same
+      # /dev/shm segments (named semaphores / futex sync backing the
+      # tensor-queue + dma_ipc rings) that dma_main and the teleop bridge
+      # publish from other IPC namespaces. The hostPath /dev/shm mount
+      # alone exposes the files but not the underlying IPC namespace.
+      #
+      # No hostNetwork: the shim binds no port (pure /dev/shm pipeline),
+      # so it stays in the pod network namespace — unlike dma-bridge /
+      # rerun-streamer which serve a websocket on the host iface.
+      hostIPC: true
+
+      terminationGracePeriodSeconds: 10
+
+      # foundationbot/ik-mk2 is a private DockerHub repo; the pull needs
+      # the deployment-account PAT. dockerhub-creds is seeded per-namespace
+      # by bootstrap phase 5 (seed-pull-secrets).
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        - name: ik-mk2
+          # ENTRYPOINT ik-service-runner is baked into the image; the CMD
+          # default is the same queue names we pass explicitly below. Image
+          # tag is rewritten per-robot via the overlay's kustomize images:
+          # transformer (bootstrap reads images.ik-mk2.image from
+          # host-config). PLACEHOLDER never runs as-is.
+          image: foundationbot/ik-mk2:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # Closed-loop: seed from /actuals (+/config handshake) published
+          # by the host's dma_main. The runner attaches with retry and is
+          # start-order-independent, so it tolerates dma_main / the teleop
+          # bridge coming up later.
+          #
+          # Per-host overrides: append flags via host-config.yaml
+          #   deployments: { ik-mk2: { extraArgs: [--no-actuals] } }
+          # (open-loop on a DMA-master-less host; also [--log-level, DEBUG],
+          # [--rate, "100"]). KEEP THIS LIST IN SYNC with
+          # scripts/lib/host-config.py:IK_MK2_BASE_ARGS — an extraArgs patch
+          # re-emits the base list wholesale.
+          args:
+            - --taskspace
+            - taskspace_command
+            - --command-out
+            - upper_body_cmd
+            - --rate
+            - "50"
+          env:
+            - { name: PYTHONUNBUFFERED, value: "1" }
+
+          securityContext:
+            runAsUser: 0      # /dev/shm segments are root-owned on the host
+            privileged: true  # required for cross-IPC-namespace shm mmap
+                              # (same posture as dma-bridge / dma-recorder)
+
+          resources:
+            # The solve is ~0.5 ms at 50 Hz (huge headroom); mink/mujoco
+            # import is the only real footprint. Modest envelope, matching
+            # the other shm-reader workloads.
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

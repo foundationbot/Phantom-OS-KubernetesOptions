@@ -242,6 +242,15 @@ Mapping from known deployment name to settings. Known deployments come from
 | --- | --- | --- | --- | --- |
 | `positronic-control` | core | Deployment | positronic | positronic-control |
 | `phantomos-api-server` | core | DaemonSet | phantom | api |
+| `phantom-locomotion` | core | DaemonSet | positronic | phantom-locomotion |
+| `cpp-robot-state-estimator` | core | DaemonSet | positronic | state-estimator |
+| `dma-recorder` | core | DaemonSet | phantom | recorder |
+| `rerun-streamer` | core | DaemonSet | phantom | streamer |
+| `dma-bridge` | core | DaemonSet | phantom | bridge |
+| `ik-mk2` | core | DaemonSet | positronic | ik-mk2 |
+
+(`DEPLOYMENT_TARGETS` in `host-config.py` is authoritative; the rows above
+are a snapshot.)
 
 Per-entry fields:
 
@@ -252,6 +261,7 @@ Per-entry fields:
 | `<deployment>.mounts[].host` | absolute path | yes | Host directory. **`~` is rejected** (bootstrap runs as root, `~` would resolve to `/root`). Must start with `/`. |
 | `<deployment>.mounts[].container` | absolute path | yes | Mount path inside the container. |
 | `<deployment>.mounts[].name` | string | optional | Volume name. Generated as `mount-<i>` if omitted. Duplicates rejected. |
+| `<deployment>.extraArgs` | list of scalars | optional | CLI flags appended to the workload's base args (the whole `args:` list is re-emitted from `DEPLOYMENT_BASE_ARGS`, then these are appended). Supported on `cpp-robot-state-estimator` and `ik-mk2` (e.g. `ik-mk2: { extraArgs: [--no-actuals] }` for an open-loop host). |
 
 The base manifests under `manifests/base/positronic/` and
 `manifests/base/phantomos-api-server/` carry only universal kernel/runtime
@@ -470,7 +480,11 @@ argocd namespace
   |       positronic/       (Deployment positronic-control)
   |       phantomos-api-server/ (DaemonSet api)
   |       yovariable-server/    (Deployment)
+  |       dma-streams/          (DaemonSets dma-recorder + rerun-streamer)
   |       dma-bridge/           (DaemonSet bridge, :9098 FE WebSocket)
+  |       phantom-locomotion/   (DaemonSet, gated has-locomotion)
+  |       ik-mk2/               (DaemonSet, upper-body IK shim, gated has-ik-mk2)
+  |       cpp-robot-state-estimator/ (DaemonSet)
   |
   +-- Application phantomos-mk09-operator
         labels: part-of=phantomos-mk09, stack=operator

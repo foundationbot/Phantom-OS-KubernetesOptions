@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# ik-mk2 — MK2 upper-body inverse-kinematics shim DaemonSet (ROS-free,
+# CPU-only /dev/shm pipeline node). Always rendered, gated on
+# foundation.bot/has-ik-mk2 (default-off → zero pods until a host opts in).
+# Namespace `positronic` is created by manifests/base/positronic
+# (namespace.yaml) in the same core stack. See ik-mk2.yaml for the full
+# design notes.
+resources:
+  - ik-mk2.yaml
