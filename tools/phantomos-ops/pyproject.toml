@@ -12,7 +12,11 @@ license = "Apache-2.0"
 authors = [{ name = "Foundation Robotics" }]
 
 dependencies = [
-  "textual>=0.50",
+  # Tested floor: the suite is verified against the textual 8.x line.
+  # The original >=0.50 floor predated several APIs the screens use;
+  # pin to the major series we actually run so a stale textual can't
+  # silently break the layout.
+  "textual>=8.0",
   "PyYAML>=6.0",
 ]
 
@@ -38,3 +42,12 @@ asyncio_mode = "auto"
 addopts = "-p no:cacheprovider"
 # Belt + braces: also force explicit plugin opt-in via env.
 required_plugins = ["pytest-asyncio"]
+# Each run_test() spins up and tears down its own event loop; asyncio's
+# subprocess transport is finalized by GC *after* that loop closes,
+# which CPython reports as "Exception ignored in ... __del__: Event loop
+# is closed". It's a harmless test-teardown artifact (in the real app
+# the loop outlives every job), so silence just that one to keep the
+# suite output clean without masking genuine unraisable exceptions.
+filterwarnings = [
+  "ignore:Exception ignored in.*BaseSubprocessTransport.*:pytest.PytestUnraisableExceptionWarning",
+]

@@ -59,6 +59,7 @@ actions:
     runs_on: [robot]
     duration: "5-15 min"
     reversible: false
+    form: bootstrap_bring_online
     command: ["bash", "scripts/bootstrap-robot.sh"]
 
   - id: bootstrap.configure_host
@@ -123,6 +124,94 @@ actions:
     duration: "~5s"
     command: ["bash", "scripts/cpusets/setup_ethercat_interface.sh"]
 
+  # --- single-phase re-runs (idempotent; operators run these far more
+  #     often than a full bring-online once a robot is up) ----------------
+
+  - id: bootstrap.gitops
+    group: bootstrap
+    title: "Re-render & apply the ArgoCD Applications"
+    blurb: |
+      Runs bootstrap phase --gitops only: terraform apply (ArgoCD Helm
+      chart) + render/apply the per-stack Application CRs from
+      host-config.yaml. Idempotent; safe to re-run after editing stacks
+      or targetRevision.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "1-3 min"
+    command: ["bash", "scripts/bootstrap-robot.sh", "--gitops"]
+    dry_run: ["bash", "scripts/bootstrap-robot.sh", "--gitops", "--dry-run"]
+
+  - id: bootstrap.image_overrides
+    group: bootstrap
+    title: "Push image tag overrides into the live Applications"
+    blurb: |
+      Runs phase --image-overrides only: injects host-config.yaml's
+      images: into each stack's Application via kustomize.images. Use
+      after bumping a tag in host-config.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~30s"
+    command: ["bash", "scripts/bootstrap-robot.sh", "--image-overrides"]
+    dry_run: ["bash", "scripts/bootstrap-robot.sh", "--image-overrides", "--dry-run"]
+
+  - id: bootstrap.deployments
+    group: bootstrap
+    title: "Apply per-host deployment mounts/patches"
+    blurb: |
+      Runs phase --deployments only: injects host-config.yaml's
+      deployments: block as strategic-merge patches per stack. Use
+      after editing mounts or the positronic launchCommand.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~30s"
+    command: ["bash", "scripts/bootstrap-robot.sh", "--deployments"]
+    dry_run: ["bash", "scripts/bootstrap-robot.sh", "--deployments", "--dry-run"]
+
+  - id: bootstrap.operator_ui_config
+    group: bootstrap
+    title: "Re-pair the operator UI to the AI PC"
+    blurb: |
+      Runs phase --operator-ui-config only: re-renders the
+      operator-ui-pairing ConfigMap (AI_PC_HOST + CONTROL_PC_HOST) and
+      rolls operator-ui if the value changed. Use after moving the AI PC.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~30s"
+    command: ["bash", "scripts/bootstrap-robot.sh", "--operator-ui-config"]
+    dry_run: ["bash", "scripts/bootstrap-robot.sh", "--operator-ui-config", "--dry-run"]
+
+  - id: bootstrap.locomotion_config
+    group: bootstrap
+    title: "Apply the locomotion policy ConfigMap"
+    blurb: |
+      Runs phase --locomotion-config only: renders the
+      phantom-locomotion-config ConfigMap from host-config's
+      phantomLocomotion block and rolls the DaemonSet if present.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~20s"
+    command: ["bash", "scripts/bootstrap-robot.sh", "--locomotion-config"]
+    dry_run: ["bash", "scripts/bootstrap-robot.sh", "--locomotion-config", "--dry-run"]
+
+  - id: bootstrap.log_management
+    group: bootstrap
+    title: "Install journald + logrotate disk caps"
+    blurb: |
+      Runs phase --log-management only: installs drop-ins capping
+      journald and rsyslog disk use. Idempotent; the safety net against
+      a full /var/log/syslog.
+    safety: yellow
+    requires: [root]
+    runs_on: [robot]
+    duration: "~10s"
+    command: ["bash", "scripts/bootstrap-robot.sh", "--log-management"]
+    dry_run: ["bash", "scripts/bootstrap-robot.sh", "--log-management", "--dry-run"]
+
   # ---------------------------------------------------------------- Workloads
 
   - id: positronic.status
@@ -167,6 +256,81 @@ actions:
     requires: [kubectl]
     duration: "~30s"
     command: ["bash", "scripts/diagnose-positronic.sh"]
+
+  # --- other workloads: status + logs via the generic workload.sh
+  #     wrapper (resolves kubectl / k0s kubectl) -------------------------
+
+  - id: locomotion.status
+    group: workloads
+    title: "Show phantom-locomotion state"
+    blurb: "Pods, controllers, and per-container restarts for the phantom-locomotion DaemonSet."
+    safety: green
+    requires: [kubectl]
+    duration: "~1s"
+    command: ["bash", "scripts/workload.sh", "status", "positronic", "phantom-locomotion"]
+
+  - id: locomotion.logs
+    group: workloads
+    title: "Tail phantom-locomotion logs"
+    blurb: "Streams the locomotion policy node's logs. Ctrl-C to stop."
+    safety: green
+    requires: [kubectl]
+    duration: "streams"
+    command: ["bash", "scripts/workload.sh", "logs", "positronic", "phantom-locomotion", "-f"]
+
+  - id: ik_mk2.status
+    group: workloads
+    title: "Show ik-mk2 state"
+    blurb: "Pods, controllers, and restarts for the MK2 upper-body IK shim DaemonSet."
+    safety: green
+    requires: [kubectl]
+    duration: "~1s"
+    command: ["bash", "scripts/workload.sh", "status", "positronic", "ik-mk2"]
+
+  - id: ik_mk2.logs
+    group: workloads
+    title: "Tail ik-mk2 logs"
+    blurb: "Streams the ik-mk2 DaemonSet logs. Ctrl-C to stop."
+    safety: green
+    requires: [kubectl]
+    duration: "streams"
+    command: ["bash", "scripts/workload.sh", "logs", "positronic", "ik-mk2", "-f"]
+
+  - id: state_estimator.status
+    group: workloads
+    title: "Show cpp-robot-state-estimator state"
+    blurb: "Pods, controllers, and restarts for the state-estimator DaemonSet."
+    safety: green
+    requires: [kubectl]
+    duration: "~1s"
+    command: ["bash", "scripts/workload.sh", "status", "positronic", "cpp-robot-state-estimator"]
+
+  - id: state_estimator.logs
+    group: workloads
+    title: "Tail cpp-robot-state-estimator logs"
+    blurb: "Streams the state-estimator logs. Ctrl-C to stop."
+    safety: green
+    requires: [kubectl]
+    duration: "streams"
+    command: ["bash", "scripts/workload.sh", "logs", "positronic", "cpp-robot-state-estimator", "-f"]
+
+  - id: dma_bridge.status
+    group: workloads
+    title: "Show dma-bridge state"
+    blurb: "Pods, controllers, and restarts for the dma-bridge DaemonSet (FE WebSocket bridge, phantom ns)."
+    safety: green
+    requires: [kubectl]
+    duration: "~1s"
+    command: ["bash", "scripts/workload.sh", "status", "phantom", "dma-bridge"]
+
+  - id: dma_bridge.logs
+    group: workloads
+    title: "Tail dma-bridge logs"
+    blurb: "Streams the dma-bridge logs. Ctrl-C to stop."
+    safety: green
+    requires: [kubectl]
+    duration: "streams"
+    command: ["bash", "scripts/workload.sh", "logs", "phantom", "dma-bridge", "-f"]
 
   - id: deployment.reset
     group: workloads

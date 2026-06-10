@@ -198,4 +198,7 @@ def get_form_class(name: str):
     if name == "registry_prune":
         from .registry_prune import RegistryPruneForm
         return RegistryPruneForm
+    if name == "bootstrap_bring_online":
+        from .bootstrap_bring_online import BootstrapBringOnlineForm
+        return BootstrapBringOnlineForm
     return None

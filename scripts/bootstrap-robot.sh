@@ -2274,7 +2274,11 @@ operator_ui_config() {
 
   if _vr_web_tls_pair_present "$VR_WEB_TLS_DIR"; then
     existing=$(ls "$VR_WEB_TLS_DIR"/*.crt 2>/dev/null | head -1)
-    if [ "$YES" = 1 ] || [ ! -t 0 ]; then
+    # Auto-path when non-interactive AND not under the TUI bridge: a
+    # bare cron/ssh run has no tty, so honor VR_WEB_TLS_RENEW or preserve.
+    # Under the TUI (_OPS_TUI=1) stdin is the bridge pipe (also not a tty),
+    # so fall through to op_confirm — it renders a native modal.
+    if [ "$YES" = 1 ] || { [ ! -t 0 ] && [ "${_OPS_TUI:-0}" != 1 ]; }; then
       if [ "${VR_WEB_TLS_RENEW:-0}" = 1 ]; then
         info "VR_WEB_TLS_RENEW=1; wiping $VR_WEB_TLS_DIR and re-issuing"
         rm -f "$VR_WEB_TLS_DIR"/*.crt "$VR_WEB_TLS_DIR"/*.key
@@ -2282,16 +2286,11 @@ operator_ui_config() {
       else
         skip "cert pair present in $VR_WEB_TLS_DIR ($(basename "$existing")); preserving (VR_WEB_TLS_RENEW=1 to force)"
       fi
+    elif op_confirm "cert pair present in $VR_WEB_TLS_DIR ($(basename "$existing")) — wipe and re-issue from tailscale?" false; then
+      rm -f "$VR_WEB_TLS_DIR"/*.crt "$VR_WEB_TLS_DIR"/*.key
+      _vr_web_tls_issue "$fqdn" "$VR_WEB_TLS_DIR" && issued=1
     else
-      printf 'cert pair already present in %s (%s).\nWipe and re-issue from tailscale? [y/N] ' \
-        "$VR_WEB_TLS_DIR" "$(basename "$existing")"
-      read -r reply || true
-      if [[ "$reply" =~ ^[Yy] ]]; then
-        rm -f "$VR_WEB_TLS_DIR"/*.crt "$VR_WEB_TLS_DIR"/*.key
-        _vr_web_tls_issue "$fqdn" "$VR_WEB_TLS_DIR" && issued=1
-      else
-        skip "preserving existing $VR_WEB_TLS_DIR cert pair"
-      fi
+      skip "preserving existing $VR_WEB_TLS_DIR cert pair"
     fi
   else
     info "no cert pair in $VR_WEB_TLS_DIR; issuing from tailscale"
