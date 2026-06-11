@@ -127,7 +127,7 @@ spec:
         # Kustomize images: transformer as the app container. Mirrors
         # positronic-control's load-models init.
         - name: load-models
-          image: foundationbot/okvis2x-models:main
+          image: foundationbot/okvis2x-models:latest
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -150,7 +150,7 @@ spec:
 
       containers:
         - name: okvis2x
-          image: foundationbot/okvis2x:main
+          image: foundationbot/okvis2x:latest
           imagePullPolicy: IfNotPresent
           # Image ENTRYPOINT is docker/entrypoint.sh (the app dispatcher).
           # argv for dma_live: <app> <okvis.yaml> <se2.yaml> <output-dir>.
