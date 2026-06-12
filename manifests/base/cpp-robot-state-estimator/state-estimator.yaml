@@ -35,11 +35,17 @@
 # in this PR — file an op when needed).
 #
 # ── CPU pinning ──────────────────────────────────────────────────────────
-# The compose pins to a dedicated RT helper core via cpuset:. k8s has no
-# direct equivalent. Operators wanting hard pinning configure the
-# cpu-isolation phase to dedicate a partition core and pin via the
-# host-RT mechanism. Resource requests below are scheduler hints, not
-# RT guarantees.
+# state_estimator_node does NOT hard-pin a CPU core by default. (It used to
+# default to --cpu 19, which fails with EINVAL inside a pod whose cpuset the
+# kubelet assigned to a different core — the pin silently failed while the log
+# still claimed core 19.) With no --cpu it inherits the pod's cgroup/k8s
+# cpuset; SCHED_FIFO RT priority still applies (the pod has SYS_NICE). To
+# hard-pin, isolate a core via the cpu-isolation phase and pass it per-robot
+# through host-config extraArgs (see the host-config template):
+#     deployments:
+#       cpp-robot-state-estimator:
+#         extraArgs: [--cpu, "19"]
+# Resource requests below are scheduler hints, not RT guarantees.
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -94,9 +100,10 @@ spec:
           volumeMounts:
             - { name: shm, mountPath: /dev/shm }
           resources:
-            # Scheduler hint only — not real RT pinning. The compose
-            # uses cpuset:19; replicate that via cpu-isolation if
-            # the robot's cpuset partitions allow.
+            # Scheduler hint only — not real RT pinning. The SE no longer
+            # hard-pins by default; to dedicate a core, isolate one via
+            # cpu-isolation and pass --cpu through host-config extraArgs
+            # (see the CPU pinning note above).
             requests: { cpu: "1", memory: "1Gi" }
             limits:   { cpu: "1", memory: "2Gi" }
           securityContext:

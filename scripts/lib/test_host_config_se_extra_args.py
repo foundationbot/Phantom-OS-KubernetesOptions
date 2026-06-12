@@ -292,3 +292,27 @@ def test_validate_rejects_list_element_in_extra_args(capsys):
     assert any("extraArgs" in e for e in errs), (
         f"expected nested-list element error, got: {errs}"
     )
+
+
+def test_base_args_match_manifest():
+    """Guard the sync contract: CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS must equal the
+    base manifest's container args:. extraArgs patches REPLACE args wholesale, so
+    if these drift, every extraArgs-bearing robot silently runs a different SE
+    arg set than the base manifest (the bug that snuck in a stray --mujoco-model,
+    making the SE re-rotate IMU on top of DMA.ethercat's body-frame rotation)."""
+    import yaml
+
+    manifest = (
+        HERE / ".." / ".." / "manifests" / "base"
+        / "cpp-robot-state-estimator" / "state-estimator.yaml"
+    ).resolve()
+    doc = yaml.safe_load(manifest.read_text())
+    containers = doc["spec"]["template"]["spec"]["containers"]
+    se = next(c for c in containers if c["name"] == "state-estimator")
+    manifest_args = [str(a) for a in se["args"]]
+
+    assert manifest_args == list(hc.CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS), (
+        "CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS drifted from the base manifest "
+        f"args:. manifest={manifest_args} base_args="
+        f"{list(hc.CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS)}"
+    )
