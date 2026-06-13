@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# okvis2x — OKVIS2-X live dense-stereo SLAM DaemonSet. Gated on
+# foundation.bot/has-okvis (default "false"): renders everywhere, schedules
+# nowhere until a host opts in via host-config.yaml nodeLabels. Image tags
+# (okvis2x + okvis2x-models) are rewritten per-robot by the core stack's
+# kustomize images: transformer from host-config images.*.
+#
+# Lives in the `positronic` namespace (defined by base/positronic/namespace.yaml,
+# already in the core stack) alongside cpp-robot-state-estimator — the sibling
+# DMA-shm SLAM/estimator consumer. Reusing it means the dockerhub-creds pull
+# secret (seeded into `positronic` by bootstrap phase 5) is already there, so
+# the private okvis2x images pull without adding a namespace to the seed list.
+resources:
+  - okvis2x.yaml

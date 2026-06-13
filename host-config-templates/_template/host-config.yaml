@@ -147,6 +147,16 @@ stacks:
 #                          via the 'phantom-locomotion' key above (same
 #                          published image; the two workloads are mutually
 #                          exclusive so one find-key serves both).
+#   okvis2x                core stack — OKVIS2-X live dense-stereo SLAM
+#                          DaemonSet (has-okvis gated, default-off). manifest
+#                          uses foundationbot/okvis2x. Multi-arch manifest —
+#                          the aarch64 image is the Jetson Thor build; OKVIS2-X
+#                          CircleCI publishes :<branch> / :latest (and immutable
+#                          :<arch>-<version> on release tags).
+#   okvis2x-models         core stack — okvis2x's load-models init. manifest
+#                          uses foundationbot/okvis2x-models. busybox bundle of
+#                          the SLAM model weights (~3.6 GB). Content-addressed +
+#                          published by CircleCI's build-models job.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -635,6 +645,8 @@ nodeLabels:
   foundation.bot/has-cameras: 'true'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
+  # okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM; GPU + DMA shm)
+  foundation.bot/has-okvis: 'false'
   # positronic-control Deployment
   foundation.bot/has-positronic: 'true'
   # phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with
@@ -674,6 +686,30 @@ nodeLabels:
 #                                       (accepts extraArgs — see below)
 #   dma-recorder           core stack, container 'recorder' (DMA.streams .rrd writer)
 #   rerun-streamer         core stack, container 'streamer' (DMA.streams live viewer)
+#   okvis2x                core stack, container 'okvis2x' (OKVIS2-X SLAM)
+#                                       (accepts extraArgs — full argv replace, see below)
+#
+# deployments.okvis2x.extraArgs (optional):
+#   okvis2x's argv is POSITIONAL (<app> <okvis.yaml> <se2.yaml> <output>), so
+#   extraArgs REPLACES the container argv wholesale rather than appending — the
+#   first element is the app (dma_live | snetwork). Omit it to keep the baked
+#   Thor foundation_rig config the base manifest ships. Camera calibration is
+#   per-robot, so the common pattern is to mount host YAMLs at /etc/okvis and
+#   repoint argv at them:
+#
+#     deployments:
+#       okvis2x:
+#         mounts:
+#           # per-robot okvis + se2 YAMLs (calibration differs per robot)
+#           - {name: okvis-config, host: /etc/phantomos/okvis, container: /etc/okvis}
+#           # persist trajectories/meshes (default /output is an ephemeral emptyDir)
+#           - {name: output,       host: /data/okvis,          container: /output}
+#         extraArgs: [dma_live, /etc/okvis/okvis_stereo_dense_thor.yaml,
+#                     /etc/okvis/se2.yaml, /output]
+#
+#   snetwork (dataset replay) instead of live SLAM — argv is
+#   [snetwork, <okvis.yaml>, <se2.yaml>, <dataset-dir>, <output-dir>]; add a
+#   mount for the dataset dir alongside.
 #
 # deployments.cpp-robot-state-estimator.extraArgs (optional):
 #   List of additional CLI flags appended after the SE's base args. Use
