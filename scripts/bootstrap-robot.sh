@@ -2602,7 +2602,7 @@ positronic_config() {
   # full data block; the two strategic-merge ConfigMap patches on the
   # same target compose (k8s merges the data maps).
   local merge_patch
-  if ! merge_patch="$(KV_TEXT="$kv_text" CURRENT_PATCHES="$current_patches_json" python3 - <<'PY' 2>/dev/null
+  if ! merge_patch="$(KV_TEXT="$kv_text" MODE="$mode" CURRENT_PATCHES="$current_patches_json" python3 - <<'PY' 2>/dev/null
 import json, os, sys
 try:
     import yaml
@@ -2610,6 +2610,7 @@ except ImportError:
     sys.exit(1)
 
 kv_text = os.environ["KV_TEXT"]
+mode = os.environ.get("MODE", "")
 try:
     current = json.loads(os.environ["CURRENT_PATCHES"]) or []
 except json.JSONDecodeError:
@@ -2621,15 +2622,19 @@ TARGET_KIND = "ConfigMap"
 TARGET_NAME = "positronic-config"
 TARGET_NS = "positronic"
 
-# Parse KEY=VALUE lines. Deliver the diagnostic env (and POSITRONIC_MODE)
-# but NOT PHANTOM_CMD — _patch_positronic_phantom_cmd owns that key so
-# the two patches don't collide on it.
+# Parse KEY=VALUE lines. In DIAGNOSTIC mode this env patch OWNS
+# PHANTOM_CMD (it carries the diagnostic launcher; get-positronic-config-kv
+# emits it), so the diagnostic command actually reaches the pod. The
+# phase-12 _patch_positronic_phantom_cmd sub-phase scrubs its own
+# production PHANTOM_CMD patch in diagnostic mode so the two don't fight.
+# In PRODUCTION mode PHANTOM_CMD is left to that FIR-407/408 path (read
+# from deployments.positronic-control.launchCommand), so we drop it here.
 data = {}
 for line in kv_text.splitlines():
     if not line:
         continue
     key, _, value = line.partition("=")
-    if key == "PHANTOM_CMD":
+    if key == "PHANTOM_CMD" and mode != "diagnostic":
         continue
     data[key] = value
 
@@ -5114,6 +5119,17 @@ _patch_positronic_phantom_cmd() {
   local hc="$1"
   [ -r "$hc" ] || return 0
 
+  # Mode-awareness (BUG 2/3): in diagnostic mode the phase-6.6 env patch
+  # OWNS PHANTOM_CMD (it carries the diagnostic launcher). This sub-phase
+  # must then emit NOTHING for PHANTOM_CMD — otherwise its production patch
+  # would clobber the launcher value — and must NOT strip the env patch.
+  # In production mode this sub-phase is the sole PHANTOM_CMD owner, reading
+  # deployments.positronic-control.launchCommand (FIR-407/408), unchanged.
+  local positronic_mode="production"
+  local mode_kv
+  mode_kv="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-positronic-config-kv 2>/dev/null | grep -m1 '^POSITRONIC_MODE=' || true)"
+  [ -n "$mode_kv" ] && positronic_mode="${mode_kv#POSITRONIC_MODE=}"
+
   local launch_command
   if ! launch_command="$(python3 - "$hc" <<'PY' 2>/dev/null
 import sys, yaml
@@ -5145,6 +5161,13 @@ PY
     local field_absent=0
   fi
 
+  # In diagnostic mode, force the "scrub, emit nothing" path so the
+  # phase-6.6 launcher PHANTOM_CMD wins and is not overwritten.
+  if [ "$positronic_mode" = "diagnostic" ]; then
+    launch_command=""
+    field_absent=1
+  fi
+
   local app="phantomos-$ROBOT-core"
   if [ ${#KUBECTL[@]} -eq 0 ]; then
     info "no kubectl/k0s available — skipping PHANTOM_CMD sub-phase"
@@ -5156,8 +5179,10 @@ PY
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
-    if [ "$field_absent" = 1 ]; then
-      info "DRY-RUN  scrub any prior ConfigMap/positronic-config patch from $app"
+    if [ "$positronic_mode" = "diagnostic" ]; then
+      info "DRY-RUN  diagnostic mode — phase 6.6 owns PHANTOM_CMD (launcher); scrub production PHANTOM_CMD-only patch from $app, leave env patch intact"
+    elif [ "$field_absent" = 1 ]; then
+      info "DRY-RUN  scrub any prior PHANTOM_CMD-only patch from $app"
     else
       info "DRY-RUN  set PHANTOM_CMD=$launch_command via $app kustomize.patches"
     fi
@@ -5195,14 +5220,24 @@ TARGET_NAME = "positronic-config"
 TARGET_NS = "positronic"
 
 def is_phantom_cmd_entry(entry: dict) -> bool:
+    # Match ONLY the production PHANTOM_CMD-only patch — never the phase-6.6
+    # positronic env patch (which carries POSITRONIC_MODE and, in diagnostic
+    # mode, the launcher PHANTOM_CMD). Targeting the same ConfigMap is not
+    # enough to distinguish them (BUG 3): the env patch sets POSITRONIC_MODE,
+    # the production phantom-cmd patch sets PHANTOM_CMD and NOT POSITRONIC_MODE.
     tgt = entry.get("target") or {}
-    return (
+    if not (
         tgt.get("kind") == TARGET_KIND
         and tgt.get("name") == TARGET_NAME
         and tgt.get("namespace") == TARGET_NS
-    )
+    ):
+        return False
+    body = entry.get("patch") or ""
+    return "PHANTOM_CMD" in body and "POSITRONIC_MODE" not in body
 
-# Drop any prior entry pointing at our ConfigMap target.
+# Drop only the prior production PHANTOM_CMD-only patch; leave the phase-6.6
+# env patch (POSITRONIC_MODE + POSITRONIC_DIAGNOSTIC_* [+ diagnostic
+# PHANTOM_CMD]) untouched so the two coexist on one ConfigMap.
 filtered = [e for e in current if isinstance(e, dict) and not is_phantom_cmd_entry(e)]
 
 if not absent:
@@ -5229,7 +5264,9 @@ PY
   fi
 
   if "${KUBECTL[@]}" -n argocd patch app "$app" --type=merge -p "$merge_patch" >/dev/null; then
-    if [ "$field_absent" = 1 ]; then
+    if [ "$positronic_mode" = "diagnostic" ]; then
+      pass "$app  production PHANTOM_CMD-only patch scrubbed (diagnostic mode — phase 6.6 owns the launcher PHANTOM_CMD)"
+    elif [ "$field_absent" = 1 ]; then
       pass "$app  PHANTOM_CMD entry scrubbed (deployments.positronic-control.launchCommand unset)"
     else
       pass "$app  PHANTOM_CMD set declaratively (deployments.positronic-control.launchCommand)"
@@ -5242,6 +5279,15 @@ PY
   "${KUBECTL[@]}" -n argocd patch app "$app" \
     --type=merge -p '{"operation":{"sync":{}}}' >/dev/null 2>&1 \
     && pass "triggered sync of $app"
+
+  # In diagnostic mode phase 6.6 owns PHANTOM_CMD and already rolls the
+  # DaemonSet to the launcher value; this sub-phase only scrubbed the
+  # production patch, so the live CM's PHANTOM_CMD is the launcher (not "").
+  # Skip the FIR-407 convergence/rollout below — comparing the launcher
+  # against our scrubbed-empty desired value would wrongly try to roll.
+  if [ "$positronic_mode" = "diagnostic" ]; then
+    return
+  fi
 
   # FIR-407 follow-up: roll the positronic-control DaemonSet if the live
   # ConfigMap's PHANTOM_CMD doesn't match the value we just declared. K8s

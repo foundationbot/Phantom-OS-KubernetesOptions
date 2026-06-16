@@ -774,13 +774,19 @@ POSITRONIC_DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     for field, env in DIAGNOSTIC_FIELD_TO_ENV.items()
 }
 
-# Same tolerance->band splitting as locomotion, POSITRONIC_-prefixed.
-POSITRONIC_DIAGNOSTIC_TOL_TO_BAND: dict[str, tuple[str, str]] = {
-    field: (
-        lo.replace("LOCOMOTION_DIAGNOSTIC_", "POSITRONIC_DIAGNOSTIC_", 1),
-        hi.replace("LOCOMOTION_DIAGNOSTIC_", "POSITRONIC_DIAGNOSTIC_", 1),
-    )
-    for field, (lo, hi) in DIAGNOSTIC_TOL_TO_BAND.items()
+# Unlike locomotion (whose dma_launch.sh consumes pre-split BAND_LO/BAND_HI
+# env vars), the positronic launcher's downstream consumer —
+# policy_diagnostics_tools' launch.py — reads a single RAW tolerance per
+# field and derives the band itself (band = 1 ∓ tol). So for the positronic
+# path the three tol fields must be emitted RAW (one POSITRONIC_DIAGNOSTIC_*
+# _TOL line), NOT split into BAND_LO/BAND_HI (which launch.py would silently
+# ignore, losing operator overrides). Derive the raw env name from the
+# locomotion BAND_LO name (strip the _BAND_LO suffix -> _TOL) so the two
+# maps cannot drift in field coverage.
+POSITRONIC_DIAGNOSTIC_TOL_FIELD_TO_ENV: dict[str, str] = {
+    field: lo.replace("LOCOMOTION_DIAGNOSTIC_", "POSITRONIC_DIAGNOSTIC_", 1)
+    .replace("_BAND_LO", "_TOL")
+    for field, (lo, _hi) in DIAGNOSTIC_TOL_TO_BAND.items()
 }
 
 
@@ -850,10 +856,12 @@ def cmd_get_positronic_config_kv(cfg: dict) -> int:
                 value = str(raw)
             if field in DIAGNOSTIC_OMIT_IF_EMPTY and value == "":
                 continue
-            if field in POSITRONIC_DIAGNOSTIC_TOL_TO_BAND:
-                lo_env, hi_env = POSITRONIC_DIAGNOSTIC_TOL_TO_BAND[field]
+            if field in POSITRONIC_DIAGNOSTIC_TOL_FIELD_TO_ENV:
+                # RAW passthrough: launch.py derives the band from this
+                # single tol itself, so validate it parses as a float but
+                # emit the operator's value verbatim (no band split).
                 try:
-                    tol = float(value)
+                    float(value)
                 except ValueError:
                     print(
                         f"error: positronicControl.diagnostic.{field}: "
@@ -861,8 +869,8 @@ def cmd_get_positronic_config_kv(cfg: dict) -> int:
                         file=sys.stderr,
                     )
                     return 2
-                lines.append(f"{lo_env}={1.0 - tol:g}")
-                lines.append(f"{hi_env}={1.0 + tol:g}")
+                tol_env = POSITRONIC_DIAGNOSTIC_TOL_FIELD_TO_ENV[field]
+                lines.append(f"{tol_env}={value}")
                 continue
             env_name = POSITRONIC_DIAGNOSTIC_FIELD_TO_ENV[field]
             lines.append(f"{env_name}={value}")

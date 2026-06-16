@@ -96,20 +96,62 @@ def test_diagnostic_defaults_merged_and_phantom_cmd():
     assert kv["POSITRONIC_DIAGNOSTIC_WAIT_FOR_START"] == "true"
 
 
-def test_diagnostic_tol_to_band_splitting():
-    """A single tol knob expands to a LO/HI band pair (1±tol)."""
+def test_diagnostic_tols_emitted_raw_not_band():
+    """The tol knobs pass through RAW (launch.py derives the band itself).
+
+    The positronic launcher feeds policy_diagnostics_tools' launch.py,
+    which reads a single tolerance and computes band = 1∓tol. Emitting
+    pre-split BAND_LO/BAND_HI here would be silently dropped, losing the
+    operator override (BUG 1). Assert the raw _TOL lines and the absence
+    of any BAND_LO/BAND_HI pair.
+    """
     kv = _kv(
         {
             "positronicControl": {
                 "mode": "diagnostic",
-                "diagnostic": {"velTrackingRatioTol": "0.30"},
+                "diagnostic": {
+                    "velTrackingRatioTol": "0.25",
+                    "gravityMagTol": "0.04",
+                    "imuPitchRatioTol": "0.20",
+                },
             }
         }
     )
-    assert kv["POSITRONIC_DIAGNOSTIC_VEL_TRACKING_RATIO_BAND_LO"] == "0.7"
-    assert kv["POSITRONIC_DIAGNOSTIC_VEL_TRACKING_RATIO_BAND_HI"] == "1.3"
-    # The raw tol field is NOT emitted directly.
-    assert "POSITRONIC_DIAGNOSTIC_VEL_TRACKING_RATIO_TOL" not in kv
+    # Raw passthrough — value verbatim, no 1∓tol math.
+    assert kv["POSITRONIC_DIAGNOSTIC_VEL_TRACKING_RATIO_TOL"] == "0.25"
+    assert kv["POSITRONIC_DIAGNOSTIC_GRAVITY_MAG_TOL"] == "0.04"
+    assert kv["POSITRONIC_DIAGNOSTIC_IMU_PITCH_RATIO_TOL"] == "0.20"
+    # No pre-split bands anywhere in the output.
+    for key in kv:
+        assert "_BAND_LO" not in key, key
+        assert "_BAND_HI" not in key, key
+
+
+def test_diagnostic_default_tols_emitted_raw():
+    """Bare diagnostic mode emits the three default tols RAW + the lag."""
+    kv = _kv({"positronicControl": {"mode": "diagnostic"}})
+    assert kv["POSITRONIC_DIAGNOSTIC_VEL_TRACKING_RATIO_TOL"] == "0.30"
+    assert kv["POSITRONIC_DIAGNOSTIC_GRAVITY_MAG_TOL"] == "0.05"
+    assert kv["POSITRONIC_DIAGNOSTIC_IMU_PITCH_RATIO_TOL"] == "0.30"
+    # The lag field is a plain passthrough via the field->env map and is
+    # the one launch.py reads alongside the raw vel-tracking tol.
+    assert kv["POSITRONIC_DIAGNOSTIC_VEL_TRACKING_LAG_MAX_MS"] == "60.0"
+    for key in kv:
+        assert "_BAND_LO" not in key, key
+        assert "_BAND_HI" not in key, key
+
+
+def test_diagnostic_tol_rejects_non_float():
+    """A non-float tol is rejected (rc=2), same as the band path was."""
+    rc = hc.cmd_get_positronic_config_kv(
+        {
+            "positronicControl": {
+                "mode": "diagnostic",
+                "diagnostic": {"gravityMagTol": "notanumber"},
+            }
+        }
+    )
+    assert rc == 2
 
 
 def test_diagnostic_override_merges_on_defaults():
