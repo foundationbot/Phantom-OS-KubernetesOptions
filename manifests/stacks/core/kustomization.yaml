@@ -30,5 +30,6 @@ resources:
   - ../../base/dma-bridge
   - ../../base/phantom-locomotion
   - ../../base/phantom-sonic
+  - ../../base/phantom-psi
   - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
