@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# phantom-psi DaemonSet — the Ψ₀ VLA → locomotion colocation, gated on
+# foundation.bot/has-psi. Mutually exclusive with phantom-sonic,
+# phantom-locomotion and positronic-control (host-config validator enforces).
+# See phantom-psi.yaml for the full design notes.
+resources:
+  - namespace.yaml
+  - phantom-psi.yaml

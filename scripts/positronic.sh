@@ -39,6 +39,10 @@ SONIC_NAMESPACE="${SONIC_NAMESPACE:-positronic}"
 SONIC_APP_LABEL="${SONIC_APP_LABEL:-app.kubernetes.io/name=phantom-sonic}"
 SONIC_CONTAINERS="control walking sonic motion-replay"
 
+PSI_NAMESPACE="${PSI_NAMESPACE:-psi}"
+PSI_APP_LABEL="${PSI_APP_LABEL:-app.kubernetes.io/name=phantom-psi}"
+PSI_CONTAINERS="psi0-vla bridge walking"
+
 ARGO_NS="${ARGO_NS:-argocd}"
 
 # Per-host source-of-truth — track-branch / argo-pause / argo-resume
@@ -206,6 +210,12 @@ ${C_BOLD}Subcommands:${C_RESET}
                                Actions: status | logs [<container>] [-f]
                                [--previous] | exec <container> [-- cmd] |
                                restart | web. 'sonic --help' for details.
+  psi <action> [args...]       Helpers for the phantom-psi DaemonSet (Ψ₀ VLA
+                               → locomotion; one pod, three containers:
+                               psi0-vla, bridge, walking, in the psi ns).
+                               Actions: status | logs [<container>] [-f]
+                               [--previous] | exec <container> [-- cmd] |
+                               restart. 'psi --help' for details.
   gpu-test                     Run a PyTorch CUDA matmul inside the pod;
                                PASS iff cuda is available and result != 0.
   set-cmd [--transient] <command...>
@@ -289,6 +299,9 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh sonic status
   bash scripts/positronic.sh sonic logs walking -f
   bash scripts/positronic.sh sonic exec sonic -- ros2 topic list
+  bash scripts/positronic.sh psi status
+  bash scripts/positronic.sh psi logs psi0-vla -f
+  bash scripts/positronic.sh psi exec psi0-vla
   bash scripts/positronic.sh gpu-test
   bash scripts/positronic.sh set-cmd ros2 launch srg_localization global_positioning_launch.py
   bash scripts/positronic.sh set-cmd --transient sleep 60     # one-off
@@ -748,6 +761,153 @@ HELP
     restart) cmd_sonic_restart "$@" ;;
     web)     cmd_sonic_web     "$@" ;;
     *) die "unknown sonic action: $action (try: sonic --help)" ;;
+  esac
+}
+
+# ---------- subcommand: psi -----------------------------------------------
+# The phantom-psi DaemonSet is a single pod with three containers
+# (psi0-vla, bridge, walking) in the psi namespace. These helpers wrap the
+# per-container kubectl incantations (label selector + -c <name>) so an
+# operator can shell in / tail logs without memorising them. Mirrors `sonic`.
+
+_psi_pod() {
+  $KUBECTL -n "$PSI_NAMESPACE" get pod -l "$PSI_APP_LABEL" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+_psi_valid_container() {
+  case " $PSI_CONTAINERS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+cmd_psi_status() {
+  require_kubectl
+  bold "DaemonSet ($PSI_NAMESPACE/phantom-psi)"
+  if ! $KUBECTL -n "$PSI_NAMESPACE" get ds phantom-psi >/dev/null 2>&1; then
+    fail "DaemonSet phantom-psi not found in $PSI_NAMESPACE — not deployed"
+    info "is foundation.bot/has-psi=true on this node? (mutually exclusive with has-sonic/has-locomotion/has-positronic)"
+    return 1
+  fi
+  $KUBECTL -n "$PSI_NAMESPACE" get ds phantom-psi -o wide 2>/dev/null | sed 's/^/    /'
+
+  local pod
+  pod="$(_psi_pod)"
+  if [ -z "$pod" ]; then
+    warn "no phantom-psi pod scheduled yet"
+    return 0
+  fi
+  bold "Pod ($pod)"
+  $KUBECTL -n "$PSI_NAMESPACE" get pod "$pod" -o wide 2>/dev/null | sed 's/^/    /'
+  bold "Containers"
+  $KUBECTL -n "$PSI_NAMESPACE" get pod "$pod" -o jsonpath='{range .status.containerStatuses[*]}    {.name}{"  ready="}{.ready}{"  restarts="}{.restartCount}{"  started="}{.state.running.startedAt}{"\n"}{end}' 2>/dev/null
+}
+
+cmd_psi_logs() {
+  require_kubectl
+  local container="" follow=0 previous=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow)   follow=1; shift ;;
+      --previous|-p) previous=1; shift ;;
+      -h|--help)     echo "psi logs [<container>] [-f|--follow] [--previous]   (container: $PSI_CONTAINERS; omit for all)"; return 0 ;;
+      -*)            die "unknown logs flag: $1" ;;
+      *)             container="$1"; shift ;;
+    esac
+  done
+
+  local pod
+  pod="$(_psi_pod)"
+  [ -n "$pod" ] || die "no phantom-psi pod found (label=$PSI_APP_LABEL ns=$PSI_NAMESPACE)"
+
+  local args=(-n "$PSI_NAMESPACE" logs "$pod")
+  if [ -n "$container" ]; then
+    _psi_valid_container "$container" || die "unknown container: $container (one of: $PSI_CONTAINERS)"
+    args+=(-c "$container")
+  else
+    # No container named → all three, each line prefixed with [pod/container].
+    args+=(--all-containers --prefix)
+  fi
+  [ "$follow" = 1 ]   && args+=(-f)
+  [ "$previous" = 1 ] && args+=(--previous)
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"; for a in "${args[@]}"; do printf ' %q' "$a"; done; printf '\n'
+    return 0
+  fi
+  exec $KUBECTL "${args[@]}"
+}
+
+cmd_psi_exec() {
+  if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    echo "psi exec <container> [-- command...]   (container: $PSI_CONTAINERS)"
+    return 0
+  fi
+  require_kubectl
+  local container=""
+  if [ $# -gt 0 ] && [ "$1" != "--" ]; then container="$1"; shift; fi
+  [ -n "$container" ] || die "psi exec requires a container (one of: $PSI_CONTAINERS)"
+  _psi_valid_container "$container" || die "unknown container: $container (one of: $PSI_CONTAINERS)"
+
+  local rest=()
+  if [ $# -gt 0 ]; then
+    [ "$1" = "--" ] || die "unexpected arg: $1 (use '--' before the command)"
+    shift; rest=("$@")
+  fi
+  [ "${#rest[@]}" -eq 0 ] && rest=(bash --norc --noprofile)
+
+  local pod
+  pod="$(_psi_pod)"
+  [ -n "$pod" ] || die "no phantom-psi pod found (label=$PSI_APP_LABEL ns=$PSI_NAMESPACE)"
+
+  local args=(-n "$PSI_NAMESPACE" exec -it "$pod" -c "$container" -- "${rest[@]}")
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s' "$KUBECTL"; for a in "${args[@]}"; do printf ' %q' "$a"; done; printf '\n'
+    return 0
+  fi
+  exec $KUBECTL "${args[@]}"
+}
+
+cmd_psi_restart() {
+  require_kubectl
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '+ %s -n %s rollout restart ds/phantom-psi\n' "$KUBECTL" "$PSI_NAMESPACE"
+    return 0
+  fi
+  $KUBECTL -n "$PSI_NAMESPACE" rollout restart ds/phantom-psi && ok "rolled out phantom-psi"
+}
+
+cmd_psi() {
+  local action="${1:-status}"
+  [ $# -gt 0 ] && shift
+  case "$action" in
+    -h|--help|help)
+      cat <<HELP
+psi <action> — helpers for the phantom-psi DaemonSet.
+One pod, three containers: $PSI_CONTAINERS (psi ns).
+
+Actions:
+  status                       DaemonSet + pod + per-container state/restarts.
+  logs [<container>] [-f] [--previous]
+                               Per-container logs. <container> is one of
+                               $PSI_CONTAINERS.
+                               Omit <container> for all (each line prefixed).
+  exec <container> [-- cmd]    Shell (or one-off cmd) in <container>.
+  restart                      Roll the DaemonSet (rollout restart).
+
+Examples:
+  bash scripts/positronic.sh psi status
+  bash scripts/positronic.sh psi logs psi0-vla -f
+  bash scripts/positronic.sh psi logs bridge --previous
+  bash scripts/positronic.sh psi logs                  # all containers
+  bash scripts/positronic.sh psi exec psi0-vla
+  bash scripts/positronic.sh psi exec psi0-vla -- python -c 'import torch; print(torch.cuda.get_device_name())'
+  bash scripts/positronic.sh psi restart
+HELP
+      return 0 ;;
+    status)  cmd_psi_status  "$@" ;;
+    logs)    cmd_psi_logs    "$@" ;;
+    exec)    cmd_psi_exec    "$@" ;;
+    restart) cmd_psi_restart "$@" ;;
+    *) die "unknown psi action: $action (try: psi --help)" ;;
   esac
 }
 
@@ -1338,6 +1498,7 @@ case "$sub" in
   logs)           cmd_logs           "$@" ;;
   exec)           cmd_exec           "$@" ;;
   sonic)          cmd_sonic          "$@" ;;
+  psi)            cmd_psi            "$@" ;;
   gpu-test)       cmd_gpu_test       "$@" ;;
   set-cmd)        cmd_set_cmd        "$@" ;;
   clear-cmd)      cmd_clear_cmd      "$@" ;;
