@@ -685,6 +685,19 @@ nodeLabels:
 #       cpp-robot-state-estimator:
 #         extraArgs: [--foot-contact-source, kinematic]
 #
+#   CPU pinning: the SE does NOT hard-pin a core by default (it inherits
+#   the pod's cgroup/k8s cpuset; SCHED_FIFO priority still applies). To
+#   pin to a dedicated isolated RT core, first carve it out via the
+#   cpu-isolation phase, then pass it here:
+#
+#     deployments:
+#       cpp-robot-state-estimator:
+#         extraArgs: [--cpu, "19"]
+#
+#   (Combine flags in one list, e.g. [--foot-contact-source, kinematic,
+#   --cpu, "19"].) Passing --cpu for a core NOT in the pod's cpuset just
+#   fails the pin (logged as a warning) and falls back to the cpuset.
+#
 #   Strategic-merge replaces the args list wholesale (Kubernetes cannot
 #   merge a list of scalars), so the full base args are always re-emitted
 #   before the extraArgs. Do not repeat base flags here — just the new
