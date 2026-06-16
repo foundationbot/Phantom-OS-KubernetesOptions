@@ -86,7 +86,9 @@ def test_diagnostic_defaults_merged_and_phantom_cmd():
     assert kv["PHANTOM_CMD"] == "bash /src/docker/positronic_diagnostic_launch.sh"
     # Defaults merged in from DEFAULT_POSITRONIC_DIAGNOSTIC.
     assert kv["POSITRONIC_DIAGNOSTIC_ROBOT"] == "mk2-lower-body"
-    assert kv["POSITRONIC_DIAGNOSTIC_NAMING"] == "mj"
+    # positronic tests in WIRE naming (joints derived from /config); this
+    # deliberately diverges from the locomotion default ("mj").
+    assert kv["POSITRONIC_DIAGNOSTIC_NAMING"] == "wire"
     assert kv["POSITRONIC_DIAGNOSTIC_BIAS"] == "0.10"
     assert kv["POSITRONIC_DIAGNOSTIC_MASTER_GAIN"] == "0.3"
     assert (
@@ -167,7 +169,9 @@ def test_diagnostic_override_merges_on_defaults():
     assert kv["POSITRONIC_DIAGNOSTIC_BIAS"] == "0.20"
     assert kv["POSITRONIC_DIAGNOSTIC_MASTER_GAIN"] == "0.5"
     # Unset fields keep their defaults.
-    assert kv["POSITRONIC_DIAGNOSTIC_NAMING"] == "mj"
+    # positronic tests in WIRE naming (joints derived from /config); this
+    # deliberately diverges from the locomotion default ("mj").
+    assert kv["POSITRONIC_DIAGNOSTIC_NAMING"] == "wire"
 
 
 def test_diagnostic_bool_coercion():
@@ -213,8 +217,17 @@ def test_unknown_diagnostic_field_rejected():
 
 
 def test_positronic_defaults_match_locomotion():
-    """The positronic diagnostic defaults are a 1:1 clone of locomotion."""
-    assert hc.DEFAULT_POSITRONIC_DIAGNOSTIC == hc.DEFAULT_LOCOMOTION_DIAGNOSTIC
+    """positronic diagnostic defaults track locomotion EXCEPT `naming`:
+    positronic derives joints from /config and tests in wire naming, so it
+    overrides the locomotion 'mj' default to 'wire'. Every other field stays
+    in lockstep (drift guard)."""
+    assert hc.DEFAULT_POSITRONIC_DIAGNOSTIC["naming"] == "wire"
+    assert hc.DEFAULT_LOCOMOTION_DIAGNOSTIC["naming"] == "mj"
+    pos_no_naming = {k: v for k, v in hc.DEFAULT_POSITRONIC_DIAGNOSTIC.items()
+                     if k != "naming"}
+    loco_no_naming = {k: v for k, v in hc.DEFAULT_LOCOMOTION_DIAGNOSTIC.items()
+                      if k != "naming"}
+    assert pos_no_naming == loco_no_naming
     # Field->env maps differ only by prefix.
     for field, env in hc.POSITRONIC_DIAGNOSTIC_FIELD_TO_ENV.items():
         assert env == hc.DIAGNOSTIC_FIELD_TO_ENV[field].replace(

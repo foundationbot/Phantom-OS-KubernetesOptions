@@ -761,9 +761,14 @@ POSITRONIC_DIAGNOSTIC_LAUNCHER: str = (
 # `--mj-order-from-config /config` (design doc A3b/A4), deriving joint
 # order + IMU roles from the /config SHM queue at runtime, so there is no
 # host-config knob for it.
-DEFAULT_POSITRONIC_DIAGNOSTIC: dict[str, str] = dict(
-    DEFAULT_LOCOMOTION_DIAGNOSTIC
-)
+DEFAULT_POSITRONIC_DIAGNOSTIC: dict[str, str] = {
+    **DEFAULT_LOCOMOTION_DIAGNOSTIC,
+    # positronic derives the joint list from the /config SHM queue (launcher
+    # hardcodes --mj-order-from-config /config) and tests in WIRE naming —
+    # the wire joint names /config reports, no mj reorder. Override the
+    # locomotion default ("mj").
+    "naming": "wire",
+}
 
 # Map host-config camelCase field names -> POSITRONIC_DIAGNOSTIC_* env
 # var names consumed by docker/positronic_diagnostic_launch.sh. Mirrors
