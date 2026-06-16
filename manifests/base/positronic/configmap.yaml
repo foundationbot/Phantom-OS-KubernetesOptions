@@ -21,6 +21,25 @@
 #   `positronic.sh set-cmd <cmd>` is durable by default (FIR-408): it
 #   edits host-config.yaml + re-runs bootstrap. Pass --transient for the
 #   legacy one-off kubectl-patch behavior.
+#
+# Diagnostic mode keys (arrive from bootstrap — NOT hand-set here):
+#   POSITRONIC_MODE         — "production" (default) | "diagnostic".
+#   POSITRONIC_DIAGNOSTIC_* — the full diagnostic knob set (bias, gains,
+#                             chirp/IMU thresholds, …), emitted only in
+#                             diagnostic mode.
+#   PHANTOM_CMD             — in diagnostic mode bootstrap sets this to the
+#                             positronic diagnostic launcher
+#                             (bash /src/docker/positronic_diagnostic_launch.sh);
+#                             in production mode it is left to the
+#                             launchCommand path above.
+#   These are sourced from host-config.yaml's positronicControl block
+#   (mode + diagnostic subtree) by bootstrap-robot.sh's positronic-config
+#   phase (--positronic-config), which extracts them via
+#   `host-config.py get-positronic-config-kv` and merges them onto THIS
+#   ConfigMap as a strategic-merge entry in the core Argo Application's
+#   spec.source.kustomize.patches (drift-safe; same delivery mechanism as
+#   PHANTOM_CMD). See positronic_control
+#   docs/2026-06-15-positronic-diagnostic-mode-design.md (B2/B3/B4).
 apiVersion: v1
 kind: ConfigMap
 metadata:

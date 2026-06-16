@@ -20,6 +20,7 @@ Usage:
   host-config.py <path> get-node-label-defaults       # TSV: key\tdefault\tdescription
   host-config.py <path> get-phantom-locomotion-policy
   host-config.py <path> get-phantom-locomotion-config-kv
+  host-config.py <path> get-positronic-config-kv
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -714,6 +715,165 @@ DIAGNOSTIC_BOOL_FIELDS: frozenset[str] = frozenset({
     "waitForStart",
     "skipImuTests",   # FIR-341 — gates the IMU verdict block on/off
 })
+
+
+# ── positronic_control diagnostic mode (FIR-211 follow-up) ────────────
+#
+# positronic_control gets its own diagnostic launch mode that mirrors
+# phantom-locomotion's `mode: diagnostic`, but driven from a SEPARATE
+# `positronicControl` host-config block. Instead of phantom-locomotion's
+# vendored inference.dma_diagnostic_node, positronic pip-installs the
+# shared `policy-diagnostics-tools` wheel and execs its
+# `policy-diagnostic-launch` console script via a thin launcher
+# (positronic_control docker/positronic_diagnostic_launch.sh). The
+# launcher maps these POSITRONIC_DIAGNOSTIC_* env vars onto the wheel's
+# DIAG_* contract. See positronic_control
+# docs/2026-06-15-positronic-diagnostic-mode-design.md Part B.
+#
+# 'production' (default) keeps the existing dma_policy_node launch path:
+# PHANTOM_CMD comes from deployments.positronic-control.launchCommand
+# (FIR-407/408 Argo-patch path), so this extraction emits ONLY
+# POSITRONIC_MODE in production mode and never clobbers a production
+# PHANTOM_CMD. 'diagnostic' flips PHANTOM_CMD to the diagnostic launcher
+# and emits the full POSITRONIC_DIAGNOSTIC_* set.
+DEFAULT_POSITRONIC_MODE: str = "production"
+ALLOWED_POSITRONIC_MODES: frozenset[str] = frozenset(
+    {"production", "diagnostic"}
+)
+
+# In-container path to the positronic_control diagnostic launcher. The
+# positronic image is built with the repo checked out at /src (see
+# manifests/base/positronic/positronic-control.yaml workingDir
+# /src/workspace and the `src` mount convention), so the launcher script
+# lands at /src/docker/positronic_diagnostic_launch.sh. THIS PATH MUST
+# MATCH where the positronic_control image puts the script (A4 in the
+# design doc). If the image layout changes (e.g. the repo root moves off
+# /src), update this constant in lockstep.
+POSITRONIC_DIAGNOSTIC_LAUNCHER: str = (
+    "bash /src/docker/positronic_diagnostic_launch.sh"
+)
+
+# Defaults for the positronicControl.diagnostic subblock. Cloned 1:1
+# from DEFAULT_LOCOMOTION_DIAGNOSTIC (same keys, same defaults) so a bare
+# `mode: diagnostic` with no subblock works and the two mode wirings stay
+# in lockstep. NOTE: we deliberately do NOT add a `--mj-order-from-config`
+# field here — the positronic launcher hardcodes
+# `--mj-order-from-config /config` (design doc A3b/A4), deriving joint
+# order + IMU roles from the /config SHM queue at runtime, so there is no
+# host-config knob for it.
+DEFAULT_POSITRONIC_DIAGNOSTIC: dict[str, str] = dict(
+    DEFAULT_LOCOMOTION_DIAGNOSTIC
+)
+
+# Map host-config camelCase field names -> POSITRONIC_DIAGNOSTIC_* env
+# var names consumed by docker/positronic_diagnostic_launch.sh. Mirrors
+# DIAGNOSTIC_FIELD_TO_ENV with the LOCOMOTION_ prefix swapped for
+# POSITRONIC_. Derived programmatically so the two maps cannot drift.
+POSITRONIC_DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
+    field: env.replace("LOCOMOTION_DIAGNOSTIC_", "POSITRONIC_DIAGNOSTIC_", 1)
+    for field, env in DIAGNOSTIC_FIELD_TO_ENV.items()
+}
+
+# Same tolerance->band splitting as locomotion, POSITRONIC_-prefixed.
+POSITRONIC_DIAGNOSTIC_TOL_TO_BAND: dict[str, tuple[str, str]] = {
+    field: (
+        lo.replace("LOCOMOTION_DIAGNOSTIC_", "POSITRONIC_DIAGNOSTIC_", 1),
+        hi.replace("LOCOMOTION_DIAGNOSTIC_", "POSITRONIC_DIAGNOSTIC_", 1),
+    )
+    for field, (lo, hi) in DIAGNOSTIC_TOL_TO_BAND.items()
+}
+
+
+def cmd_get_positronic_config_kv(cfg: dict) -> int:
+    """Emit KEY=VALUE lines for the positronic-config ConfigMap.
+
+    Always emits POSITRONIC_MODE. When mode == 'diagnostic', also emits
+    one POSITRONIC_DIAGNOSTIC_* line per field of the diagnostic subblock
+    (operator overrides merged on top of DEFAULT_POSITRONIC_DIAGNOSTIC,
+    same tolerance->band splitting / omit-if-empty / bool-coercion as the
+    locomotion path) plus a PHANTOM_CMD that execs the positronic
+    diagnostic launcher.
+
+    In 'production' mode PHANTOM_CMD is intentionally NOT emitted here:
+    the production launch command flows through
+    deployments.positronic-control.launchCommand (FIR-407/408 Argo-patch
+    path, see _patch_positronic_phantom_cmd in bootstrap-robot.sh). Only
+    POSITRONIC_MODE is emitted so the two paths don't fight over the same
+    ConfigMap key.
+
+    Output is ASCII, no shell quoting, no comments — caller drops each
+    line straight into a YAML-quoted `KEY: "VALUE"` entry. Mirrors
+    cmd_get_phantom_locomotion_config_kv.
+    """
+    block = cfg.get("positronicControl") or {}
+    if not isinstance(block, dict):
+        print("error: 'positronicControl' must be a mapping", file=sys.stderr)
+        return 2
+
+    mode = block.get("mode") or DEFAULT_POSITRONIC_MODE
+    if mode not in ALLOWED_POSITRONIC_MODES:
+        print(
+            "error: positronicControl.mode: must be one of "
+            f"{sorted(ALLOWED_POSITRONIC_MODES)} (got {mode!r})",
+            file=sys.stderr,
+        )
+        return 2
+
+    lines: list[str] = [f"POSITRONIC_MODE={mode}"]
+
+    if mode == "diagnostic":
+        diag_override = block.get("diagnostic") or {}
+        if not isinstance(diag_override, dict):
+            print(
+                "error: 'positronicControl.diagnostic' must be a mapping",
+                file=sys.stderr,
+            )
+            return 2
+        merged: dict[str, str] = dict(DEFAULT_POSITRONIC_DIAGNOSTIC)
+        for k, v in diag_override.items():
+            if k not in DEFAULT_POSITRONIC_DIAGNOSTIC:
+                print(
+                    f"error: positronicControl.diagnostic: unknown field "
+                    f"{k!r} (permitted: "
+                    f"{sorted(DEFAULT_POSITRONIC_DIAGNOSTIC.keys())})",
+                    file=sys.stderr,
+                )
+                return 2
+            merged[k] = v
+        # Emit in the stable order of DEFAULT_POSITRONIC_DIAGNOSTIC so the
+        # rendered ConfigMap diffs cleanly when one field changes.
+        for field in DEFAULT_POSITRONIC_DIAGNOSTIC.keys():
+            raw = merged[field]
+            if field in DIAGNOSTIC_BOOL_FIELDS and isinstance(raw, bool):
+                value = "true" if raw else "false"
+            else:
+                value = str(raw)
+            if field in DIAGNOSTIC_OMIT_IF_EMPTY and value == "":
+                continue
+            if field in POSITRONIC_DIAGNOSTIC_TOL_TO_BAND:
+                lo_env, hi_env = POSITRONIC_DIAGNOSTIC_TOL_TO_BAND[field]
+                try:
+                    tol = float(value)
+                except ValueError:
+                    print(
+                        f"error: positronicControl.diagnostic.{field}: "
+                        f"expected float, got {value!r}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                lines.append(f"{lo_env}={1.0 - tol:g}")
+                lines.append(f"{hi_env}={1.0 + tol:g}")
+                continue
+            env_name = POSITRONIC_DIAGNOSTIC_FIELD_TO_ENV[field]
+            lines.append(f"{env_name}={value}")
+
+        # The positronic pod already does `exec bash -c "${PHANTOM_CMD}"`,
+        # so routing diagnostic mode through PHANTOM_CMD keeps the
+        # DaemonSet manifest mode-agnostic (design doc B2).
+        lines.append(f"PHANTOM_CMD={POSITRONIC_DIAGNOSTIC_LAUNCHER}")
+
+    print("\n".join(lines))
+    return 0
 
 
 def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
@@ -2660,6 +2820,8 @@ def main() -> int:
         return cmd_get_phantom_locomotion_policy(cfg)
     if cmd == "get-phantom-locomotion-config-kv":
         return cmd_get_phantom_locomotion_config_kv(cfg)
+    if cmd == "get-positronic-config-kv":
+        return cmd_get_positronic_config_kv(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":

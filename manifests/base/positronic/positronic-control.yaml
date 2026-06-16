@@ -156,6 +156,17 @@ spec:
             - { name: tmp,            mountPath: /tmp }
             # Models — populated by the load-models initContainer.
             - { name: models,         mountPath: /root/models, readOnly: true }
+            # Persistent host directory for diagnostic reports (and other
+            # artifacts an operator wants to `kubectl cp` off the robot
+            # without scraping /dev/shm). Same hostPath the dma-recorder
+            # and phantom-locomotion DaemonSets use, so all operator-
+            # visible run artifacts share one tree (`/root/recordings/`
+            # on the host). The positronicControl.mode=diagnostic launch
+            # writes its JSON report + stable symlink under
+            # /recordings/diag_reports/ here. See
+            # positronic_control docs/2026-06-15-positronic-diagnostic-
+            # mode-design.md (A5/B5).
+            - { name: recordings,     mountPath: /recordings }
           resources:
             # 8 CPU / 16Gi as a starting point (plan §3.7). Guaranteed
             # QoS so CPU Manager pins onto specific cores from the
@@ -190,3 +201,10 @@ spec:
         # registry-pinned image and re-population is fast.
         - name: models
           emptyDir: {}
+        # DirectoryOrCreate matches manifests/base/dma-streams/dma-recorder.yaml
+        # and manifests/base/phantom-locomotion/phantom-locomotion.yaml so the
+        # mount succeeds on robots that have never run dma-recorder (the
+        # kubelet creates /root/recordings if it doesn't exist). Holds the
+        # diagnostic JSON reports written by positronicControl.mode=diagnostic.
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }

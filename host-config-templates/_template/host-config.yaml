@@ -526,6 +526,117 @@ images:
 #     mounts:
 #       - {name: recordings, host: /data2/recordings, container: /recordings}
 
+# Per-host positronic_control config. Bootstrap phase positronic-config
+# renders /etc/phantomos/positronic-config.yaml from this block — a
+# ConfigMap whose keys drive the positronic-control DaemonSet via
+# envFrom: configMapRef: positronic-config. Same lifecycle as
+# phantom-locomotion-config: lives on the host (not in git), --reset
+# preserves it, ArgoCD doesn't reconcile it.
+#
+# This is the positronic analogue of phantomLocomotion above: it adds a
+# diagnostic launch mode that runs the shared policy-diagnostics-tools
+# wire-integrity / characterization suite (the same suite phantom-
+# locomotion runs), driven entirely from host-config — no rebuild.
+# See positronic_control
+# docs/2026-06-15-positronic-diagnostic-mode-design.md.
+#
+# Two operating modes:
+#
+#   mode: production (default) — the normal dma_policy_node control
+#                    stack. PHANTOM_CMD is NOT set by this block in
+#                    production mode; it flows through the canonical
+#                    deployments.positronic-control.launchCommand path
+#                    (the FIR-407/408 Argo strategic-merge patch). So
+#                    `mode: production` here is a no-op for an existing
+#                    robot and only emits POSITRONIC_MODE=production.
+#
+#   mode: diagnostic — flips PHANTOM_CMD to the positronic diagnostic
+#                    launcher (docker/positronic_diagnostic_launch.sh in
+#                    the positronic image at /src), which execs the
+#                    policy-diagnostics-tools `policy-diagnostic-launch`
+#                    entrypoint. Joint order + IMU roles are derived at
+#                    runtime from the /config SHM queue
+#                    (--mj-order-from-config /config, hardcoded by the
+#                    launcher — there is intentionally no host-config
+#                    knob for it). The pod writes a timestamped JSON
+#                    report + a stable symlink under /recordings and then
+#                    sleeps so the operator can `kubectl cp` it off.
+#
+# Default (applied when positronicControl is absent):
+#   mode: production
+#
+# diagnostic: subblock fields are 1:1 with phantomLocomotion.diagnostic
+# above — same names, same defaults, same tolerance->band expansion
+# (each `*Tol` field emits a LO/HI env pair: lo = 1 - tol, hi = 1 + tol).
+# All fields are optional; a bare `mode: diagnostic` with no subblock
+# uses every default below. The complete default set:
+#
+#   robot:                mk2-lower-body
+#   naming:               mj                    # mj | wire
+#   bias:                 0.10                  # rad
+#   masterGain:           0.3
+#   holdBiasS:            2.0
+#   holdHomeS:            1.0
+#   joints:               all
+#   outPath:              /recordings/diag_reports/diag_report.json
+#   waitForStart:         true                  # gate on joystick X press
+#   jointBiasOverrides:   ""                    # "NAME=VALUE,..." per-joint
+#   iterations:           1
+#   rampS:                0.0
+#   returnRampS:          ""
+#   velTrackingRatioTol:  0.30
+#   velTrackingLagMaxMs:  60.0
+#   skipImuTests:         false
+#   gravityTol:           0.05
+#   gravityMagTol:        0.05
+#   gravityDriftTol:      0.02
+#   imuProjGXyTol:        0.10
+#   imuPelvisYawTol:      0.30
+#   imuQuatDeltaTol:      0.30
+#   imuGyroNoiseFloor:    0.10
+#   imuIdleGyroTol:       0.30
+#   imuIdleProjGTol:      0.05
+#   imuPitchRatioTol:     0.30
+#   imuPairDeltaTol:      0.20
+#   testMode:                 joint-sweep       # joint-sweep | chirp
+#   chirpAmplitudeRad:        0.05
+#   chirpAmplitudeHardCapRad: 0.30
+#   chirpFreqMinHz:           0.05
+#   chirpFreqMaxHz:           15.0
+#   cycleRateHz:              0.0
+#   chirpDurationS:           60.0
+#   chirpEnvelopeS:           0.5
+#   chirpGainMultipliers:     "0.5,0.7,0.9,1.1,1.3,1.5"
+#   chirpSettleVelTolRadS:    0.02
+#   chirpSettleQuietS:        0.5
+#   chirpSettleMaxS:          10.0
+#   chirpRrdDir:              /dev/shm
+#   chirpAmplitudeOverrides:  ""
+#   positionKdMultipliers:    "1.0"
+#
+# See the phantomLocomotion.diagnostic documentation above for the
+# detailed semantics of each field (ramp mode, IMU integrity tests,
+# chirp/Bode sweep) — the positronic suite consumes the identical knobs.
+# The outPath default lives on the DaemonSet's /recordings hostPath
+# mount (host /root/recordings, DirectoryOrCreate) added for diagnostic
+# reports; override to /dev/shm/diag_report.json on a dev pod that lacks
+# the mount.
+#
+# Example — wire-integrity sweep with RightHipRoll commanded inward:
+# positronicControl:
+#   mode: diagnostic
+#   diagnostic:
+#     naming: mj
+#     bias: 0.10
+#     masterGain: 0.3
+#     jointBiasOverrides: "RightHipRoll=-0.10"
+#
+# Example — normal production control (no-op for PHANTOM_CMD; the
+# launch command still comes from deployments.positronic-control.
+# launchCommand):
+# positronicControl:
+#   mode: production
+
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
 # /var/log/journal and /var/log/syslog from filling the root partition.
