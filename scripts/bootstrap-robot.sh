@@ -402,12 +402,12 @@ SELECTED_PHASES=()
 # These are the namespaces the bootstrap script itself creates / seeds.
 # Kept in sync with PULL_SECRET_NAMESPACES + the argocd namespace owned
 # by the gitops phase's terraform/helm install.
-WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic)
+WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic psi)
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
 # `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic)
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic psi)
 PULL_SECRET_NAME="dockerhub-creds"
 
 # Host-systemd services to stop + disable before bringing up the cluster.
