@@ -114,6 +114,8 @@ Namespaces currently using `dockerhub-creds` (per
 - `dma-video`
 - `nimbus`
 - `phantom`
+- `positronic`
+- `psi`
 
 The same loop also applies on each fresh-bootstrapped robot — the
 secret is part of every namespace's bring-up, not a one-time
