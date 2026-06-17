@@ -23,8 +23,6 @@
 #   - /usr/bin/nvidia-container-runtime exists and runs
 #
 # Companion of:
-#   - scripts/configure-k0s-containerd-mirror.sh — registers the
-#     local-registry mirror in containerd.
 #   - manifests/base/runtime-classes/nvidia.yaml — Kubernetes
 #     RuntimeClass that names this handler.
 
@@ -100,9 +98,10 @@ version = 2
 EOF
 
 # --- 2. Confirm imports line is present in the main containerd config -----
-# configure-k0s-containerd-mirror.sh already adds this; re-adding is a no-op
-# if it's there. The Python edit below does nothing if the imports line
-# already exists and references our directory.
+# This script owns the imports line into /etc/k0s/containerd.toml so the
+# drop-ins under /etc/k0s/containerd.d/ are picked up. The Python edit
+# below is idempotent: it does nothing if the imports line already exists
+# and references our directory.
 
 if [ ! -e "${CONTAINERD_CONFIG}" ]; then
   echo "  ${CONTAINERD_CONFIG} not found — k0s may not have written it yet." >&2

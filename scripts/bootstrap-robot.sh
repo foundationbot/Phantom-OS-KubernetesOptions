@@ -83,14 +83,12 @@
 #                        per stack (or clear them when absent). The
 #                        deprecated alias --dev-mounts behaves the same
 #                        way for back-compat.
-#   --validate           run scripts/validate-local-registry.sh
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
 #   --skip-ecat-interface skip the phase 9 ecat-interface setup
 #   --skip-cpu-isolation skip the phase 10 cpu-isolation setup
 #   --skip-log-management skip the phase 11 log-management setup
-#   --skip-validate      skip the final validate-local-registry.sh run
 #   --no-tailscale       ignore Tailscale when resolving the cluster API
 #                        address; bind spec.api.address to the
 #                        default-gateway IPv4 even if tailscaled is up
@@ -114,9 +112,9 @@
 #                      cluster. Splitting the two passes lets the
 #                      operator inspect/pull/edit between purge and
 #                      rebuild. Cluster workload state is destroyed;
-#                      on-disk hostPath data under /var/lib/k0s-data/,
-#                      /var/lib/registry/, and /var/lib/recordings/ is
-#                      preserved (k0s reset does not touch those paths).
+#                      on-disk hostPath data under /var/lib/k0s-data/
+#                      and /var/lib/recordings/ is preserved (k0s reset
+#                      does not touch those paths).
 #   --ai-pc-url <url>  AI PC URL for the operator-ui pairing (e.g.
 #                      http://100.124.202.97:5000). Required on FIRST
 #                      bringup; on re-runs the value is read from
@@ -135,13 +133,6 @@
 #                      doesn't exist either, the script falls back to
 #                      individual flags (--robot, --ai-pc-url) and
 #                      skips image overrides.
-#   --setup-positronic after the cluster is up, push a positronic-control
-#                      image and build phantom-models so the pod can start.
-#                      Requires --positronic-image <image> (e.g.
-#                      foundationbot/phantom-cuda:0.2.44-cu130).
-#   --positronic-image <image>
-#                      local docker image to push as positronic-control
-#                      (used with --setup-positronic).
 #   --dockerhub-secret-file <path>
 #                      path to a file containing the raw `.dockerconfigjson`
 #                      payload (the JSON object with `auths`) for the
@@ -190,7 +181,7 @@
 #                    Runs BEFORE host config because the host-config scripts
 #                    edit /etc/k0s/containerd.toml, which only exists after
 #                    k0s has started at least once.
-#    4. host config  configure-k0s-containerd-mirror.sh +
+#    4. host config  configure-usb-power.sh +
 #                    configure-k0s-nvidia-runtime.sh (if a GPU is detected
 #                    via lspci or /dev/nvidia0). Restarts k0s; waits for
 #                    node Ready before returning so later phases don't race.
@@ -284,10 +275,6 @@
 #                    Applications via spec.source.kustomize.patches.
 #                    Currently routes positronic-control + phantomos-api-server
 #                    mounts onto the core stack. Alias: --dev-mounts.
-#   17. setup-positronic (optional, --setup-positronic)
-#                    push positronic-control image to local registry,
-#                    build phantom-models, and redeploy the pod.
-#   18. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
@@ -308,8 +295,6 @@ SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
 HOST_CONFIG_INPUT=""
-SETUP_POSITRONIC=0
-POSITRONIC_IMAGE=""
 DOCKERHUB_SECRET_FILE=""
 # Empty = "no flag passed; fall back to host-config.yaml's production
 # field (default false)". Flag values: 0 or 1.
@@ -331,7 +316,6 @@ SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
-SKIP_VALIDATE=0
 SKIP_NVIDIA=0
 NO_TAILSCALE=0
 
@@ -396,11 +380,9 @@ while [ $# -gt 0 ]; do
                          SELECTED_PHASES+=(dev-mounts); shift ;;
     --install-dma-ethercat)
                          SELECTED_PHASES+=(install-dma-ethercat); shift ;;
-    --validate)          SELECTED_PHASES+=(validate); shift ;;
 
     # Targeted overrides that compose with both modes.
     --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
-    --skip-validate)     SKIP_VALIDATE=1; shift ;;
     --no-tailscale)      NO_TAILSCALE=1; shift ;;
     --skip-purge-pods)   SKIP_PURGE_PODS=1; shift ;;
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
@@ -434,8 +416,6 @@ while [ $# -gt 0 ]; do
     --host-config)       HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
     --dockerhub-secret-file)
                          DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
-    --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
-    --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
 
     # Behavior modifiers.
     -y|--yes)            YES=1; shift ;;
@@ -616,7 +596,6 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_ARGOCD_ADMIN=1
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
-  SKIP_VALIDATE=1
   SKIP_INSTALL_DMA_ETHERCAT=1
   # Pre-phases are off by default in selected-phases mode: the
   # operator asked for ONE thing and shouldn't get a fleet-wide pod
@@ -643,7 +622,6 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
-      validate)          SKIP_VALIDATE=0 ;;
     esac
   done
   unset _p
@@ -934,7 +912,6 @@ WARNING: --reset will destroy the running k0s cluster and all workload state:
 
 Preserved (k0s reset does NOT touch these):
   - /var/lib/k0s-data/{mongodb,redis,postgres}/  StatefulSet hostPath PVs
-  - /var/lib/registry/                            registry hostPath PV
   - /var/lib/recordings/                          dma-video hostPath PV (if used)
 
 EOF
@@ -1149,12 +1126,12 @@ preflight() {
     fail "disk: ${free_gb}G free on / (recommend ≥50G for k0s + images)"
   fi
 
-  # Port checks: if a non-cluster process holds 6443/9443/5443, fail.
-  for port in 6443 9443 5443; do
+  # Port checks: if a non-cluster process holds 6443/9443, fail.
+  for port in 6443 9443; do
     proc=$(ss -tlnp 2>/dev/null | awk -v port=":$port" '$4 ~ port"$" { print $NF; exit }')
     if [ -z "$proc" ]; then
       pass "port $port: free"
-    elif printf '%s' "$proc" | grep -qE 'k0s|kube|registry|containerd|kubelet|registry:2'; then
+    elif printf '%s' "$proc" | grep -qE 'k0s|kube|containerd|kubelet'; then
       skip "port $port: held by $proc (expected on a bootstrapped host)"
     else
       fail "port $port: held by $proc"
@@ -1173,9 +1150,10 @@ deps() {
   # docker.io vs docker-ce: Ubuntu's `docker.io` and Docker Inc.'s
   # `docker-ce` (which pulls `containerd.io`) are mutually exclusive —
   # apt refuses to coinstall them because their containerd packages
-  # conflict. The bootstrap only needs the `docker` binary (for
-  # prime-registry-cache.sh's pull/tag/push), and either provider
-  # gives us that. So: detect docker by binary, not package name.
+  # conflict. The bootstrap only needs the `docker` binary (for dev
+  # helpers like positronic.sh push-image / phantom-models build that
+  # push to DockerHub), and either provider gives us that. So: detect
+  # docker by binary, not package name.
   if command -v docker >/dev/null 2>&1; then
     skip "docker already installed ($(command -v docker)) — not adding docker.io"
   else
@@ -1275,13 +1253,6 @@ deps() {
 
 # ---- phase 4: host config -----------------------------------------------
 
-containerd_mirror_already_configured() {
-  local f=/etc/k0s/containerd.d/hosts/docker.io/hosts.toml
-  [ -r "$f" ] \
-    && grep -q 'host."http://localhost:5443"' "$f" \
-    && grep -q 'host."https://registry-1.docker.io"' "$f"
-}
-
 nvidia_runtime_already_configured() {
   # configure-k0s-nvidia-runtime.sh writes a runtime drop-in. Detect by
   # looking for any nvidia handler entry in containerd's resolved config.
@@ -1293,19 +1264,6 @@ nvidia_runtime_already_configured() {
 host_config() {
   if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
   phase "phase 4: host config"
-
-  # Always run — the script is internally idempotent (hosts.toml insert
-  # is no-op when already present, daemon.json merge is no-op when the
-  # entry exists). A previous skip-on-hosts.toml-only check could leave
-  # /etc/docker/daemon.json without the insecure-registries entry on
-  # hosts where containerd was set up but docker wasn't.
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $REPO_ROOT/scripts/configure-k0s-containerd-mirror.sh"
-  elif bash "$REPO_ROOT/scripts/configure-k0s-containerd-mirror.sh"; then
-    pass "containerd mirror configured (idempotent re-run)"
-  else
-    fail "configure-k0s-containerd-mirror.sh"
-  fi
 
   # OAK USB power — install udev rule disabling autosuspend for VID
   # 03e7 so libusb's claim+rebind during DepthAI firmware boot doesn't
@@ -4789,7 +4747,7 @@ for n in sorted(seen):
 
 # Echo the stack name that owns the given image reference, or empty
 # if no enabled stack contains it. Image refs match by full registry/path
-# (e.g. "localhost:5443/positronic-control" or
+# (e.g. "foundationbot/positronic-control" or
 # "foundationbot/argus.operator-ui").
 _stack_for_image() {
   local needle="${1:?image required}"
@@ -5447,86 +5405,6 @@ argocd_admin() {
   fi
 }
 
-# ---- phase 17: setup-positronic (optional) --------------------------------
-
-setup_positronic() {
-  if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 17: setup-positronic"
-
-  if [ -z "$POSITRONIC_IMAGE" ]; then
-    fail "--setup-positronic requires --positronic-image <image>"
-    return
-  fi
-
-  local script="$REPO_ROOT/scripts/positronic.sh"
-  if [ ! -f "$script" ]; then
-    fail "scripts/positronic.sh not found"; return
-  fi
-
-  # Push the positronic-control image to the local registry.
-  info "pushing $POSITRONIC_IMAGE via positronic.sh"
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $script --robot $ROBOT push-image $POSITRONIC_IMAGE --no-redeploy"
-  else
-    if bash "$script" --robot "$ROBOT" push-image "$POSITRONIC_IMAGE" --no-redeploy; then
-      pass "positronic-control image pushed"
-    else
-      fail "positronic-control image push failed"
-    fi
-  fi
-
-  # Build phantom-models (interactive by default; --all for non-interactive).
-  local build_script="$REPO_ROOT/scripts/phantom-models/build.py"
-  if [ ! -f "$build_script" ]; then
-    fail "scripts/phantom-models/build.py not found"; return
-  fi
-
-  info "building phantom-models image"
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  python3 $build_script --all"
-  else
-    if python3 "$build_script" --all; then
-      pass "phantom-models image built and pushed"
-    else
-      fail "phantom-models build failed"
-    fi
-  fi
-
-  # Redeploy now that both images are in the registry.
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $script --robot $ROBOT redeploy"
-  else
-    if bash "$script" --robot "$ROBOT" redeploy; then
-      pass "positronic-control redeployed"
-    else
-      fail "positronic-control redeploy failed"
-    fi
-  fi
-}
-
-# ---- phase 18: validate --------------------------------------------------
-
-validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 18: validate  (skipped)"; return; fi
-  phase "phase 18: validate"
-
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
-    return
-  fi
-
-  if [ ! -x "$REPO_ROOT/scripts/validate-local-registry.sh" ]; then
-    skip "scripts/validate-local-registry.sh not found/executable"
-    return
-  fi
-
-  if bash "$REPO_ROOT/scripts/validate-local-registry.sh"; then
-    pass "validate-local-registry: 0 failures"
-  else
-    fail "validate-local-registry: $? failures"
-  fi
-}
-
 # ---- main ---------------------------------------------------------------
 
 print_plan() {
@@ -5583,8 +5461,6 @@ print_plan() {
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 15  image-overrides"                 "--image-overrides not selected"
   _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 16  deployments"                     "--deployments not selected"
-  _step "$SETUP_POSITRONIC"                                         "phase 17  setup-positronic"             "--setup-positronic not set"
-  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 18  validate"                        "--validate not selected"
   printf '\n'
 }
 
@@ -5651,8 +5527,6 @@ gitops             ; guard
 argocd_admin       ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
-setup_positronic   ; guard
-validate
 
 summary
 exit "$FAIL"

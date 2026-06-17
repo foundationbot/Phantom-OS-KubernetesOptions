@@ -181,7 +181,7 @@ sudo k0s kubectl get pods -A -o custom-columns=\
 'NS:.metadata.namespace,POD:.metadata.name,STATUS:.status.phase,IMAGES:.spec.containers[*].image'
 ```
 
-Expect about 30 pods across 8 namespaces. `STATUS` should be `Running`
+Expect about 30 pods across 7 namespaces. `STATUS` should be `Running`
 for almost all (or `Completed` for one-shot Jobs). Healthy namespaces:
 
 | Namespace | What it does |
@@ -192,7 +192,6 @@ for almost all (or `Completed` for one-shot Jobs). Healthy namespaces:
 | `nimbus` | Episode / data storage |
 | `phantom` | On-robot agents |
 | `positronic` | Control runtime |
-| `registry` | Local container image registry (RFC 0006 does not depend on this for manifest source) |
 | `kube-flannel`, `kube-system` | Kubernetes plumbing |
 
 The positronic-control pod starts in **dev mode (sleep-infinity
@@ -513,7 +512,7 @@ host-config ref), you also need to refresh the bundle itself:
 # On the build host: rebuild the image bundle with new refs
 bash scripts/build-images-deb.sh \
   --positronic-image foundationbot/phantom-cuda:<new-tag> \
-  --phantom-models-image localhost:5443/phantom-models:<new-tag> \
+  --phantom-models-image foundationbot/phantom-models:<new-tag> \
   --arch amd64
 
 # Ship to the robot (matching version+arch on all three files)

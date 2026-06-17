@@ -81,8 +81,8 @@ stacks:
 # rewrites every reference to that image in the rendered manifests.
 #
 #   - if your `image:` keeps the same repo as the base manifest, only
-#     the tag changes (typical for a local-registry build).
-#   - if your `image:` swaps the repo (e.g. localhost:5443/positronic-control
+#     the tag changes (typical for a routine version bump).
+#   - if your `image:` swaps the repo (e.g. foundationbot/positronic-control
 #     -> foundationbot/phantom-cuda), bootstrap emits a
 #     "<base>=<your-image>" kustomize entry that renames AND retags in
 #     one step. No special host-config field needed — just write the
@@ -90,15 +90,15 @@ stacks:
 #
 # Known containers (others are rejected at validate-time):
 #   positronic-control   core stack — manifest uses
-#                          localhost:5443/positronic-control
+#                          foundationbot/positronic-control
 #   phantom-models       core stack — positronic-control's load-models init.
-#                          manifest uses localhost:5443/phantom-models.
+#                          manifest uses foundationbot/phantom-models.
 #                          Bundles model weights / configs (~GB).
 #                          NOTE: phantomos-api-server no longer consumes this
 #                          image — it bind-mounts /root/models off the host
 #                          directly. Only positronic-control still pulls it.
 #   phantom-policies     core stack — phantom-locomotion's load-policies init.
-#                          manifest uses localhost:5443/phantom-policies.
+#                          manifest uses foundationbot/phantom-policies.
 #                          Slim image with ONNX files at /models/policies/.
 #                          Build with `scripts/phantom-models/build.py
 #                          --image phantom-policies --manifest <yaml>`.
@@ -149,9 +149,9 @@ stacks:
 #                          exclusive so one find-key serves both).
 images:
   positronic-control:
-    image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
+    image: foundationbot/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
   phantom-models:
-    image: localhost:5443/phantom-models:REPLACE-WITH-MODEL-BUILD-DATE
+    image: foundationbot/phantom-models:REPLACE-WITH-MODEL-BUILD-DATE
   operator-ui:
     image: foundationbot/argus.operator-ui:REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
   dma-ethercat:

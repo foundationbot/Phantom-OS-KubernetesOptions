@@ -10,22 +10,20 @@
 #
 # Why it's safe: every PV in this stack uses reclaimPolicy: Retain, so
 # deleting the PV does NOT touch the underlying hostPath. The data on
-# /var/lib/k0s-data/{mongodb,redis,postgres}, /root/recordings, and
-# /var/lib/registry survives the recreate.
+# /var/lib/k0s-data/{mongodb,redis,postgres} and /root/recordings
+# survives the recreate.
 #
 # Steps (executed in order):
 #   1. Suspend ArgoCD selfHeal+prune on the phantomos-mk09 Application
 #   2. Scale all stateful consumers to 0
 #         argus/mongodb (sts), argus/redis (sts), nimbus/postgres (sts),
-#         nimbus/eg-server (deploy), nimbus/eg-jobs (deploy),
-#         registry/k0s-registry (deploy)
+#         nimbus/eg-server (deploy), nimbus/eg-jobs (deploy)
 #   3. Delete the corresponding PVCs:
-#         data-{mongodb,redis,postgres}-0, recordings-pvc, k0s-registry-pvc
+#         data-{mongodb,redis,postgres}-0, recordings-pvc
 #   4. Delete all PVs:
-#         {mongodb,redis,postgres,recordings,k0s-registry}-pv
+#         {mongodb,redis,postgres,recordings}-pv
 #   5. kubectl apply -k <overlay> to recreate everything from manifest
-#   6. Scale registry back up FIRST (so its PVC claims its PV before any
-#      race window), then mongodb/redis/postgres, then eg-server/eg-jobs
+#   6. Scale mongodb/redis/postgres back up, then eg-server/eg-jobs
 #   7. Re-enable ArgoCD selfHeal+prune; force a hard refresh
 #   8. Print a verification report
 #
@@ -37,7 +35,6 @@
 #
 # Companions:
 #   scripts/rebind-stuck-pvc.sh — per-PVC recovery (smaller scope)
-#   scripts/resize-registry-pvc.sh — registry PVC resize only
 
 set -u -o pipefail
 
@@ -122,12 +119,11 @@ echo "  argocd:  ${ARGOCD_NS}/${ARGOCD_APP} (skip=$SKIP_ARGOCD)"
 cat <<EOF
 
   Will scale to 0:  argus/mongodb (sts), argus/redis (sts), nimbus/postgres (sts),
-                    nimbus/eg-server (deploy), nimbus/eg-jobs (deploy),
-                    registry/k0s-registry (deploy)
-  Will delete PVCs: data-{mongodb,redis,postgres}-0, recordings-pvc, k0s-registry-pvc
-  Will delete PVs:  {mongodb,redis,postgres,recordings,k0s-registry}-pv
+                    nimbus/eg-server (deploy), nimbus/eg-jobs (deploy)
+  Will delete PVCs: data-{mongodb,redis,postgres}-0, recordings-pvc
+  Will delete PVs:  {mongodb,redis,postgres,recordings}-pv
   Will reapply:     $OVERLAY  (recreates all of the above with correct claimRefs)
-  Will scale up:    registry first, then dbs, then eg-* deployments
+  Will scale up:    dbs, then eg-* deployments
   Data on hostPath is preserved (Retain reclaim policy).
 EOF
 
@@ -150,12 +146,11 @@ run "$KUBECTL -n argus    scale statefulset redis    --replicas=0"
 run "$KUBECTL -n nimbus   scale statefulset postgres --replicas=0"
 run "$KUBECTL -n nimbus   scale deploy eg-server     --replicas=0"
 run "$KUBECTL -n nimbus   scale deploy eg-jobs       --replicas=0"
-run "$KUBECTL -n registry scale deploy k0s-registry  --replicas=0"
 
 bold "waiting for pods to terminate"
 if [ "$DRY_RUN" = 0 ]; then
   sleep 15
-  $KUBECTL get pod -A -l 'app in (mongodb,redis,postgres,k0s-registry,eg-server,eg-jobs)' \
+  $KUBECTL get pod -A -l 'app in (mongodb,redis,postgres,eg-server,eg-jobs)' \
     --no-headers 2>/dev/null | head
 fi
 
@@ -163,15 +158,14 @@ fi
 bold "deleting PVCs"
 run "$KUBECTL -n argus    delete pvc data-mongodb-0 data-redis-0 --wait=true 2>/dev/null || true"
 run "$KUBECTL -n nimbus   delete pvc data-postgres-0 recordings-pvc --wait=true 2>/dev/null || true"
-run "$KUBECTL -n registry delete pvc k0s-registry-pvc --wait=true 2>/dev/null || true"
 
 # --- 4. Delete all PVs (Retain → hostPath data preserved) ----------------
 bold "deleting PVs"
-run "$KUBECTL delete pv mongodb-pv redis-pv postgres-pv recordings-pv k0s-registry-pv --wait=true 2>/dev/null || true"
+run "$KUBECTL delete pv mongodb-pv redis-pv postgres-pv recordings-pv --wait=true 2>/dev/null || true"
 
 bold "sanity-checking on-disk data is still there"
 if [ "$DRY_RUN" = 0 ]; then
-  sudo ls /var/lib/k0s-data/mongodb /var/lib/k0s-data/redis /var/lib/k0s-data/postgres /root/recordings /var/lib/registry 2>/dev/null \
+  sudo ls /var/lib/k0s-data/mongodb /var/lib/k0s-data/redis /var/lib/k0s-data/postgres /root/recordings 2>/dev/null \
     | head
 fi
 
@@ -185,11 +179,7 @@ if [ "$DRY_RUN" = 0 ]; then
   $KUBECTL get pv -o jsonpath='{range .items[*]}    {.metadata.name}: claimRef={.spec.claimRef.namespace}/{.spec.claimRef.name} status={.status.phase}{"\n"}{end}'
 fi
 
-# --- 6. Scale workloads back up — registry FIRST --------------------------
-bold "scaling registry back up (first, so its PVC claims its PV)"
-run "$KUBECTL -n registry scale deploy k0s-registry --replicas=1"
-[ "$DRY_RUN" = 0 ] && $KUBECTL -n registry rollout status deploy/k0s-registry --timeout=180s
-
+# --- 6. Scale workloads back up -------------------------------------------
 bold "scaling dbs back up"
 run "$KUBECTL -n argus    scale statefulset mongodb  --replicas=1"
 run "$KUBECTL -n argus    scale statefulset redis    --replicas=1"
@@ -226,15 +216,10 @@ if [ "$DRY_RUN" = 0 ]; then
   echo "=== PVCs (all stateful) ==="
   $KUBECTL -n argus    get pvc 2>/dev/null
   $KUBECTL -n nimbus   get pvc 2>/dev/null
-  $KUBECTL -n registry get pvc 2>/dev/null
 
   echo "=== Stateful pods ==="
   $KUBECTL -n argus    get pod 2>/dev/null
   $KUBECTL -n nimbus   get pod 2>/dev/null
-  $KUBECTL -n registry get pod 2>/dev/null
-
-  echo "=== Registry catalog (should show pre-existing images) ==="
-  curl -fs http://localhost:5443/v2/_catalog 2>/dev/null || warn "registry not reachable yet"
 
   if [ "$SKIP_ARGOCD" = 0 ]; then
     echo "=== ArgoCD status ==="

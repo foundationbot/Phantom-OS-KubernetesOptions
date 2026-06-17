@@ -25,8 +25,8 @@ troubleshooting. For architecture and the *why*, see
   (replaces the legacy `devMode:` block).
 
 Flag style: `--<phase>` selects a single phase (selected-phases-only
-mode). `--skip-nvidia`, `--skip-validate` are targeted overrides that
-compose with both selected-phases and full-bootstrap modes.
+mode). `--skip-nvidia` is a targeted override that composes with both
+selected-phases and full-bootstrap modes.
 
 ## Table of contents
 
@@ -155,8 +155,8 @@ Bootstrap injects these into the live Application at phase
 
 ```
 == image tag overrides ==
-  localhost:5443/positronic-control tag [0.2.44-production-cu130]:
-  localhost:5443/phantom-models tag [2026-04-30]:
+  foundationbot/positronic-control tag [0.2.44-production-cu130]:
+  foundationbot/phantom-models tag [2026-04-30]:
   foundationbot/argus.operator-ui tag [<sha>]:
 ```
 
@@ -200,7 +200,8 @@ After bootstrap returns, confirm the cluster is healthy.
 
 ```bash
 # Every pod should eventually be Running. Init:ImagePullBackOff means
-# the image override didn't apply or the registry doesn't have the tag.
+# the image override didn't apply or the dockerhub-creds pull secret is
+# missing in the namespace.
 sudo k0s kubectl get pods -A
 
 # Both Applications should be Synced + Healthy.
@@ -526,7 +527,7 @@ robot until you press X).
 queues (`/actuals`, `/desired`, …). DMA.ethercat (the bare-metal
 `dma-ethercat.service`) must be running first, or `walking`/`sonic` will
 CrashLoop on `shm_open failed` — see
-[§7.19](#719-phantom-sonic-walkingsonic-crashloop-on-shm_open).
+[§7.18](#718-phantom-sonic-walkingsonic-crashloop-on-shm_open).
 
 **Per-host options** (`phantomSonic:` block → `phantom-sonic-config`
 ConfigMap, applied by `--sonic-config`):
@@ -566,21 +567,19 @@ bash scripts/positronic.sh sonic web                 # print the UI URL
 | 1. preflight | (always) | OS / arch / kernel / disk / sudo / port collisions |
 | 2. deps | `--deps` | apt installs, k0s binary, terraform binary |
 | 3. cluster | `--cluster` | require Tailscale; pin `spec.api.address` in `/etc/k0s/k0s.yaml`; `k0s install controller --single --enable-worker -c …`; systemd start; write `/root/.kube/config` (server pinned to `127.0.0.1`); reconcile `foundation.bot/*` node labels from `host-config.yaml`'s `nodeLabels:`. Self-heals already-installed clusters that bake the `1.1.1.1` sentinel — see [§3.10](#310-toggle-an-optional-workload-on-a-robot) for the day-2 toggle workflow. |
-| 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
+| 4. host config | `--host` | configure nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
 | 6. operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
 | 7. locomotion-config | `--locomotion-config` | render+apply the `phantom-locomotion-config` ConfigMap from `phantomLocomotion:` (mode/policy/diagnostic); roll the `phantom-locomotion` DaemonSet if present |
 | 8. sonic-config | `--sonic-config` | render+apply the `phantom-sonic-config` ConfigMap from `phantomSonic:` (ROS domain, walking policy, encoder mode, ZMQ/web ports, ramp); roll the `phantom-sonic` DaemonSet if present |
 | 9. ecat-interface | `--ecat-interface` (default-on; `--skip-ecat-interface` to opt out) | resolve the EtherCAT NIC adapter and rename it to `cpuIsolation.nic.iface` via persistent udev rules. Driven by `cpuIsolation.nic.selector` (mac/pci/driver+index); falls back to the vendored interactive picker on a TTY. **Gates phase 10.** |
 | 10. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | render `/etc/cpusets.conf` from `cpuIsolation.partitions[]`, reconcile orphan partitions, activate cpuset partitions, install `cpusets.service` (boot persistence), render per-partition systemd slice units (`/etc/systemd/system/<name>.slice` with `AllowedCPUs=<cpus>`) so services needing isolated cores can join via `Slice=`, migrate kernel cmdline, write systemd `CPUAffinity` drop-in, pin EtherCAT NIC IRQs. The cmdline migration adds `rcu_nocb_poll`, `skew_tick=1`, `irqaffinity=<housekeeping>`, and `isolcpus=managed_irq,<rt-cpus>` (the only knob excluding isolated CPUs from driver-managed PCIe/MSI-X IRQ allocation). The EtherCAT RT boot service also disables `kernel.timer_migration`, restricts `kernel.watchdog_cpumask` to housekeeping (strictly better than `nosoftlockup`/`nowatchdog` — keeps the safety net), and on Thor / other Tegra hosts best-effort reaffines `nvgpu_*`/`nvhost-*`/`tegra*`/`nv-*` kthreads to housekeeping. **Gates phase 12.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. To pick up these behaviors on an existing deployment: `sudo bash scripts/bootstrap-robot.sh --cpu-isolation --yes` and reboot. The cmdline migration sets `/etc/phantomos/cpu-isolation.reboot-pending`. |
-| 11. log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.18](#718-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
+| 11. log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.17](#717-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
 | 12. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the `.deb`, write `/etc/dma/dma-ethercat.env` (INTERFACE/DMA_RT_CPU/DMA_CPU_AFFINITY from `cpuIsolation`), render the `dma-ethercat.service` drop-in `Slice=<partition>.slice` + `CPUAffinity=` (so the service can actually run on the isolated cores under cgroup-v2), then enable + start. **Gates phase 13.** |
 | 13. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
 | 14. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
 | 15. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
 | 16. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
-| 17. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
-| 18. validate | `--validate` | `scripts/validate-local-registry.sh` |
 
 With **no** `--<phase>` flag, every phase runs (full bootstrap).
 With **one or more** `--<phase>` flags, only those phases run
@@ -616,10 +615,7 @@ sudo bash scripts/bootstrap-robot.sh --argocd-admin
 # re-seed dockerhub creds (fixes ImagePullBackOff)
 sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets
 
-# re-validate the registry
-sudo bash scripts/bootstrap-robot.sh --validate
-
-# wipe cluster (preserves /etc/phantomos/, /var/lib/k0s-data/, /var/lib/registry/)
+# wipe cluster (preserves /etc/phantomos/, /var/lib/k0s-data/)
 sudo bash scripts/bootstrap-robot.sh --reset
 sudo bash scripts/bootstrap-robot.sh           # rebuild
 
@@ -627,7 +623,7 @@ sudo bash scripts/bootstrap-robot.sh           # rebuild
 sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
 
 # override flags (compose with both modes)
-sudo bash scripts/bootstrap-robot.sh --skip-nvidia --skip-validate
+sudo bash scripts/bootstrap-robot.sh --skip-nvidia
 sudo bash scripts/bootstrap-robot.sh --gitops --production
 sudo bash scripts/bootstrap-robot.sh --gitops --no-production
 ```
@@ -792,31 +788,39 @@ new robot needs no installer-tree commit, just a host-config entry.
 
 ### 7.1 `Init:ImagePullBackOff` on positronic-control
 
-Image overrides didn't apply, or the requested tag doesn't exist in
-the local registry.
+Image overrides didn't apply, the requested tag doesn't exist on
+DockerHub, or the `dockerhub-creds` pull secret is missing in the
+`positronic` namespace. positronic-control, phantom-models, and
+phantom-policies all pull from `foundationbot/*` on DockerHub like
+every other private image.
 
 ```bash
 # Check what tag the live Application is trying to pull
 sudo k0s kubectl -n argocd get app phantomos-<robot>-core \
   -o jsonpath='{.spec.source.kustomize.images}' ; echo
 
-# Check what's actually in the registry
-curl -fs http://localhost:5443/v2/positronic-control/tags/list
+# Confirm the pull secret is present in the namespace
+sudo k0s kubectl -n positronic get secret dockerhub-creds
+# missing? re-seed it:
+sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets
 
 # If the override is missing, re-run the phase
 sudo bash scripts/bootstrap-robot.sh --image-overrides
 ```
 
-If the registry has the tag but the pod still won't pull, kick the
-pod to retry:
+If the credentials and tag are both good but the pod still won't pull,
+kick the pod to retry:
 
 ```bash
 sudo k0s kubectl -n positronic delete pod -l app=positronic-control
 ```
 
+See [§7.13](#713-pods-imagepullbackoff-for-foundationbot-images) for the
+full DockerHub pull-secret recovery path.
+
 ### 7.2 Image shows `:PLACEHOLDER`
 
-The base manifest's image is literal `localhost:5443/<name>:PLACEHOLDER`.
+The base manifest's image is literal `foundationbot/<name>:PLACEHOLDER`.
 Either `host-config.yaml` doesn't list that image under `images:` or
 `--image-overrides` hasn't run since the last edit.
 
@@ -943,7 +947,6 @@ sudo bash scripts/bootstrap-robot.sh            # rebuild
 
 - `/etc/phantomos/` (host-config, robot id, pairing, app manifest)
 - `/var/lib/k0s-data/` (database hostPaths: mongodb, redis, postgres)
-- `/var/lib/registry/` (local Docker registry blobs)
 
 Cluster workload state and the kubeconfig are destroyed. After the
 rebuild, expect to re-seed dockerhub creds (`--seed-pull-secrets`)
@@ -1090,20 +1093,7 @@ sudo journalctl -u dma-ethercat -f
 sudo journalctl -u dma-ethercat -b --no-pager   # this boot
 ```
 
-### 7.17 Validate-registry failures
-
-```bash
-sudo bash scripts/validate-local-registry.sh
-# exit code = number of failed checks; output names each one
-```
-
-To skip the validation step during bootstrap on a known-good host:
-
-```bash
-sudo bash scripts/bootstrap-robot.sh --skip-validate
-```
-
-### 7.18 Recovering a robot with a full `/var/log/syslog`
+### 7.17 Recovering a robot with a full `/var/log/syslog`
 
 Symptom: `df -h /` reports the root partition at 100%, and
 `du -sh /var/log/*` shows `/var/log/syslog` (or `syslog.1`) at
@@ -1149,7 +1139,7 @@ To customise the caps per host, add a `logManagement:` block to
 template at `host-config-templates/_template/host-config.yaml` for
 the full schema and defaults.
 
-### 7.19 `phantom-sonic` walking/sonic CrashLoop on `shm_open`
+### 7.18 `phantom-sonic` walking/sonic CrashLoop on `shm_open`
 
 **Symptom:** the `phantom-sonic` pod is `Running` but the `walking`
 and/or `sonic` containers restart-loop. Their logs end with:
@@ -1206,7 +1196,6 @@ counter. The same missing-`/dev/shm` cause also CrashLoops `dma-bridge`.
 | `/etc/phantomos/operator-ui-pairing.yaml` | ConfigMap derived from `aiPcUrl`. Auto-written. |
 | `/etc/phantomos/phantomos-app-<stack>.yaml` | Rendered Application CR (one per enabled stack). Auto-written. |
 | `/var/lib/k0s-data/` | Database hostPath volumes. Survives `--reset`. |
-| `/var/lib/registry/` | Local Docker registry blobs. Survives `--reset`. |
 | `/var/lib/recordings/` | On-host recording storage. Survives `--reset`. |
 | `host-config-templates/_template/host-config.yaml` | Generic schema template. |
 | `host-config-templates/_template/phantomos-app.yaml.tpl` | Application CR template. |
@@ -1233,7 +1222,6 @@ counter. The same missing-`/dev/shm` cause also CrashLoops `dma-bridge`.
 | Rotate ArgoCD password | `sudo bash scripts/bootstrap-robot.sh --argocd-admin` |
 | Re-seed dockerhub creds | `sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets` |
 | Wipe cluster | `sudo bash scripts/bootstrap-robot.sh --reset` |
-| Validate registry | `sudo bash scripts/validate-local-registry.sh` |
 | Pod state / logs / exec | `bash scripts/positronic.sh status\|logs\|exec` |
 | phantom-sonic state / logs / exec | `bash scripts/positronic.sh sonic status\|logs\|exec\|restart\|web` |
 | Force-sync an Application | `sudo k0s kubectl -n argocd patch app phantomos-<robot>-core --type merge -p '{"operation":{"sync":{}}}'` |
@@ -1251,7 +1239,6 @@ mapping a tcpdump back to the workload that owns the socket.
 | Port | Proto | Owner | Bind | Source |
 |---|---|---|---|---|
 | 5000 | TCP | `phantomos-api-server` | all | `manifests/base/phantomos-api-server/phantomos-api-server.yaml` |
-| 5443 | TCP | `registry` | `127.0.0.1` | `manifests/base/registry/registry.yaml` |
 | 8008 | TCP | `yovariable-server` (variable) | all | `manifests/base/yovariable-server/yovariable-server.yaml` |
 | 8080 | TCP | `yovariable-server` (admin) | all | `manifests/base/yovariable-server/yovariable-server.yaml` |
 | 9788 | TCP | `rerun-streamer` | all | `manifests/base/dma-streams/rerun-streamer.yaml` |
@@ -1305,7 +1292,6 @@ not bound on the host):
 | Flag | Effect |
 |---|---|
 | `--skip-nvidia` | Skip nvidia runtime config in the host phase |
-| `--skip-validate` | Skip the final validate-local-registry pass |
 | `--production` | Force `selfHeal: true` for this run |
 | `--no-production` | Force `selfHeal: false` for this run |
 | `--keep-going` | Continue after FAIL (default: bail) |

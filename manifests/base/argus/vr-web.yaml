@@ -168,7 +168,8 @@ spec:
   # `rollout restart deploy/vr-web` on every bootstrap to pick up new
   # TLS certs / pairing CM, so this matters in practice. Recreate makes
   # the kill-then-start order explicit (~5 s gap during which :8010 is
-  # down). Same reasoning as manifests/base/registry/registry.yaml.
+  # down). Same Recreate reasoning as the other hostPort/hostNetwork
+  # singletons on the robot.
   strategy:
     type: Recreate
   selector:
@@ -222,8 +223,8 @@ spec:
             # hostPort:8010 maps the container's port directly onto
             # the node's :8010. This is the URL the Quest 3 browser
             # hits: https://<robot-fqdn>:8010/ . Same convention as
-            # registry (5443), rerun-streamer (9788), yovariable-
-            # server (8008/8080), phantom-locomotion (7400).
+            # rerun-streamer (9788), yovariable-server (8008/8080),
+            # phantom-locomotion (7400).
             #
             # Why not a NodePort Service? NodePort range is restricted
             # to 30000-32767 by default; using :8010 externally would

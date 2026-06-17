@@ -9,8 +9,11 @@
 # this one ships the image bytes those manifests reference.
 #
 # Discovery: scans manifests/ for `image:` lines, skipping refs that
-# can't be pulled from upstream (localhost:5443/* and *:PLACEHOLDER).
-# Override with --from-file <path> (one image per line, # comments OK).
+# can't be pulled from upstream (*:PLACEHOLDER template tags).
+# positronic-control / phantom-models / phantom-policies are now
+# foundationbot/* images, so they're discovered and pulled from
+# DockerHub like every other foundationbot/* ref. Override the scan
+# with --from-file <path> (one image per line, # comments OK).
 #
 # Extra images: refs whose tag isn't in manifests/ (e.g. dma-ethercat,
 # whose installer manifest carries :PLACEHOLDER and whose real tag is
@@ -21,13 +24,14 @@
 #   foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH}
 # expands to -amd64 in the amd64 .deb and -aarch64 in the arm64 .deb.
 #
-# Locally-built images: positronic-control and phantom-models live at
-# localhost:5443/* and don't exist on DockerHub, so they can't be
-# pulled — they have to be saved straight from the local docker
-# daemon. Pass --positronic-image <ref> and --phantom-models-image
-# <ref> with refs already present in `docker images`, or run the
-# script on a TTY and answer the two prompts. Refs whose architecture
-# doesn't match the build arch are skipped per-arch (no error).
+# Unpublished local builds (optional): if you have a positronic-control
+# or phantom-models build that isn't on DockerHub yet, bundle it
+# straight from the local docker daemon with --positronic-image <ref>
+# and --phantom-models-image <ref> (refs must already be present in
+# `docker images`). This is just an override for the normal DockerHub
+# pull — leave the flags unset to bundle the published foundationbot/*
+# images. Refs whose architecture doesn't match the build arch are
+# skipped per-arch (no error).
 #
 # Multi-arch: defaults to building one .deb per architecture for both
 # amd64 and arm64. Pass --arch <list> (or ARCHES=<list>) to narrow.
@@ -61,9 +65,9 @@
 #   scripts/build-images-deb.sh --from-file list.txt       # explicit image list
 #   ARCHES=amd64 scripts/build-images-deb.sh               # env-var form
 #   scripts/build-images-deb.sh \
-#     --positronic-image localhost:5443/positronic-control:0.2.44 \
-#     --phantom-models-image localhost:5443/phantom-models:2026-05-09
-#                                                          # bundle local builds
+#     --positronic-image positronic-control:0.2.44-dev \
+#     --phantom-models-image phantom-models:2026-05-09-dev
+#                                                          # bundle unpublished local builds
 #   scripts/build-images-deb.sh --no-data-bundle           # legacy single-.deb output
 #                                                          # (embeds tarballs in the .deb;
 #                                                          # only works under ~9.3 GB total)
@@ -96,14 +100,17 @@ FROM_FILE=""
 # packaging/deb-images/extra-images.txt and is silently skipped if absent.
 EXTRA_IMAGES_FILE_DEFAULT="$REPO_ROOT/packaging/deb-images/extra-images.txt"
 EXTRA_IMAGES_FILE="${EXTRA_IMAGES_FILE:-}"
-# Local-only image refs (already present in `docker images`, not pullable
-# from DockerHub). Empty by default; populated by flag or interactive
-# prompt. The values are full refs the manifest will look up at deploy
-# time (e.g. localhost:5443/positronic-control:0.2.44).
+# Unpublished local-build overrides (already present in `docker images`).
+# Empty by default; populated only by flag/env. Use these to bundle a
+# positronic-control / phantom-models build that isn't on DockerHub yet;
+# otherwise the published foundationbot/* images are discovered and
+# pulled normally. The values are full refs (e.g.
+# positronic-control:0.2.44-dev).
 POSITRONIC_IMAGE="${POSITRONIC_IMAGE:-}"
 PHANTOM_MODELS_IMAGE="${PHANTOM_MODELS_IMAGE:-}"
-# When set to 1, suppresses the interactive prompts even on a TTY (use
-# from CI to take the flag/env values verbatim).
+# Retained as an accepted no-op for backward compatibility: the script
+# no longer prompts interactively (local-build refs come from flags/env
+# only), so there is nothing to suppress.
 NO_PROMPT="${NO_PROMPT:-0}"
 # When set to 1, skips the per-arch sidecar tar.zst (see RFC 0007). The
 # .deb then ships the tarballs the old way (under /var/lib/k0s/images/)
@@ -129,6 +136,7 @@ while [ "$#" -gt 0 ]; do
       [ -n "${2:-}" ] || { echo "error: --phantom-models-image needs a value" >&2; exit 2; }
       PHANTOM_MODELS_IMAGE="$2"; shift 2 ;;
     --no-prompt)
+      # Accepted no-op (no interactive prompts remain); kept for back-compat.
       NO_PROMPT=1; shift ;;
     --no-data-bundle)
       NO_DATA_BUNDLE=1; shift ;;
@@ -249,12 +257,10 @@ unset _prereq_tools
 # ---- image discovery ----------------------------------------------------
 
 discover_from_manifests() {
-  # Mirrors the filter in scripts/prime-registry-cache.sh:
-  #   - drop localhost:5443/* (those don't exist upstream)
   #   - drop *:PLACEHOLDER (template tag, replaced at deploy time)
+  # Everything else (all foundationbot/* refs) is pulled from DockerHub.
   grep -rhE '^\s*image:\s*' manifests/ \
     | sed -E 's/^\s*image:\s*//; s/^["'\'']//; s/["'\'']$//' \
-    | grep -v "^localhost:5443/" \
     | grep -v ':PLACEHOLDER$' \
     | grep -v '^$' \
     | sort -u
@@ -301,8 +307,8 @@ fi
 #   cannot infer (e.g. a swap-repo like foundationbot/phantom-cuda).
 canonical_container_for_repo() {
   case "$1" in
-    localhost:5443/positronic-control) printf 'positronic-control' ;;
-    localhost:5443/phantom-models)     printf 'phantom-models' ;;
+    foundationbot/positronic-control)  printf 'positronic-control' ;;
+    foundationbot/phantom-models)      printf 'phantom-models' ;;
     foundationbot/argus.operator-ui)   printf 'operator-ui' ;;
     foundationbot/dma-ethercat)        printf 'dma-ethercat' ;;
     *) : ;;
@@ -323,38 +329,16 @@ else
   for _ in "${IMAGES[@]}"; do IMAGE_SOURCES+=("manifest-scan"); done
 fi
 
-# ---- locally-built image prompts ---------------------------------------
+# ---- unpublished local-build overrides ---------------------------------
 #
-# positronic-control and phantom-models live at localhost:5443/* and
-# can't be pulled from DockerHub. The operator either supplied them
-# via flag/env or we prompt interactively (only on a TTY, only when
-# --no-prompt isn't set). `docker image inspect` is the gate — if the
-# ref isn't already present in the local daemon, we don't try to do
-# anything clever (no auto-build, no implicit `docker tag`).
-
-prompt_local_image() {
-  # prompt_local_image <container-label> <varname>
-  # Prints the chosen ref to stdout (empty if skipped).
-  local label="$1" var="$2" current="${!2}" reply
-  if [ -n "$current" ]; then
-    printf '%s' "$current"
-    return
-  fi
-  if [ "$NO_PROMPT" = 1 ] || [ ! -t 0 ]; then
-    printf ''
-    return
-  fi
-  printf '\n' >&2
-  printf 'Bundle a local %s image?\n' "$label" >&2
-  printf '  Type the local docker ref (e.g. localhost:5443/%s:<tag>)\n' "$label" >&2
-  printf '  or press Enter to skip.\n' >&2
-  printf '  %s ref> ' "$label" >&2
-  IFS= read -r reply || reply=""
-  printf '%s' "$reply"
-}
-
-POSITRONIC_IMAGE="$(prompt_local_image positronic-control POSITRONIC_IMAGE)"
-PHANTOM_MODELS_IMAGE="$(prompt_local_image phantom-models PHANTOM_MODELS_IMAGE)"
+# positronic-control / phantom-models / phantom-policies normally come
+# from DockerHub (foundationbot/*) via the manifest scan above. The
+# --positronic-image / --phantom-models-image flags are an optional
+# escape hatch for bundling a local build that isn't on DockerHub yet:
+# the ref must already exist in the local docker daemon and is saved
+# straight from it (no pull). `docker image inspect` is the gate — if
+# the ref isn't present locally, we don't try to do anything clever
+# (no auto-build, no implicit `docker tag`).
 
 # Verify each supplied ref exists locally — fail fast rather than
 # discovering it per-arch inside the build loop. A ref that's present
@@ -390,7 +374,7 @@ fi
 echo "Bundling ${#IMAGES[@]} pullable image(s) for arches: ${ARCHES_LIST[*]}"
 for i in "${IMAGES[@]}"; do echo "  - $i"; done
 if [ "${#LOCAL_IMAGES[@]}" -gt 0 ]; then
-  echo "Bundling ${#LOCAL_IMAGES[@]} local-only image(s) (saved straight from docker daemon):"
+  echo "Bundling ${#LOCAL_IMAGES[@]} unpublished local-build image(s) (saved straight from docker daemon):"
   for i in "${LOCAL_IMAGES[@]}"; do echo "  - $i"; done
 fi
 echo

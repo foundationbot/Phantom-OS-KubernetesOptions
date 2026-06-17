@@ -1044,13 +1044,13 @@ def cmd_set_cpu_isolation_json(path: str, blob: str) -> int:
 CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
     "positronic-control": {
         "stack": "core",
-        "manifest_image": "localhost:5443/positronic-control",
+        "manifest_image": "foundationbot/positronic-control",
     },
     "phantom-models": {
         # Consumed by positronic-control's load-models initContainer.
         # Larger bundle (model weights, configs).
         "stack": "core",
-        "manifest_image": "localhost:5443/phantom-models",
+        "manifest_image": "foundationbot/phantom-models",
     },
     "phantom-policies": {
         # Consumed by phantom-locomotion's load-policies initContainer.
@@ -1059,7 +1059,7 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # `--image phantom-policies` and a manifest pointing entries at
         # dest: policies/<name>.
         "stack": "core",
-        "manifest_image": "localhost:5443/phantom-policies",
+        "manifest_image": "foundationbot/phantom-policies",
     },
     "operator-ui": {
         "stack": "operator",
@@ -2421,10 +2421,9 @@ def cmd_validate(cfg: dict) -> int:
                         # used to write `REPLACE-WITH-*` strings as
                         # canonical defaults; pressing enter through the
                         # prompt left them in the file, and bootstrap
-                        # phase 12 would dutifully inject them as
+                        # image-overrides would dutifully inject them as
                         # kustomize.images overrides — guaranteeing
-                        # ImagePullBackOff. See
-                        # docs/image-flow-and-registry-bootstrap.md.
+                        # ImagePullBackOff.
                         if tag.startswith("REPLACE-WITH-"):
                             errors.append(
                                 f"images.{cname}.image: tag {tag!r} is a "

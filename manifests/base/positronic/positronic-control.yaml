@@ -11,9 +11,9 @@
 #
 # Two images flow into this pod, both rewritten per-robot via Kustomize's
 # `images:` transformer in the overlay:
-#   1. localhost:5443/positronic-control:<tag>  — the executing image
-#      (currently foundationbot/phantom-cuda retagged for the local registry).
-#   2. localhost:5443/phantom-models:<tag>      — busybox-based image whose
+#   1. foundationbot/positronic-control:<tag>  — the executing image
+#      (built from foundationbot/phantom-cuda and published to DockerHub).
+#   2. foundationbot/phantom-models:<tag>      — busybox-based image whose
 #      /models tree gets copied into a shared emptyDir by the load-models
 #      initContainer; the main container mounts that emptyDir at /root/models.
 #
@@ -76,7 +76,7 @@ spec:
         # per-robot by the same Kustomize `images:` transformer that
         # handles the main container.
         - name: load-models
-          image: localhost:5443/phantom-models:PLACEHOLDER
+          image: foundationbot/phantom-models:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -100,7 +100,7 @@ spec:
             limits:   { cpu: "1", memory: "1Gi" }
       containers:
         - name: positronic-control
-          image: localhost:5443/positronic-control:PLACEHOLDER
+          image: foundationbot/positronic-control:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           workingDir: /src/workspace
           # PHANTOM_CMD-or-sleep-infinity dispatch (decision D5 + plan §3.4).

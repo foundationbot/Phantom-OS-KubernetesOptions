@@ -54,8 +54,9 @@ Four modes
 
 Tag defaults to today's date (YYYY-MM-DD). Override with --tag.
 
-The image is pushed to localhost:5443 by default; override with
---registry. Use --no-push to build locally without pushing.
+The image is pushed to the foundationbot DockerHub namespace by
+default (run `docker login` first); override the namespace/registry
+with --registry. Use --no-push to build locally without pushing.
 """
 
 from __future__ import annotations
@@ -66,7 +67,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.request
 from pathlib import Path
 
 try:
@@ -74,7 +74,7 @@ try:
 except ImportError:  # only required for --manifest
     _yaml = None
 
-DEFAULT_REGISTRY = "localhost:5443"
+DEFAULT_REGISTRY = "foundationbot"
 DEFAULT_IMAGE = "phantom-models"
 DEFAULT_POLICIES_IMAGE = "phantom-policies"
 DEFAULT_ROOT = "/root/phantom-models-merged"
@@ -368,23 +368,6 @@ def push(image_ref: str, dry_run: bool) -> None:
     run(["docker", "push", image_ref], dry_run=dry_run)
 
 
-def verify_in_registry(registry: str, image: str, tag: str) -> None:
-    url = f"http://{registry}/v2/{image}/tags/list"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            body = resp.read().decode()
-    except Exception as exc:
-        print(f"  warning: could not query {url}: {exc}", file=sys.stderr)
-        return
-    if f'"{tag}"' in body:
-        print(f"  registry confirms: {body.strip()}", file=sys.stderr)
-    else:
-        print(
-            f"  warning: tag {tag} not in registry response: {body.strip()}",
-            file=sys.stderr,
-        )
-
-
 # ---------------------------------------------------------------------------
 # CLI.
 # ---------------------------------------------------------------------------
@@ -424,7 +407,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tag", default=today_tag(),
                    help="Image tag. Default: today's date (YYYY-MM-DD).")
     p.add_argument("--registry", default=DEFAULT_REGISTRY,
-                   help=f"Registry host. Default: {DEFAULT_REGISTRY}")
+                   help=f"Registry/namespace prefix for the image ref. "
+                        f"Default: {DEFAULT_REGISTRY}")
     p.add_argument("--image", default=DEFAULT_IMAGE,
                    help=f"Image name. Default: {DEFAULT_IMAGE}")
     p.add_argument("--no-push", action="store_true", help="Build but do not push.")
@@ -480,8 +464,6 @@ def main() -> int:
 
     if not args.no_push:
         push(image_ref, args.dry_run)
-        if not args.dry_run:
-            verify_in_registry(args.registry, args.image, args.tag)
 
     print(f"\n==> Done: {image_ref}", file=sys.stderr)
     if not args.no_push:

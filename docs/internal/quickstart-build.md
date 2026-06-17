@@ -46,15 +46,15 @@ DockerHub:
   source repo. Typically tagged something like
   `foundationbot/phantom-cuda:0.2.46-dev.2-production-cu128` (the
   "phantom-cuda" repo name is a swap-repo alias; the manifest reference
-  is `localhost:5443/positronic-control`).
+  is `foundationbot/positronic-control`).
 - **phantom-models** — built via `scripts/phantom-models/build.py`,
-  tagged like `localhost:5443/phantom-models:2026-05-09`.
+  tagged like `foundationbot/phantom-models:2026-05-09`.
 
 Both must be present in `docker images` before step 2 below. Verify:
 
 ```bash
 docker images foundationbot/phantom-cuda:<tag>
-docker images localhost:5443/phantom-models:<tag>
+docker images foundationbot/phantom-models:<tag>
 ```
 
 The build script fails fast with a clear error if either is missing.
@@ -86,7 +86,7 @@ with `+dirty` appended if the working tree has uncommitted changes.
 bash scripts/build-images-deb.sh \
   --arch amd64 \
   --positronic-image foundationbot/phantom-cuda:<tag> \
-  --phantom-models-image localhost:5443/phantom-models:<tag>
+  --phantom-models-image foundationbot/phantom-models:<tag>
 ```
 
 Produces **two** artifacts in `dist/`:
@@ -125,8 +125,8 @@ Bundle manifest should have four canonical entries:
 | `operator-ui` | `manifest-scan` | grep of `manifests/` |
 | `dma-ethercat` | `extra-images` | `packaging/deb-images/extra-images.txt` |
 
-The sidecar will contain ~21-22 tarballs (the four above plus standard
-infrastructure images: mongo, nginx, redis, postgres, registry, alpine,
+The sidecar will contain ~20-21 tarballs (the four above plus standard
+infrastructure images: mongo, nginx, redis, postgres, alpine,
 mediamtx, argus.*, dma-streams, nimbus.*, yovariable-server, plus
 phantomos-api-server).
 
@@ -230,7 +230,7 @@ The build script's manifest scan finds and bundles:
   `foundationbot/phantomos-api-server:V-...`,
   `foundationbot/yovariable-server:V-...`,
   `mongo:7`, `nginx:latest`, `postgres:16`, `redis:7-alpine`,
-  `registry:2`, `alpine:3.19`, `bluenviron/mediamtx:latest`.
+  `alpine:3.19`, `bluenviron/mediamtx:latest`.
 - **From `packaging/deb-images/extra-images.txt`** (`source: extra-images`):
   per-arch dma-ethercat (`main-latest-aarch64` on arm64,
   `main-latest` on amd64).
@@ -238,6 +238,5 @@ The build script's manifest scan finds and bundles:
 - **From `--phantom-models-image`** (`source: flag`): operator-built.
 
 Only the first set is filtered against the manifest's `image:` tag —
-that's where the `*:PLACEHOLDER` and `localhost:5443/*` exclusions
-apply (those images either don't exist upstream or are template
-placeholders).
+that's where the `*:PLACEHOLDER` exclusions apply (those refs are
+template placeholders, not real upstream images).
