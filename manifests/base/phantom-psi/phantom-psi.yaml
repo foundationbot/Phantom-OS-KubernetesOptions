@@ -180,6 +180,51 @@ spec:
             requests: { cpu: "2", memory: "2Gi" }
             limits:   { cpu: "4", memory: "4Gi" }
 
+        # ── psi0-state — robot /actuals → Ψ₀ proprio state ring ────────────
+        # Bridges the robot DMA daemon's /actuals + /config (dma_common IPC —
+        # uses named POSIX semaphores under /dev/shm, hence the pod's hostIPC:
+        # true above) into the (1,72) Ψ₀ proprio state ring that psi0-vla reads
+        # (--state-queue). WITHOUT this container psi0-vla runs on a ZERO state
+        # vector and, with require_proprio (the runner's default), safe-stops
+        # after ~5 s and emits no actions. See Psi0-VLA/DEPLOYMENT.md "Proprio".
+        #
+        # Image: the SONIC deploy image (psi0-sonic) — a SUPERSET of psi0-policy
+        # that adds phantom_sonic + phantom_bridge + the Phantom MJCF + mujoco
+        # (HeadPoseFK builds state slots [0:7]) + the dma_common IPC wheel. The
+        # lean psi0-policy image does NOT carry phantom_sonic, so it cannot run
+        # this producer. CPU-only (no nvidia.com/gpu) — it just reads /actuals.
+        #
+        # PREREQS (Psi0-VLA/infra/docker/build-sonic.sh): build psi0-sonic ON THE
+        # THOR *and* drop the dma_common aarch64/cp312 wheel into
+        # infra/docker/wheels/ BEFORE building, then import into k0s containerd —
+        # else actuals_state_source ImportErrors (dma_common) at runtime.
+        - name: psi0-state
+          image: psi0-sonic:thor-cu130
+          imagePullPolicy: IfNotPresent
+          # Same source-env-then-exec + "${VAR:-default}" pattern as psi0-vla so
+          # the run dir + state-queue stay byte-for-byte in lockstep with the
+          # runner and are overridable from the phantom-psi-config CM. --run-dir
+          # MUST match psi0-vla's (the taskspace-mean state fill is read from that
+          # run's meta/stats_psi0.json); --state-queue MUST match psi0-vla's.
+          command:
+            - /bin/bash
+            - -lc
+            - >-
+              source /usr/local/bin/setup_env.sh && exec
+              python -m phantom_sonic.actuals_state_source
+              --state-queue "${PSI0_STATE_QUEUE:-psi0_state_j24}"
+              --run-dir "${PSI0_RUN_DIR:-/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333}"
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+            - { name: dshm,   mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "2", memory: "2Gi" }
+
       volumes:
         # Checkpoint run dir(s) + the walking ONNX live on the host (staged at
         # /var/lib/psi0/models — the same tree the hand-applied psi0-models PV
