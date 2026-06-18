@@ -1,19 +1,20 @@
-# wolverine-wbc — DaemonSet running the whole-body controller (WBC)
-# locomotion policy from omni-wbc (the wolverine C++ 1 kHz DLT inference
-# node). Gated on foundation.bot/has-wbc. This is the hardware-test
-# deployment of the C++ node documented at omni-wbc cpp/README.md.
+# omni-wbc — DaemonSet running the whole-body controller (WBC) locomotion
+# policy from the omni-wbc repo (the C++ 1 kHz DLT inference node). Gated on
+# foundation.bot/has-omni-wbc. This is the hardware-test deployment of the
+# C++ node documented at omni-wbc cpp/README.md.
 #
 # ── Image ────────────────────────────────────────────────────────────────
-# foundationbot/wolverine-dma-inference-cpp. omni-wbc bin/release.sh
-# builds + publishes it under the docker-versioning standard; the runtime
-# binary + libonnxruntime .so are arm64 (Thor Jetson), so a real release is
-# linux/arm64. SINGLE self-contained image: the 1 kHz C++ node +
+# foundationbot/wolverine-dma-inference-cpp (the published artifact name;
+# the workload + node label are standardized as omni-wbc). omni-wbc
+# bin/release.sh builds + publishes it under the docker-versioning standard;
+# the runtime binary + libonnxruntime .so are arm64 (Thor Jetson), so a real
+# release is linux/arm64. SINGLE self-contained image: the 1 kHz C++ node +
 # libonnxruntime + the baked policy.onnx and drive_pack.npz (staged into
 # /artifacts at build). There is NO separate models image and NO
 # load-policies initContainer (unlike phantom-locomotion) — the
 # (binary, policy, drive-pack) triple ships as one SHA-paired artifact, so
 # the image tag alone names a known deployment. Per-robot tag is rewritten
-# by Kustomize from host-config.yaml's images.wolverine-wbc entry.
+# by Kustomize from host-config.yaml's images.omni-wbc entry.
 #
 # ── CPU-only, no GPU ───────────────────────────────────────────────────────
 # The C++ node links onnxruntime's CPU provider (p50 0.074 ms / 1 kHz exact
@@ -31,11 +32,11 @@
 # in k0s. No network ports → no hostNetwork (the node speaks only SHM).
 #
 # ── Mutual exclusion with the other /desired drivers ──────────────────────
-# positronic-control, phantom-locomotion, phantom-sonic, and wolverine-wbc
-# all drive /desired, so the host-config validator rejects has-wbc together
+# positronic-control, phantom-locomotion, phantom-sonic, and omni-wbc all
+# drive /desired, so the host-config validator rejects has-omni-wbc together
 # with any of has-locomotion, has-sonic, or default-on has-positronic.
-# Operators migrating a robot to WBC MUST set has-positronic: "false" (and
-# has-locomotion / has-sonic "false" if they were on) in nodeLabels.
+# Operators migrating a robot to omni-wbc MUST set has-positronic: "false"
+# (and has-locomotion / has-sonic "false" if they were on) in nodeLabels.
 #
 # ── Hardware-test safety posture (Phase 1: OBSERVE-ONLY) ───────────────────
 # This manifest is the Phase-1 bring-up profile from omni-wbc
@@ -56,32 +57,33 @@
 #   ENABLE_GATE=/dev/shm/wolverine_enable  operator `touch`es this file on
 #                    the host (shared /dev/shm) to engage the loop, `rm`s it
 #                    to kill. The node blocks at startup until it exists.
+#                    (Path matches omni-wbc cpp/README's documented gate.)
 # Per-host / per-experiment knobs that do NOT grant authority (clip id,
 # rate, master-gain ceiling, authority ramp, log paths, joint unwrap) come
-# from the optional wolverine-wbc-config ConfigMap via envFrom; launch.sh
-# carries shell-defaults so the pod still starts before the CM is applied.
+# from the optional omni-wbc-config ConfigMap via envFrom; launch.sh carries
+# shell-defaults so the pod still starts before the CM is applied.
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: wolverine-wbc
+  name: omni-wbc
   namespace: positronic
   labels:
-    app.kubernetes.io/name: wolverine-wbc
+    app.kubernetes.io/name: omni-wbc
     app.kubernetes.io/part-of: phantomos
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: wolverine-wbc
+      app.kubernetes.io/name: omni-wbc
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: wolverine-wbc
+        app.kubernetes.io/name: omni-wbc
     spec:
       # Schedule only on robot nodes that opted in.
       nodeSelector:
         foundation.bot/robot: "true"
-        foundation.bot/has-wbc: "true"
+        foundation.bot/has-omni-wbc: "true"
       tolerations:
         - operator: Exists
           effect: NoSchedule
@@ -94,7 +96,7 @@ spec:
       terminationGracePeriodSeconds: 15
 
       containers:
-        - name: wolverine-wbc
+        - name: omni-wbc
           image: foundationbot/wolverine-dma-inference-cpp:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           # Image ENTRYPOINT is /launch.sh (docker/dma_policy_cpp/launch.sh).
@@ -104,15 +106,15 @@ spec:
           tty: true
           envFrom:
             # Per-host knobs (clip id, rate, master gain, authority ramp, log
-            # paths, joint unwrap). bootstrap's wbc-config phase renders this
-            # CM from host-config.yaml's wolverine-wbc block; NOT in the
+            # paths, joint unwrap). bootstrap's omni-wbc-config phase renders
+            # this CM from host-config.yaml's omniWbc block; NOT in the
             # GitOps tree, so ArgoCD doesn't reset per-host edits. optional:
             # true → kubelet doesn't fail when it's missing (launch.sh
             # shell-defaults kick in). NB: keys here CANNOT override the
             # explicit safety env below (k8s `env` wins over `envFrom`) — by
             # design for OBSERVE_ONLY / IMU_MOUNT / ENABLE_GATE.
             - configMapRef:
-                name: wolverine-wbc-config
+                name: omni-wbc-config
                 optional: true
           env:
             - { name: LOCOMOTION_MODE, value: "policy" }

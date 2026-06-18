@@ -30,7 +30,7 @@ resources:
   - ../../base/dma-bridge
   - ../../base/phantom-locomotion
   - ../../base/phantom-sonic
-  - ../../base/wolverine-wbc
+  - ../../base/omni-wbc
   - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
   - ../../base/okvis2x
