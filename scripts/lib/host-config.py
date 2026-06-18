@@ -143,6 +143,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
      "false",
      "phantom-psi DaemonSet (Ψ₀ VLA + loco bridge; mutually exclusive with "
      "has-sonic, has-locomotion and has-positronic)"),
+    ("foundation.bot/has-psi-dma-walking",
+     "false",
+     "psi0-dma-walking DaemonSet (Ψ₀ Early-fan whole-body policy over the DMA "
+     "plane, spec 013; mutually exclusive with has-sonic, has-locomotion and "
+     "has-positronic — it drives /desired)"),
     ("foundation.bot/has-recorder",
      "true",
      "dma-recorder DaemonSet (dma-streams)"),
@@ -3209,6 +3214,9 @@ def cmd_validate(cfg: dict) -> int:
             effective_sonic = nl.get("foundation.bot/has-sonic", "false")
             effective_wloco = nl.get("foundation.bot/has-wolverine-loco", "false")
             effective_psi = nl.get("foundation.bot/has-psi", "false")
+            effective_psi_dma = nl.get(
+                "foundation.bot/has-psi-dma-walking", "false"
+            )
             enabled_drivers = [
                 label
                 for label, eff in (
@@ -3217,6 +3225,7 @@ def cmd_validate(cfg: dict) -> int:
                     ("foundation.bot/has-sonic", effective_sonic),
                     ("foundation.bot/has-wolverine-loco", effective_wloco),
                     ("foundation.bot/has-psi", effective_psi),
+                    ("foundation.bot/has-psi-dma-walking", effective_psi_dma),
                 )
                 if eff == "true"
             ]

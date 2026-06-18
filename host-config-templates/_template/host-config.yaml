@@ -739,6 +739,10 @@ nodeLabels:
   # phantom-psi DaemonSet (Ψ₀ VLA + loco bridge; mutually exclusive with
   # has-sonic, has-locomotion and has-positronic)
   foundation.bot/has-psi: 'false'
+  # psi0-dma-walking DaemonSet (Ψ₀ Early-fan whole-body policy over the DMA
+  # plane, spec 013; drives /desired — mutually exclusive with has-sonic,
+  # has-locomotion and has-positronic)
+  foundation.bot/has-psi-dma-walking: 'false'
   # phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with
   # has-locomotion and has-positronic)
   foundation.bot/has-sonic: 'false'

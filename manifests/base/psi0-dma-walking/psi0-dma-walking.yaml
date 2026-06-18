@@ -1,0 +1,118 @@
+# psi0-dma-walking — DaemonSet running the Ψ₀ Early-fan whole-body policy as a
+# DMA-plane low-level walking controller (Psi0-VLA spec 013). The DMA sibling of
+# phantom-psi's `walking` container: instead of inference.policy_node over IHMC
+# DDS, it runs bridge.psi0_dma_walking_node, which reads /actuals + the Ψ₀ VLA
+# action ring and writes /desired — the same DMA channels dma_sim impersonates
+# in the web sim, and DMA.ethercat owns on the robot.
+#
+# ── Topology ───────────────────────────────────────────────────────────────
+# One CPU container sharing the host /dev/shm (dma_common IPC queues +
+# the psi0_actions_j24 tensor ring) via hostIPC + a /dev/shm hostPath:
+#   walking-dma — bridge.psi0_dma_walking_node: each 50 Hz tick reads /actuals
+#                 (RobotSensorData: 29 joint pos/vel + PelvisIMU) + the newest
+#                 Ψ₀ VLA chunk (psi0_actions_j24), maps it to the policy's
+#                 upper-body / twist / height command (loco passthrough gated by
+#                 PSI0_ENABLE_*), runs the Early-fan ONNX, and writes /desired
+#                 (29 joint targets + the policy's stiffness/damping).
+# Requires (NOT in this pod): a /actuals//desired provider (DMA.ethercat on the
+# robot; dma_sim in the web sim) AND the Ψ₀ VLA writing psi0_actions_j24 — i.e.
+# phantom-psi's psi0-vla container (this stack consumes its ring; run them
+# together, with phantom-psi's own bridge/walking off, when migrating walking to
+# the DMA plane). CPU-only: the policy runs on onnxruntime's CPUExecutionProvider,
+# so NO nvidia.com/gpu — it never contends with psi0-vla for the device.
+#
+# ── Image ──────────────────────────────────────────────────────────────────
+# phantom-loco (the same image phantom-psi's bridge/walking run — it carries
+# phantom-locomotion's inference + bridge packages, incl. this node). It MUST be
+# rebuilt with the dma_common aarch64 wheel baked in (Dockerfile.deploy), exactly
+# like psi0-sonic adds it for phantom-psi's psi0-state container — the stock
+# phantom-loco image lacks dma_common and the node ImportErrors at startup. The
+# per-robot tag is rewritten by Kustomize from host-config.yaml images.phantom-loco
+# (CONTAINER_TARGETS), same as phantom-psi.
+#
+# ── Mutual exclusion ───────────────────────────────────────────────────────
+# foundation.bot/has-psi-dma-walking gates this DaemonSet. It drives /desired,
+# so the host-config validator rejects it together with has-sonic,
+# has-locomotion, or default-on has-positronic (every other /desired driver).
+# It defaults to "false" — adding this stack to the core kustomization schedules
+# ZERO pods until a robot (e.g. the ch4 test Jetson) opts in.
+#
+# ── Options ────────────────────────────────────────────────────────────────
+# REUSES the phantom-psi-config ConfigMap (rendered by bootstrap's psi-config
+# phase from host-config.yaml's phantomPsi block) — the knobs are identical:
+# POLICY_ONNX_PATH (the Early-fan ONNX), PSI0_ACTION_QUEUE (the VLA ring), and
+# PSI0_ENABLE_{GAIT,HEIGHT,YAW} (the loco passthrough gates, OFF by default per
+# spec-004 AC-7). No new config block or bootstrap phase is needed; enable the
+# gates the same way (phantomPsi.enable*: "1" → bootstrap --psi-config).
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: psi0-dma-walking
+  namespace: psi
+  labels:
+    app.kubernetes.io/name: psi0-dma-walking
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: psi0-dma-walking
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: psi0-dma-walking
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-psi-dma-walking: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostNetwork: true
+      # hostIPC: the dma_common /actuals//desired queues use named POSIX
+      # semaphores under /dev/shm; share the host IPC namespace so they sync
+      # with DMA.ethercat / dma_sim (same rationale as phantom-psi's psi0-state).
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        # ── walking-dma — Ψ₀ Early-fan policy over the DMA plane ───────────
+        - name: walking-dma
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "bridge.psi0_dma_walking_node"]
+          # stdin/tty so an operator can `kubectl exec -it` (or `positronic.sh
+          # psi-walk exec`) to watch the controller cadence / fall logs.
+          stdin: true
+          tty: true
+          # POLICY_ONNX_PATH / PSI0_ACTION_QUEUE / PSI0_ENABLE_{GAIT,HEIGHT,YAW}
+          # come from the shared phantom-psi-config CM (envFrom). Do NOT add them
+          # as explicit `env` — that would shadow per-host overrides.
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+            - { name: dshm,   mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "4", memory: "4Gi" }
+
+      volumes:
+        # The Early-fan ONNX lives on the host (staged at /var/lib/psi0/models —
+        # the same tree phantom-psi mounts; POLICY_ONNX_PATH=/models/walking/policy.onnx).
+        - name: models
+          hostPath: { path: /var/lib/psi0/models, type: Directory }
+        - name: dshm
+          hostPath: { path: /dev/shm, type: Directory }

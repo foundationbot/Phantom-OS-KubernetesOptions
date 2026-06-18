@@ -217,6 +217,11 @@ ${C_BOLD}Subcommands:${C_RESET}
                                Actions: status | logs [<container>] [-f]
                                [--previous] | exec [<container>] [-- cmd] |
                                shell [<container>] | restart. 'psi --help'.
+  psi-walk <action> [args...]  Helpers for the psi0-dma-walking DaemonSet (the
+                               Ψ₀ Early-fan whole-body policy over the DMA
+                               plane, spec 013; one container, psi ns).
+                               Actions: status | logs [-f] [--previous] |
+                               exec [-- cmd] | restart. 'psi-walk --help'.
   gpu-test                     Run a PyTorch CUDA matmul inside the pod;
                                PASS iff cuda is available and result != 0.
   set-cmd [--transient] <command...>
@@ -919,6 +924,88 @@ HELP
   esac
 }
 
+# ---------- subcommand: psi-walk (psi0-dma-walking DaemonSet) --------------
+# The Ψ₀ Early-fan whole-body policy as a DMA-plane low-level walking
+# controller (spec 013) — one pod, one container, in the psi namespace.
+PSIWALK_NAMESPACE="${PSIWALK_NAMESPACE:-psi}"
+PSIWALK_APP_LABEL="${PSIWALK_APP_LABEL:-app.kubernetes.io/name=psi0-dma-walking}"
+PSIWALK_CONTAINER="walking-dma"
+
+_psiwalk_pod() {
+  $KUBECTL -n "$PSIWALK_NAMESPACE" get pod -l "$PSIWALK_APP_LABEL" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+cmd_psi_walk() {
+  require_kubectl
+  local action="${1:-status}"
+  [ $# -gt 0 ] && shift
+  case "$action" in
+    -h|--help|help)
+      cat <<HELP
+psi-walk <action> — helpers for the psi0-dma-walking DaemonSet (spec 013): the
+Ψ₀ Early-fan whole-body policy as a DMA-plane low-level walking controller.
+One pod, one container ($PSIWALK_CONTAINER, $PSIWALK_NAMESPACE ns).
+
+Actions:
+  status                  DaemonSet + pod + container state/restarts.
+  logs [-f] [--previous]  Controller logs.
+  exec [-- cmd]           Drop into bash (or run cmd) in $PSIWALK_CONTAINER.
+  restart                 Roll the DaemonSet (rollout restart).
+HELP
+      return 0 ;;
+    status)
+      bold "DaemonSet ($PSIWALK_NAMESPACE/psi0-dma-walking)"
+      if ! $KUBECTL -n "$PSIWALK_NAMESPACE" get ds psi0-dma-walking >/dev/null 2>&1; then
+        fail "psi0-dma-walking not found in $PSIWALK_NAMESPACE — not deployed (has-psi-dma-walking off?)"
+        return 0
+      fi
+      $KUBECTL -n "$PSIWALK_NAMESPACE" get ds psi0-dma-walking -o wide 2>/dev/null | sed 's/^/    /'
+      local pod; pod="$(_psiwalk_pod)"
+      [ -n "$pod" ] && $KUBECTL -n "$PSIWALK_NAMESPACE" get pod "$pod" -o wide 2>/dev/null | sed 's/^/    /'
+      ;;
+    logs)
+      local follow=0 previous=0
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          -f|--follow)   follow=1; shift ;;
+          --previous|-p) previous=1; shift ;;
+          -h|--help)     echo "psi-walk logs [-f|--follow] [--previous]"; return 0 ;;
+          *) die "unknown psi-walk logs flag: $1" ;;
+        esac
+      done
+      local pod; pod="$(_psiwalk_pod)"
+      [ -n "$pod" ] || die "no psi0-dma-walking pod found (label=$PSIWALK_APP_LABEL)"
+      local largs=(-n "$PSIWALK_NAMESPACE" logs "$pod" -c "$PSIWALK_CONTAINER")
+      [ "$follow" = 1 ]   && largs+=(-f)
+      [ "$previous" = 1 ] && largs+=(--previous)
+      $KUBECTL "${largs[@]}"
+      ;;
+    exec)
+      local rest=("$@")
+      [ "${#rest[@]}" -ge 1 ] && [ "${rest[0]}" = "--" ] && rest=("${rest[@]:1}")
+      [ "${#rest[@]}" -eq 0 ] && rest=(bash --norc --noprofile)
+      local pod; pod="$(_psiwalk_pod)"
+      [ -n "$pod" ] || die "no psi0-dma-walking pod found (label=$PSIWALK_APP_LABEL)"
+      local args=(-n "$PSIWALK_NAMESPACE" exec -it "$pod" -c "$PSIWALK_CONTAINER" -- "${rest[@]}")
+      if [ "$DRY_RUN" = 1 ]; then
+        printf '+ %s' "$KUBECTL"; for a in "${args[@]}"; do printf ' %q' "$a"; done; printf '\n'
+        return 0
+      fi
+      exec $KUBECTL "${args[@]}"
+      ;;
+    restart)
+      if [ "$DRY_RUN" = 1 ]; then
+        printf '+ %s -n %s rollout restart ds/psi0-dma-walking\n' "$KUBECTL" "$PSIWALK_NAMESPACE"
+        return 0
+      fi
+      $KUBECTL -n "$PSIWALK_NAMESPACE" rollout restart ds/psi0-dma-walking \
+        && ok "rolled out psi0-dma-walking"
+      ;;
+    *) die "unknown psi-walk action: $action (try: psi-walk --help)" ;;
+  esac
+}
+
 # ---------- subcommand: gpu-test ------------------------------------------
 
 cmd_gpu_test() {
@@ -1507,6 +1594,7 @@ case "$sub" in
   exec)           cmd_exec           "$@" ;;
   sonic)          cmd_sonic          "$@" ;;
   psi)            cmd_psi            "$@" ;;
+  psi-walk)       cmd_psi_walk       "$@" ;;
   gpu-test)       cmd_gpu_test       "$@" ;;
   set-cmd)        cmd_set_cmd        "$@" ;;
   clear-cmd)      cmd_clear_cmd      "$@" ;;
