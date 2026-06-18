@@ -32,3 +32,4 @@ resources:
   - ../../base/phantom-sonic
   - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
+  - ../../base/okvis2x
