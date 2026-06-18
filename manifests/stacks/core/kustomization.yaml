@@ -31,5 +31,6 @@ resources:
   - ../../base/phantom-locomotion
   - ../../base/phantom-sonic
   - ../../base/phantom-psi
+  - ../../base/psi0-dma-walking
   - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
