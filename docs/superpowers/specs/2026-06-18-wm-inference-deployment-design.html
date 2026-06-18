@@ -1,0 +1,279 @@
+<title>wm-inference k0s Deployment Design</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a3441; --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1040px;margin:0 auto;padding:32px 22px 80px}
+  header.hero{border:1px solid var(--line);border-radius:14px;padding:26px 28px;
+    background:linear-gradient(135deg,#161b22,#1b2233);margin-bottom:26px}
+  h1{margin:0 0 6px;font-size:26px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:14px}
+  .tags{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px}
+  .tag{font:12px/1 var(--mono);background:var(--panel2);border:1px solid var(--line);
+    color:var(--accent);padding:6px 9px;border-radius:999px}
+  h2{font-size:19px;margin:34px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+  h3{font-size:15.5px;margin:20px 0 8px;color:#cdd9e5}
+  p{margin:9px 0}
+  code{font:13px/1.5 var(--mono);background:var(--panel2);border:1px solid var(--line);
+    padding:1px 5px;border-radius:5px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;overflow-x:auto;margin:12px 0}
+  pre code{background:none;border:none;padding:0;font-size:12.5px;color:#d7e0ea}
+  .grid{display:grid;gap:14px}
+  @media(min-width:760px){.cols-2{grid-template-columns:1fr 1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:16px 18px}
+  .card h3{margin-top:0}
+  ul{margin:8px 0;padding-left:22px}li{margin:4px 0}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#cdd9e5;font-weight:600}
+  td code{font-size:12px}
+  .note{border-left:3px solid var(--accent);background:#10233b;border-radius:0 8px 8px 0;
+    padding:11px 15px;margin:14px 0}
+  .note.warn{border-color:var(--warn);background:#2a230f}
+  .note.good{border-color:var(--good);background:#0f2417}
+  .pill{font:11px/1 var(--mono);padding:3px 7px;border-radius:6px;border:1px solid var(--line)}
+  .pill.new{color:var(--good);background:#0f2417}
+  .pill.mod{color:var(--warn);background:#2a230f}
+  .flow{font:12.5px/1.45 var(--mono);white-space:pre;overflow-x:auto;color:#bcd;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .muted{color:var(--muted)}
+  .kbd{font:12px var(--mono);color:var(--accent)}
+  a{color:var(--accent)}
+  hr{border:none;border-top:1px solid var(--line);margin:26px 0}
+</style>
+
+<div class="wrap">
+<header class="hero">
+  <h1>wm-inference — k0s Core-Stack Deployment Design</h1>
+  <div class="sub">Port the World-Model on-robot inference service into the Phantom-OS-KubernetesOptions fleet paradigm, as a fourth mutually-exclusive "control brain" alongside positronic / locomotion / sonic.</div>
+  <div class="tags">
+    <span class="tag">2026-06-18</span>
+    <span class="tag">repo: Phantom-OS-KubernetesOptions</span>
+    <span class="tag">branch: feat/wm-inference-deployment</span>
+    <span class="tag">stack: core</span>
+    <span class="tag">ns: positronic</span>
+    <span class="tag">precedent: phantom-sonic (PR&nbsp;#67)</span>
+  </div>
+</header>
+
+  <h2>1. Goal & context</h2>
+  <p>The World-Model repo (<code>imu-policy/world-model</code>) ships an on-robot C++ inference service in
+  <code>inference/</code> with a standalone manifest at <code>inference/deploy/daemonset-nvidia.yaml</code>. It reads a
+  camera frame, encodes with V-JEPA, applies PCA, runs a 2-step-ODE flow-matching predictor, and serves a goal latent
+  <code>z_ref</code> to an action-solver over POSIX shm rings (<code>/wm_zref_req</code> ↔ <code>/wm_zref_resp</code>).</p>
+  <p>This design folds that standalone manifest into the fleet's GitOps paradigm — the same shape used by
+  <code>positronic-control</code>, <code>phantom-locomotion</code>, and most recently <code>phantom-sonic</code>: a base manifest
+  under the <code>core</code> stack, a <code>foundation.bot/has-*</code> node-label gate, image-override + per-host config plumbing
+  in <code>host-config.py</code>, a bootstrap config phase, and convenience commands in <code>positronic.sh</code>.</p>
+
+  <div class="note good">
+    <strong>Closest precedent = phantom-sonic.</strong> Sonic is the most recent example of adding a new mutually-exclusive,
+    multi-container "brain" Pod. This design mirrors its file set and wiring almost 1:1. Where it deviates (config delivery),
+    §6 explains why.
+  </div>
+
+  <h2>2. Architecture</h2>
+  <p>The unit of deployment is a <strong>DaemonSet Pod that is the robot's "brain."</strong> Today it runs one active
+  container, <code>wm-inference</code>. It reserves a co-located <strong>action-solver container slot</strong> (Phase 2 — no
+  shipping image yet, only the bench <code>ping_client</code>). The action-solver is the shm-ring <em>producer/client</em> (it
+  creates <code>/wm_zref_req</code>); when its image exists it drops into the same Pod and shares <code>/dev/shm</code>.
+  Because that Pod (via its action-solver) ultimately drives the robot, it is mutually exclusive with the other brains.</p>
+
+  <div class="flow">          Phantom-OS host (Jetson Thor)  /dev/shm  (hostIPC + hostPath)
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │  DMA.video producer ──► camera rings ─┐                                │
+ │                                       ▼                                │
+ │   ┌──────────────────────────┐   /wm_zref_req   ┌────────────────────┐│
+ │   │  wm-inference (active)    │◄───────────────  │ action-solver      ││
+ │   │  wm_inference_main        │   /wm_zref_resp  │ (Phase 2 — SLOT,   ││
+ │   │  V-JEPA→PCA→flow→z_ref    │ ───────────────► │  inert until image)││
+ │   └──────────────────────────┘                  └────────────────────┘│
+ │        ▲ init: model-loader copies engines/PCA/tokenizer → emptyDir    │
+ │  DaemonSet  ns=positronic  nodeSelector: robot + has-wm-inference      │
+ └──────────────────────────────────────────────────────────────────────┘
+   gated ON only when this robot's "brain" = world-model (see §4 exclusion)</div>
+
+  <h3>Carried over from the standalone manifest (unchanged)</h3>
+  <ul>
+    <li><code>model-loader</code> initContainer stages engines/PCA/tokenizer/registry from the data-image into a shared <code>emptyDir</code> (read-only mount in main).</li>
+    <li><code>runtimeClassName: nvidia</code>, <code>privileged</code>, <code>hostNetwork</code>, <code>hostIPC</code>, <code>/dev/shm</code> + <code>/dev</code> hostPaths.</li>
+    <li>startup / readiness / liveness probes (ready sentinel + metrics-mtime heartbeat).</li>
+    <li>Static image-contract env: engine paths, <code>WM_READY_FILE</code>, <code>WM_METRICS_PATH</code>, <code>NVIDIA_*</code>.</li>
+  </ul>
+
+  <h3>Changed to fit the fleet paradigm</h3>
+  <table>
+    <tr><th>Aspect</th><th>Standalone</th><th>Fleet (this design)</th></tr>
+    <tr><td>Namespace</td><td><code>foundation</code></td><td><code>positronic</code> (shared with positronic/locomotion/sonic/SE)</td></tr>
+    <tr><td>Node gate</td><td><code>has-wm-inference</code> + <code>chip: jetson-thor</code></td><td><code>robot</code> + <code>has-wm-inference</code> only — <strong>chip gate dropped</strong> (matches locomotion/sonic; per-host opt-in + correct per-host image is the contract)</td></tr>
+    <tr><td>Images</td><td>digest-pinned <code>foundationbot/wm-inference@sha256…</code></td><td>local-registry placeholders <code>localhost:5443/wm-inference:PLACEHOLDER</code> + <code>…-models</code>, rewritten per-host via <code>images:</code></td></tr>
+    <tr><td>Pull secret</td><td><code>regcred</code></td><td><code>dockerhub-creds</code> (the fleet-seeded secret)</td></tr>
+    <tr><td>Per-host env</td><td>hardcoded in manifest</td><td><code>envFrom: wm-inference-config</code> (optional) + shell-default wrapper (§6)</td></tr>
+    <tr><td>Action-solver</td><td>described as external client</td><td>documented co-located container <em>slot</em> in the same Pod</td></tr>
+  </table>
+
+  <h2>3. File inventory</h2>
+  <table>
+    <tr><th>File</th><th></th><th>Responsibility</th></tr>
+    <tr><td><code>manifests/base/wm-inference/wm-inference.yaml</code></td><td><span class="pill new">new</span></td><td>The DaemonSet (ported). Active <code>wm-inference</code> container + <code>model-loader</code> init + documented action-solver slot.</td></tr>
+    <tr><td><code>manifests/base/wm-inference/kustomization.yaml</code></td><td><span class="pill new">new</span></td><td>Lists the manifest. Mirrors <code>phantom-sonic/kustomization.yaml</code>.</td></tr>
+    <tr><td><code>manifests/stacks/core/kustomization.yaml</code></td><td><span class="pill mod">mod</span></td><td>Add <code>../../base/wm-inference</code> to <code>resources:</code>.</td></tr>
+    <tr><td><code>scripts/lib/host-config.py</code></td><td><span class="pill mod">mod</span></td><td>Node label; 2 image targets; <code>worldModel</code> config block + emitter; extend the brain mutual-exclusion list to 4.</td></tr>
+    <tr><td><code>scripts/bootstrap-robot.sh</code></td><td><span class="pill mod">mod</span></td><td>New <code>wm-config</code> phase rendering the host-local <code>wm-inference-config</code> ConfigMap (mirrors <code>sonic_config</code>).</td></tr>
+    <tr><td><code>scripts/positronic.sh</code></td><td><span class="pill mod">mod</span></td><td>New <code>wm</code> subcommand group (status/logs/exec/restart) mirroring the <code>sonic</code> group.</td></tr>
+    <tr><td><code>host-config-templates/_template/host-config.yaml</code></td><td><span class="pill mod">mod</span></td><td>Document the node label, the two image keys, the 4-way exclusion, and the <code>worldModel:</code> block.</td></tr>
+    <tr><td><code>docs/operations.md</code></td><td><span class="pill mod">mod</span></td><td>Runbook section for wm-inference (mirrors the sonic section added in PR&nbsp;#67).</td></tr>
+  </table>
+  <div class="note muted">No <code>DEPLOYMENT_TARGETS</code> entry initially (sonic added none either). The WM Pod's only mounts are
+  universal (<code>/dev/shm</code>, <code>/dev</code>) plus the models <code>emptyDir</code> staged from the data-image — no per-host
+  host paths. A <code>DEPLOYMENT_TARGETS</code> entry is a clean future extension if mount overrides are ever needed.</div>
+
+  <h2>4. Mutual exclusion (extend the existing N-way check)</h2>
+  <p>The validator already generalized to an <code>enabled_drivers</code> list when sonic landed
+  (<code>host-config.py</code> ≈ L2749). The brain group is <code>{has-positronic (default-on), has-locomotion, has-sonic}</code>;
+  this adds <code>has-wm-inference</code> as the fourth member. Rule unchanged: <strong>at most one may be <code>"true"</code></strong>.
+  Since positronic defaults on, enabling wm-inference requires explicitly setting <code>has-positronic: "false"</code>.</p>
+  <pre><code>effective_wm = nl.get("foundation.bot/has-wm-inference", "false")
+enabled_drivers = [label for label, eff in (
+    ("foundation.bot/has-positronic", effective_pos),
+    ("foundation.bot/has-locomotion", effective_loc),
+    ("foundation.bot/has-sonic",      effective_sonic),
+    ("foundation.bot/has-wm-inference", effective_wm),   # NEW
+) if eff == "true"]
+# len(enabled_drivers) > 1  -> same error messaging, now naming 4 labels</code></pre>
+  <div class="note">Semantic note: wm-inference alone only <em>serves</em> z_ref — it doesn't drive joints. It joins the brain
+  group because its co-located action-solver does. Treating the Pod as the exclusion unit keeps "one brain per robot" honest
+  even while the action-solver slot is empty (the slot is reserved, not the workload).</div>
+
+  <h2>5. Node label &amp; image targets</h2>
+  <div class="grid cols-2">
+    <div class="card">
+      <h3>NODE_LABEL_REGISTRY <span class="pill new">+1</span></h3>
+      <pre><code>("foundation.bot/has-wm-inference",
+ "false",
+ "wm-inference (world-model brain) "
+ "DaemonSet — mutually exclusive with "
+ "has-positronic / has-locomotion / has-sonic")</code></pre>
+    </div>
+    <div class="card">
+      <h3>CONTAINER_TARGETS <span class="pill new">+2</span></h3>
+      <pre><code>"wm-inference": {
+  "stack": "core",
+  "manifest_image":
+    "localhost:5443/wm-inference"},
+"wm-inference-models": {   # model-loader init
+  "stack": "core",
+  "manifest_image":
+    "localhost:5443/wm-inference-models"},</code></pre>
+    </div>
+  </div>
+  <p class="muted">Published as <code>foundationbot/wm-inference</code> / <code>foundationbot/wm-inference-models</code> (arm64 / Thor
+  engines). The base manifest uses local-registry placeholders; the per-host <code>images:</code> block in host-config.yaml supplies
+  the real ref, and bootstrap rewrites both via the kustomize <code>images:</code> transformer — same indirection as
+  <code>phantom-locomotion</code>↔<code>phantom-dma-inference</code>.</p>
+
+  <h2>6. Per-host config &amp; delivery</h2>
+  <h3>The <code>worldModel:</code> host-config block</h3>
+  <pre><code>worldModel:
+  cameraId: 0                       # -> WM_CAMERA_ID  (0..5 board/eye index)
+  baseSha: 33cc3ad3ab7cfc92f8eb…    # -> WM_BASE_SHA   (sha1(base ckpt)[:40])
+  freshnessMs: 200                  # -> WM_FRESHNESS_MS (optional)
+  tasks:                            # id <-> engine pairs (kept paired to
+    - {id: honda_reach_insert, engine: honda_reach_insert.engine}   # prevent
+    - {id: honda_rehome,       engine: honda_rehome.engine}         # mismatch
+# derived ->  WM_TASK_IDS          = honda_reach_insert,honda_rehome
+#             WM_PREDICTOR_ENGINES = /wm-models/honda_reach_insert.engine,
+#                                    /wm-models/honda_rehome.engine</code></pre>
+  <p>Scalars (<code>cameraId</code>, <code>baseSha</code>, <code>freshnessMs</code>) follow the flat
+  <code>DEFAULT_*</code>+<code>FIELD_TO_ENV</code> pattern from <code>DEFAULT_SONIC</code>. The <code>tasks</code> list is the one
+  enrichment over sonic's pure-scalar emitter: it derives the two parallel CSV vars
+  (<code>WM_TASK_IDS</code> / <code>WM_PREDICTOR_ENGINES</code>) — matching exactly how <code>wm_inference_main</code>'s
+  <code>loadConfigFromEnv()</code> consumes them. A bare/absent <code>worldModel</code> block renders a complete, working
+  default ConfigMap.</p>
+
+  <div class="note warn">
+    <strong>Delivery: sonic-style host-local ConfigMap — a deliberate change from the brainstorm summary's "positronic-style".</strong>
+    <p style="margin:8px 0 0">During brainstorming I floated positronic-style drift-safe delivery (base CM in git + strategic-merge into the
+    Argo app). On reading the code: positronic needs that only because its in-Argo PHANTOM_CMD merge is bespoke, and
+    <code>positronic-control</code> runs an image entrypoint with no shell-defaults. <strong>wm-inference can do better, simpler:</strong>
+    <code>wm_inference_main</code> reads pure <code>WM_*</code> env, so wrapping it in <code>/bin/sh -c 'export WM_X=${WM_X:-default}; exec …'</code>
+    gives first-boot defaults, and <code>envFrom</code> (optional) supplies per-host overrides once bootstrap applies the
+    host-local CM. This is exactly the <code>phantom-sonic</code> mechanism — the precedent you named — with no base CM (so no ArgoCD
+    conflict) and no bootstrap surgery. If you'd rather keep strict positronic-style drift-safety, it's a localized swap of the
+    bootstrap phase + a base <code>configmap.yaml</code>.</p>
+  </div>
+
+  <h3>Bootstrap <code>wm-config</code> phase (mirrors <code>sonic_config</code>)</h3>
+  <ul>
+    <li>New flag <code>--wm-config</code>; <code>SKIP_WM_CONFIG</code>; <code>SELECTED_PHASES</code> case entry; called after <code>sonic_config</code> in the run list.</li>
+    <li>Renders <code>/etc/phantomos/wm-inference-config.yaml</code> (ConfigMap <code>wm-inference-config</code>, ns <code>positronic</code>) from <code>host-config.py … get-world-model-config-kv</code>, <code>kubectl apply -f</code>, then <code>rollout restart ds/wm-inference</code> if present.</li>
+    <li>Host-resident, ArgoCD-unmanaged, <code>--reset</code>-preserved — identical lifecycle to <code>phantom-sonic-config</code>.</li>
+  </ul>
+
+  <h3>Manifest env wiring</h3>
+  <pre><code>command: ["/bin/sh","-c"]
+args:
+  - |
+    export WM_CAMERA_ID="${WM_CAMERA_ID:-0}"
+    export WM_BASE_SHA="${WM_BASE_SHA:-33cc3ad3ab7cfc92f8eb4cf177ba552680e2def6}"
+    export WM_TASK_IDS="${WM_TASK_IDS:-honda_reach_insert,honda_rehome}"
+    export WM_PREDICTOR_ENGINES="${WM_PREDICTOR_ENGINES:-/wm-models/honda_reach_insert.engine,/wm-models/honda_rehome.engine}"
+    export WM_FRESHNESS_MS="${WM_FRESHNESS_MS:-200}"
+    exec /opt/wm-inference/build/wm_inference_main
+envFrom:
+  - configMapRef: { name: wm-inference-config, optional: true }   # per-host overrides
+env:    # static image-contract paths stay inline (NOT in the CM)
+  - { name: WM_VJEPA_ENGINE,   value: /wm-models/vjepa.engine }
+  - { name: WM_SIGLIP_ENGINE,  value: /wm-models/siglip_text.engine }
+  - { name: WM_PCA_PATH,       value: /wm-models/pca_basisA.bin }
+  - { name: WM_SPM_PATH,       value: /wm-models/spiece.model }
+  - { name: WM_REGISTRY,       value: /wm-models/registry.json }
+  - { name: WM_READY_FILE,     value: /tmp/wm_ready }
+  - { name: WM_METRICS_PATH,   value: /tmp/wm_metrics.json }
+  - { name: NVIDIA_VISIBLE_DEVICES, value: all }
+  - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }</code></pre>
+  <div class="note">Precedence is correct: when the CM is present, <code>envFrom</code> sets <code>WM_*</code>, and the
+  <code>${WM_X:-default}</code> wrapper is a no-op (the var is already set). When the CM is absent (first boot), the wrapper supplies
+  the defaults. The static engine-path <code>env:</code> entries are not in the CM, so no precedence conflict arises.</div>
+
+  <h2>7. Convenience commands — extend <code>positronic.sh</code></h2>
+  <p>Add a <code>wm</code> subcommand group mirroring the <code>sonic</code> group: <code>WM_NAMESPACE=positronic</code>,
+  <code>WM_APP_LABEL=app.kubernetes.io/name=wm-inference</code>, <code>WM_CONTAINERS="wm-inference"</code> (action-solver appended
+  later). Reuses the script's existing robot/kubectl/dry-run plumbing.</p>
+  <pre><code>bash scripts/positronic.sh wm status            # DS + pod + per-container readiness
+bash scripts/positronic.sh wm logs   [-f]       # wm-inference container logs
+bash scripts/positronic.sh wm exec   -- nvidia-smi
+bash scripts/positronic.sh wm restart           # rollout restart ds/wm-inference</code></pre>
+
+  <h2>8. Data flow at a glance</h2>
+  <div class="flow">host-config.yaml ─ worldModel: + nodeLabels: + images: ─┐
+                                                       │ bootstrap
+  ┌────────────────────────────────────────────────────┼─────────────────────┐
+  │ node labels ──► foundation.bot/has-wm-inference=true │ (node object)        │
+  │ images:    ──► kustomize images: rewrite placeholders│ (core Argo app)      │
+  │ worldModel ──► get-world-model-config-kv ──► /etc/phantomos/wm-inference-config.yaml
+  │                                              kubectl apply ─► CM (ns positronic)
+  └──────────────────────────────────────────────────────────────────────────┘
+       │ ArgoCD syncs core stack (manifests/base/wm-inference)
+       ▼
+   DaemonSet schedules on has-wm-inference nodes ─► envFrom CM ─► wm_inference_main</div>
+
+  <h2>9. Assumptions &amp; open points</h2>
+  <ul>
+    <li>CI publishes <code>foundationbot/wm-inference</code> + <code>foundationbot/wm-inference-models</code> (arm64/Thor engines). The base manifest only references local-registry placeholders.</li>
+    <li><code>wm_inference_main</code> lives at <code>/opt/wm-inference/build/wm_inference_main</code> (confirmed in <code>Dockerfile.thor</code>); the shell-default wrapper <code>exec</code>s it. If a future image changes the path, update the wrapper.</li>
+    <li>Action-solver: documented slot only; ships inert until a real image/command exists. Pod remains the exclusion unit.</li>
+    <li>No <code>/recordings</code> mount (WM writes metrics to <code>/tmp</code>); add via a future <code>DEPLOYMENT_TARGETS</code> entry if needed.</li>
+    <li>Config delivery is sonic-style host-local CM (see §6 callout) rather than positronic-style — flagged for confirmation.</li>
+  </ul>
+
+  <hr>
+  <p class="muted">Implementation is broken into phased, test-first tasks in
+  <code>docs/superpowers/plans/2026-06-18-wm-inference-deployment.md</code>.</p>
+</div>
