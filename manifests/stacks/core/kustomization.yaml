@@ -31,7 +31,7 @@ resources:
   - ../../base/phantom-sonic
   - ../../base/phantom-psi
   - ../../base/psi0-dma-walking
-  - ../../base/wolverine-wbc
+  - ../../base/omni-wbc
   - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
   - ../../base/okvis2x

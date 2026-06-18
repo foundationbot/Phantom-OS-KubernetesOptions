@@ -188,14 +188,15 @@ stacks:
 #                          tag-prefixed (v / policies- / teleop-, +/-aarch64).
 #                          Base pins localhost:5443/dma-ghost-wbc-* find-keys;
 #                          override each to the shared repo + its prefixed tag.
-#   wolverine-wbc          core stack — wolverine-wbc DaemonSet (omni-wbc
-#                          whole-body controller, has-wbc gated, default-off).
-#                          SINGLE self-contained image (node binary +
-#                          libonnxruntime + baked policy.onnx/drive_pack.npz);
-#                          manifest uses foundationbot/wolverine-dma-inference-cpp.
+#   omni-wbc               core stack — omni-wbc DaemonSet (omni-wbc
+#                          whole-body controller, has-omni-wbc gated,
+#                          default-off). SINGLE self-contained image (node
+#                          binary + libonnxruntime + baked policy.onnx/
+#                          drive_pack.npz); the published artifact keeps its
+#                          name foundationbot/wolverine-dma-inference-cpp.
 #                          omni-wbc bin/release.sh publishes vX.Y.Z[-beta.N];
 #                          runtime is arm64 (Thor). Only pin on hosts that opt
-#                          in via nodeLabels has-wbc: 'true'.
+#                          in via nodeLabels has-omni-wbc: 'true'.
 images:
   positronic-control:
     image: foundationbot/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -236,11 +237,11 @@ images:
   #   image: foundationbot/dma-ghost-wbc-inference:policies-v0.1.0-aarch64
   # dma-ghost-wbc-teleop:
   #   image: foundationbot/dma-ghost-wbc-inference:teleop-v0.1.0-aarch64
-  # wolverine-wbc is default-off (nodeLabels has-wbc: 'false'); uncomment and
+  # omni-wbc is default-off (nodeLabels has-omni-wbc: 'false'); uncomment and
   # pin the omni-wbc release tag only on the hardware-test host that opts in.
   # The hardware target is Thor, so the published image is arm64. Until the
   # WBC ship gate is green the release is -beta.N (see omni-wbc bin/release.sh).
-  # wolverine-wbc:
+  # omni-wbc:
   #   image: foundationbot/wolverine-dma-inference-cpp:v1.0.0-beta.1
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
@@ -772,9 +773,9 @@ nodeLabels:
   # phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with
   # has-locomotion and has-positronic)
   foundation.bot/has-sonic: 'false'
-  # wolverine-wbc DaemonSet (omni-wbc whole-body controller, C++ 1 kHz DLT
+  # omni-wbc DaemonSet (omni-wbc whole-body controller, C++ 1 kHz DLT
   # node; mutually exclusive with has-positronic, has-locomotion, has-sonic)
-  foundation.bot/has-wbc: 'false'
+  foundation.bot/has-omni-wbc: 'false'
   # dma-recorder DaemonSet (dma-streams)
   foundation.bot/has-recorder: 'true'
   # cpp-robot-state-estimator DaemonSet
