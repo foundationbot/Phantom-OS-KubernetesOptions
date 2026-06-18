@@ -149,6 +149,10 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-yovariable",
      "true",
      "yovariable-server DaemonSet"),
+    ("foundation.bot/has-wbc",
+     "false",
+     "wolverine-wbc DaemonSet (omni-wbc whole-body controller; mutually "
+     "exclusive with has-locomotion, has-sonic and has-positronic)"),
 )
 
 
@@ -1170,6 +1174,18 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # build-models job content-addresses + publishes it.
         "stack": "core",
         "manifest_image": "foundationbot/okvis2x-models",
+    },
+    "wolverine-wbc": {
+        # wolverine-wbc DaemonSet — the omni-wbc whole-body-controller C++
+        # 1 kHz DLT inference node (foundation.bot/has-wbc gated, default-
+        # off). SINGLE self-contained image: the node binary +
+        # libonnxruntime + the baked policy.onnx / drive_pack.npz (no
+        # separate models image, no load init container). omni-wbc
+        # bin/release.sh publishes vX.Y.Z[-beta.N] under the docker-
+        # versioning standard; the runtime is arm64 (Thor). CPU-only — no
+        # GPU / runtimeClassName.
+        "stack": "core",
+        "manifest_image": "foundationbot/wolverine-dma-inference-cpp",
     },
 }
 
@@ -2738,23 +2754,25 @@ def cmd_validate(cfg: dict) -> int:
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
                     )
 
-            # Mutual exclusion: positronic-control, phantom-locomotion, and
-            # phantom-sonic are competing workloads — each drives /desired,
-            # so at most ONE may be enabled per robot. has-positronic
-            # defaults to "true" (the cluster phase reconciler injects it on
-            # every robot unless explicitly set false), so operators
-            # enabling locomotion or sonic MUST also explicitly disable
-            # positronic — otherwise both would render and fight for the
-            # robot.
+            # Mutual exclusion: positronic-control, phantom-locomotion,
+            # phantom-sonic, and wolverine-wbc are competing workloads — each
+            # drives /desired, so at most ONE may be enabled per robot.
+            # has-positronic defaults to "true" (the cluster phase reconciler
+            # injects it on every robot unless explicitly set false), so
+            # operators enabling locomotion, sonic, or wbc MUST also
+            # explicitly disable positronic — otherwise both would render and
+            # fight for the robot.
             effective_pos = nl.get("foundation.bot/has-positronic", "true")
             effective_loc = nl.get("foundation.bot/has-locomotion", "false")
             effective_sonic = nl.get("foundation.bot/has-sonic", "false")
+            effective_wbc = nl.get("foundation.bot/has-wbc", "false")
             enabled_drivers = [
                 label
                 for label, eff in (
                     ("foundation.bot/has-positronic", effective_pos),
                     ("foundation.bot/has-locomotion", effective_loc),
                     ("foundation.bot/has-sonic", effective_sonic),
+                    ("foundation.bot/has-wbc", effective_wbc),
                 )
                 if eff == "true"
             ]
@@ -2779,8 +2797,9 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(
                         "nodeLabels: the robot-driving workloads "
                         "foundation.bot/has-positronic, "
-                        "foundation.bot/has-locomotion and "
-                        "foundation.bot/has-sonic are mutually exclusive — "
+                        "foundation.bot/has-locomotion, "
+                        "foundation.bot/has-sonic and "
+                        "foundation.bot/has-wbc are mutually exclusive — "
                         f"only one may be \"true\" (got: "
                         f"{', '.join(enabled_drivers)})"
                     )

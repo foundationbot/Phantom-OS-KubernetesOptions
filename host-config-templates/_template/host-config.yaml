@@ -157,6 +157,14 @@ stacks:
 #                          uses foundationbot/okvis2x-models. busybox bundle of
 #                          the SLAM model weights (~3.6 GB). Content-addressed +
 #                          published by CircleCI's build-models job.
+#   wolverine-wbc          core stack — wolverine-wbc DaemonSet (omni-wbc
+#                          whole-body controller, has-wbc gated, default-off).
+#                          SINGLE self-contained image (node binary +
+#                          libonnxruntime + baked policy.onnx/drive_pack.npz);
+#                          manifest uses foundationbot/wolverine-dma-inference-cpp.
+#                          omni-wbc bin/release.sh publishes vX.Y.Z[-beta.N];
+#                          runtime is arm64 (Thor). Only pin on hosts that opt
+#                          in via nodeLabels has-wbc: 'true'.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -170,6 +178,12 @@ images:
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
   #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
+  # wolverine-wbc is default-off (nodeLabels has-wbc: 'false'); uncomment and
+  # pin the omni-wbc release tag only on the hardware-test host that opts in.
+  # The hardware target is Thor, so the published image is arm64. Until the
+  # WBC ship gate is green the release is -beta.N (see omni-wbc bin/release.sh).
+  # wolverine-wbc:
+  #   image: foundationbot/wolverine-dma-inference-cpp:v1.0.0-beta.1
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -652,6 +666,9 @@ nodeLabels:
   # phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with
   # has-locomotion and has-positronic)
   foundation.bot/has-sonic: 'false'
+  # wolverine-wbc DaemonSet (omni-wbc whole-body controller, C++ 1 kHz DLT
+  # node; mutually exclusive with has-positronic, has-locomotion, has-sonic)
+  foundation.bot/has-wbc: 'false'
   # dma-recorder DaemonSet (dma-streams)
   foundation.bot/has-recorder: 'true'
   # cpp-robot-state-estimator DaemonSet
