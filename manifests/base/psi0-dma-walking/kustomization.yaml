@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# psi0-dma-walking DaemonSet — gated on foundation.bot/has-psi-dma-walking.
+# The DMA-plane Ψ₀ Early-fan walking controller (Psi0-VLA spec 013). Mutually
+# exclusive with has-sonic / has-locomotion / has-positronic (host-config
+# validator enforces — it drives /desired). See psi0-dma-walking.yaml.
+resources:
+  - psi0-dma-walking.yaml
