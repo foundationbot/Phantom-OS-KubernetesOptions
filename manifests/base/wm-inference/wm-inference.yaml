@@ -4,16 +4,19 @@
 #
 # What it does: reads camera frames from the DMA.video shm rings, runs
 # the frozen vision + text encoders and the per-task predictor, and
-# publishes z_ref goals to the action-solver (positronic-control) over
-# POSIX shm rings (/wm_zref_req, /wm_zref_resp) on the shared host
-# /dev/shm.
+# publishes z_ref goals to the action-solver over POSIX shm rings
+# (/wm_zref_req, /wm_zref_resp) on the shared host /dev/shm. The
+# action-solver (the z_ref consumer) is a SEPARATE workload from
+# positronic-control / phantom-locomotion / phantom-sonic and from the
+# PSI0 VLA — it must be co-located on the same node to share the shm.
 #
-# Relationship to the control brain: wm-inference is a DEPENDENCY of
-# positronic-control (it FEEDS positronic z_ref), NOT a competitor for
-# /desired. It is therefore NOT part of the positronic/locomotion/sonic
-# mutual-exclusion group — it co-schedules alongside whichever control
-# brain is active. Gate it with its own foundation.bot/has-wm-inference
-# label; leave the exclusion validator untouched.
+# Relationship to the control brain: wm-inference FEEDS the action-solver
+# (z_ref provider); it does NOT drive /desired, so it is NOT a competitor
+# of positronic-control / phantom-locomotion / phantom-sonic and is NOT
+# part of their mutual-exclusion group — it co-schedules alongside its
+# consumer / whichever control brain is active. Gate it with its own
+# foundation.bot/has-wm-inference label; leave the exclusion validator
+# untouched.
 #
 # A DaemonSet (not a Deployment) for symmetry with positronic-control:
 # gating on a nodeSelector label means a robot that opts out gets zero
@@ -54,8 +57,8 @@ spec:
       labels:
         app: wm-inference
     spec:
-      # Own gating label — co-schedules with the active control brain;
-      # NOT in the /desired mutual-exclusion group (see header). The
+      # Own gating label — co-schedules with the action-solver (its z_ref
+      # consumer); NOT in the /desired mutual-exclusion group (see header). The
       # robot=true guard (carried by every robot DaemonSet) keeps the
       # GPU/camera-bound pod off non-robot nodes even if the feature
       # label is mis-applied.
