@@ -6,7 +6,7 @@ Architecture: @ARCH@
 Maintainer: @MAINTAINER@
 Installed-Size: @INSTALLED_SIZE@
 Depends: python3, bash (>= 4), curl, jq, git, unzip, ca-certificates
-Recommends: pciutils, skopeo, docker.io, rsync
+Recommends: pciutils, skopeo, docker.io
 Homepage: https://github.com/foundationbot/Phantom-OS-KubernetesOptions
 Description: PhantomOS bootstrap scripts and manifests for k0s
  Ships the Phantom-OS-KubernetesOptions tree under
