@@ -316,6 +316,7 @@ SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
+SKIP_GAIA_HOST=0
 SKIP_NVIDIA=0
 NO_TAILSCALE=0
 
@@ -373,6 +374,7 @@ while [ $# -gt 0 ]; do
     --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
+    --gaia-host)         SELECTED_PHASES+=(gaia-host); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
@@ -401,6 +403,7 @@ while [ $# -gt 0 ]; do
                          SKIP_CPU_ISOLATION=1; shift ;;
     --skip-log-management)
                          SKIP_LOG_MANAGEMENT=1; shift ;;
+    --skip-gaia-host)    SKIP_GAIA_HOST=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
     --with-ethercat-install|--enable-ethercat-install)
@@ -597,6 +600,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
   SKIP_INSTALL_DMA_ETHERCAT=1
+  SKIP_GAIA_HOST=1
   # Pre-phases are off by default in selected-phases mode: the
   # operator asked for ONE thing and shouldn't get a fleet-wide pod
   # purge / docker stop / service halt as a side effect. Full
@@ -617,6 +621,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
+      gaia-host)         SKIP_GAIA_HOST=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
@@ -636,7 +641,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|ecat-interface) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -3434,6 +3439,30 @@ EOF
   fi
 }
 
+# ---- phase: gaia host services (outside k0s) --------------------------
+# The gaia RAG/incident services (docker run foundationbot/gaia-tools) and the
+# GPU/NVMAP node-exporter textfile collectors run as HOST systemd units — they
+# can't be ArgoCD/k8s workloads. install-gaia-host-services.sh drops the units +
+# scripts (host-services/gaia/) and enables them. Idempotent; runs after the
+# cluster/gitops phases so the gaia backend (Loki/Prometheus) it talks to is up.
+gaia_host() {
+  if [ "${SKIP_GAIA_HOST:-0}" = 1 ]; then
+    phase "phase: gaia host services  (skipped — --skip-gaia-host)"
+    return
+  fi
+  phase "phase: gaia host services"
+  local installer="$REPO_ROOT/scripts/install-gaia-host-services.sh"
+  if [ ! -f "$installer" ]; then
+    info "no $installer — skipping gaia host services"
+    return
+  fi
+  if DRY_RUN="$DRY_RUN" bash "$installer"; then
+    pass "gaia host services installed"
+  else
+    fail "install-gaia-host-services.sh"
+  fi
+}
+
 # ---- phase 12: install dma-ethercat (gates phase 13) -------------------
 
 # Install the dma-ethercat .deb baked into the foundationbot/dma-ethercat
@@ -5456,6 +5485,7 @@ print_plan() {
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  9  ecat-interface (gates 10)"       "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
+  _step $([ "${SKIP_GAIA_HOST:-0}"       = 0 ] && echo 1 || echo 0) "phase     gaia-host services (outside k0s)" "--skip-gaia-host"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
@@ -5527,6 +5557,7 @@ gitops             ; guard
 argocd_admin       ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
+gaia_host          ; guard
 
 summary
 exit "$FAIL"

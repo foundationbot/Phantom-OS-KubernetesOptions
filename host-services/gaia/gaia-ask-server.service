@@ -1,0 +1,23 @@
+[Unit]
+Description=gaia ask-server (RAG/persona HTTP API :8200) [gaia-tools image]
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f gaia-ask-server
+ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:gaia-llm-rag
+ExecStart=/usr/bin/docker run --rm --name gaia-ask-server --network host \
+  -e OLLAMA_HOST=http://localhost:11434 \
+  -e LOKI_URL=http://localhost:10310 \
+  -e VAULT_DIR=/data/incidents/vault \
+  -e VAULT_DB=/data/incidents/vault-index.db \
+  -e EVENTS_ARCHIVE=/data/logs/boundary.jsonl \
+  -v /data:/data \
+  -e PROM_URL=http://localhost:10390 -e JAEGER_URL=http://localhost:10386 \
+  foundationbot/gaia-tools:gaia-llm-rag python3 ask_server.py --host 0.0.0.0 --port 8200
+ExecStop=/usr/bin/docker stop gaia-ask-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

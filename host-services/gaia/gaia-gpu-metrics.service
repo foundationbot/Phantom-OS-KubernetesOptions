@@ -1,0 +1,23 @@
+# gaia — host-side GPU metrics collector (nvidia-smi -> node-exporter textfile)
+# Lives in docker/collectors/ with the other data collectors. Install per robot
+# (from docker/collectors/):
+#   install -m0755 gaia-gpu-metrics.sh /usr/local/bin/gaia-gpu-metrics.sh
+#   install -m0644 gaia-gpu-metrics.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now gaia-gpu-metrics
+[Unit]
+Description=gaia GPU metrics (nvidia-smi -> node-exporter textfile)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Environment=INTERVAL=5
+ExecStart=/usr/local/bin/gaia-gpu-metrics.sh
+Restart=always
+RestartSec=5
+Nice=10
+# Stay on the housekeeping cores, off the RT-isolated cores (10-13).
+CPUAffinity=0-9
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

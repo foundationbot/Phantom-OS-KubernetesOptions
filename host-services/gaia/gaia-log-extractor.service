@@ -1,0 +1,22 @@
+[Unit]
+Description=gaia log-event-extractor (Loki -> boundary events) [gaia-tools image]
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f gaia-log-extractor
+ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:gaia-llm-rag
+ExecStart=/usr/bin/docker run --rm --name gaia-log-extractor --network host \
+  -e OLLAMA_HOST=http://localhost:11434 \
+  -e LOKI_URL=http://localhost:10310 \
+  -e VAULT_DIR=/data/incidents/vault \
+  -e VAULT_DB=/data/incidents/vault-index.db \
+  -e EVENTS_ARCHIVE=/data/logs/boundary.jsonl \
+  -v /data:/data \
+  foundationbot/gaia-tools:gaia-llm-rag python3 log_event_extractor.py --archive /data/logs/boundary.jsonl
+ExecStop=/usr/bin/docker stop gaia-log-extractor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
