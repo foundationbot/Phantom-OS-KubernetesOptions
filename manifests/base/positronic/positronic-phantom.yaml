@@ -1,7 +1,10 @@
-# positronic-phantom DaemonSet — synced verbatim from the live mk11test k0s
-# deployment (k0s kubectl -n positronic get ds positronic-phantom), sanitized of
-# cluster-runtime fields. This is the working beta config (image + hostPath /src
-# from /root/foundation/positronic_control + models from /root/phantom-models-merged).
+# positronic-phantom DaemonSet — based on the live mk11test k0s deployment
+# (k0s kubectl -n positronic get ds positronic-phantom), sanitized of cluster-runtime
+# fields, with ONE change: positronic_control is PULLED — /src and /root/.ihmc come
+# from the image (built with the code baked in, e.g. docker/phantom/production.Dockerfile
+# `COPY ./ /src`), NOT bind-mounted from /root/foundation/positronic_control. So the
+# image tag below MUST carry the code (your per-branch/beta build). Models stay a
+# hostPath (/root/phantom-models-merged); /data, /dev, /dev/shm etc. remain host mounts.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -64,10 +67,8 @@ spec:
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:
-        - mountPath: /src
-          name: src
-        - mountPath: /root/.ihmc
-          name: ihmc
+        # /src (positronic_control code) + /root/.ihmc come from the IMAGE now
+        # (pulled), not a host clone — see header.
         - mountPath: /root/models
           name: models
         - mountPath: /root/.cache/torch/hub
@@ -102,14 +103,8 @@ spec:
       securityContext: {}
       terminationGracePeriodSeconds: 30
       volumes:
-      - hostPath:
-          path: /root/foundation/positronic_control
-          type: Directory
-        name: src
-      - hostPath:
-          path: /root/foundation/positronic_control/workspace/.ihmc
-          type: DirectoryOrCreate
-        name: ihmc
+      # NOTE: no `src` / `ihmc` hostPath — positronic_control code is baked into
+      # the image (pulled), not bind-mounted from /root/foundation/positronic_control.
       - hostPath:
           path: /root/phantom-models-merged
           type: Directory
