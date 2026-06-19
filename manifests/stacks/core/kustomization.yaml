@@ -33,3 +33,4 @@ resources:
   - ../../base/ik-mk2
   - ../../base/cpp-robot-state-estimator
   - ../../base/okvis2x
+  - ../../base/wm-inference
