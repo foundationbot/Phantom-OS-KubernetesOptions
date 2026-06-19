@@ -1,0 +1,237 @@
+# =============================================================================
+# gaia — OpenTelemetry Collector configuration
+# =============================================================================
+#
+# Single on-robot ingest point. One pipeline in, the right store per signal:
+#   - logs    -> parsed/severity-tagged, archived to file, AND turned into
+#                Prometheus counters (errors/warnings) via the `count` connector
+#   - traces  -> forwarded to the existing Jaeger, with spanmetrics -> Prometheus
+#   - metrics -> log-derived + span-derived metrics exposed for the EXISTING
+#                Prometheus to scrape (system metrics stay with node-exporter /
+#                process-exporter — we do NOT duplicate them here)
+#
+# Deployment target: NVIDIA Jetson Thor, Ubuntu 24.04 / JetPack 7, aarch64.
+# Runs as an arm64 container via ../docker/docker-compose.yml. The collector
+# image (otel/opentelemetry-collector-contrib) is multi-arch and ships a native
+# linux/arm64 variant, so no QEMU/emulation is involved on the Jetson.
+#
+# Fully Docker-based: all robot services (phantom apps, dma-recorder,
+# rerun-streamer, the supervisord-managed containers) log to Docker's json-file
+# driver, and the filelog receiver below tails those logs. There is no journald
+# receiver — the contrib image ships no journalctl, and in an all-container
+# deployment the container logs ARE the source of truth. (To also capture host
+# systemd logs, forward journald -> syslog/OTLP; see ../README.md.)
+#
+# Reuses the Prometheus already stood up by the Jetson logging setup (port 9090)
+# and the existing Jaeger. See ../README.md.
+# =============================================================================
+
+receivers:
+  # OTLP — instrumented apps (recorder/streamer/ROS2 nodes) push traces/metrics.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:10317
+      http:
+        endpoint: 0.0.0.0:10318
+
+  # filelog — every robot service runs as a Docker container and logs to the
+  # json-file driver. Tail those logs (the host /var/lib/docker/containers is
+  # bind-mounted read-only into the collector container, see docker-compose.yml).
+  filelog/dma:
+    include:
+      - /var/lib/docker/containers/*/*.log
+    include_file_path: true
+    operators:
+      # Docker json-file wrapper -> pull out the real log line.
+      - type: json_parser
+        parse_from: body
+        parse_to: attributes.docker
+      - type: move
+        from: attributes.docker.log
+        to: body
+        if: 'attributes.docker?.log != nil'
+      # Tag each record with its container id (the json-file log carries no
+      # name; map id -> name with `docker ps --no-trunc`). Lets you filter the
+      # archive per-container and group log-derived metrics.
+      - type: regex_parser
+        parse_from: attributes["log.file.path"]
+        regex: '/containers/(?P<container_id>[0-9a-f]{12})'
+        parse_to: attributes
+      # Classify recorder/streamer output (e.g. "[recording] ...", "Warning: ...",
+      # "WARNING:", "Failed ...").
+      - type: add
+        field: attributes.severity_text
+        value: ERROR
+        if: 'body matches "(?i)(^|\\s)(error|failed|fatal)\\b"'
+      - type: add
+        field: attributes.severity_text
+        value: WARN
+        if: 'attributes.severity_text == nil and body matches "(?i)warning"'
+      - type: add
+        field: attributes.severity_text
+        value: INFO
+        if: 'attributes.severity_text == nil'
+      # Tag the component so log-derived metrics and incident notes can group.
+      - type: add
+        field: attributes.component
+        value: recorder
+        if: 'body matches "\\[recording\\]"'
+
+  # k0s pod logs (containerd/CRI). The robot's k8s workloads (gaia/positronic/
+  # argus/dma-video) log here under /var/log/pods, NOT to /var/lib/docker/containers.
+  # The `container` operator auto-detects the CRI format and tags
+  # k8s.namespace.name / k8s.pod.name / k8s.container.name from the file path.
+  filelog/k8s:
+    include:
+      - /var/log/pods/*/*/*.log
+    include_file_path: true
+    operators:
+      - type: container
+        add_metadata_from_filepath: true
+
+  # k8s events — REPLACES the docker-events-watcher under k0s. Watches core v1
+  # Events cluster-wide via the collector's ServiceAccount (see RBAC in
+  # otel-collector.yaml) and emits each as an OTel log → Loki + archive. The
+  # event carries `reason` (OOMKilled / BackOff / Failed / Unhealthy / Killing …)
+  # + the involved object (namespace/pod/kind); gaia ingest.py maps `reason` → the
+  # event_code vocabulary on read. The old docker.sock watcher was blind to
+  # containerd/k0s pods — these events are the k8s-native lifecycle source.
+  k8sobjects:
+    auth_type: serviceAccount
+    objects:
+      - name: events
+        mode: watch
+
+processors:
+  batch:
+    timeout: 5s
+  # The count connector emits DELTA-temporality sums, but the prometheus exporter
+  # only exposes CUMULATIVE — so delta metrics (dma_log_records_total) are silently
+  # dropped (contrib issues #30203 / #37164). Convert delta→cumulative before the
+  # exporter. Pass-through for already-cumulative metrics (spanmetrics) + gauges.
+  deltatocumulative: {}
+  # Stamp every record with where it came from. host.name lets the Obsidian
+  # incident notes and Grafana line up to a specific robot.
+  resourcedetection:
+    detectors: [env, system]
+    system:
+      hostname_sources: [os]
+  resource:
+    attributes:
+      - key: service.namespace
+        value: dma.streams
+        action: upsert
+      - key: deployment.environment
+        value: robot
+        action: upsert
+
+connectors:
+  # Span-derived RED metrics -> Prometheus. Mirrors the existing tracing
+  # otel-config so dashboards stay consistent.
+  spanmetrics:
+    namespace: dma_tracing
+    histogram:
+      unit: s
+    # service.name, span.name, span.kind and status.code are all BUILT-IN
+    # spanmetrics dimensions; the `dimensions:` list is only for EXTRA ones, and
+    # repeating a built-in fails validation ("duplicate dimension name"). The
+    # defaults are exactly what we want, so no extra dimensions are configured.
+    exemplars:
+      enabled: true
+    metrics_flush_interval: 15s
+
+  # Log-derived metrics: count log records by severity/component so the
+  # EXISTING Prometheus can alert on error/warning rates without storing the
+  # raw log text. This is how "logs" feed the time-series DB.
+  count:
+    logs:
+      dma_log_records_total:
+        description: Count of log records by severity and component
+        # Every key needs a default_value: the count connector matches log-record
+        # ATTRIBUTES and DROPS any record missing a listed key. `severity_text` is
+        # a top-level record field (not an attribute) so it never matches → without
+        # a default the whole metric silently zeroes; `component`/`code` are absent
+        # on container/vector logs. Defaults make every record count.
+        attributes:
+          - key: severity_text
+            default_value: ""
+          - key: component
+            default_value: ""
+          # Boundary-event code (control-event spine), bounded cardinality (~7).
+          - key: code
+            default_value: ""
+
+exporters:
+  # Scraped by the existing Prometheus (add the job in ./prometheus-scrape.yml).
+  prometheus:
+    endpoint: 0.0.0.0:10389
+    namespace: dma_debug
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Forward traces to the existing Jaeger. On the robot this is the central
+  # host; override via OTEL_JAEGER_ENDPOINT env in the systemd unit.
+  otlp/jaeger:
+    endpoint: ${env:OTEL_JAEGER_ENDPOINT:-jaeger:4317}
+    tls:
+      insecure: true
+
+  # Durable structured-log archive that the Obsidian ingester (tools/ingest.py)
+  # reads to build incident notes. Self-rotated to ~4.5 GB (500 MB x 9 files)
+  # and 14 days, whichever comes first — the bulk of gaia's ~5 GB log budget
+  # (the rest is the stack containers' own rotated logs, see docker-compose.yml).
+  file/archive:
+    path: /var/log/dma-debug/dma-logs.jsonl
+    rotation:
+      max_megabytes: 500
+      max_backups: 8
+      max_days: 14
+
+  debug:
+    verbosity: normal
+
+  # Ship logs to Loki for a searchable UI in Grafana (log BODIES, filterable by
+  # service.name etc.). otlphttp appends /v1/logs → Loki's native OTLP endpoint.
+  # Independent of file/archive: if Loki is down, retry/queue absorbs the gap and
+  # the archive still gets every record (one exporter failing can't block another).
+  otlphttp/loki:
+    endpoint: ${env:OTEL_LOKI_ENDPOINT:-http://loki:3100/otlp}
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    # Quiet the collector's own INFO chatter (e.g. "Started watching file").
+    # The collector tails /var/lib/docker/containers including its OWN container,
+    # so INFO self-logs would be re-ingested into the archive. warn = near-silent.
+    logs:
+      level: warn
+    metrics:
+      level: basic
+      # Self-telemetry metrics on :8890 (the default :8888 collides with mediamtx HLS).
+      # 0.123 deprecates metrics.address in favor of readers.
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8890
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resourcedetection, resource, batch]
+      exporters: [spanmetrics, otlp/jaeger]
+    logs:
+      receivers: [otlp, filelog/dma, filelog/k8s, k8sobjects]
+      processors: [resourcedetection, resource, batch]
+      # No `debug` exporter here: it writes log bodies to the collector's own
+      # stdout, which the filelog receiver then re-tails — a feedback loop that
+      # pollutes the archive.
+      exporters: [count, file/archive, otlphttp/loki]
+    metrics:
+      receivers: [otlp, spanmetrics, count]
+      # deltatocumulative FIRST: count emits delta sums; the prometheus exporter
+      # needs cumulative or it drops them (contrib #30203/#37164).
+      processors: [deltatocumulative, resourcedetection, resource, batch]
+      exporters: [prometheus]

@@ -1,0 +1,108 @@
+# dma-otel-collector — single on-robot OTLP ingest + container-log tailer.
+# Translated from gaia/docker/docker-compose.yml `dma-otel-collector`.
+# hostNetwork so the dma-side bridges (deb, host docker) + host OTLP producers
+# reach it on localhost:10317/10318; reads every container's json-file logs and
+# writes the durable JSONL archive. CPU pinning to housekeeping cores is handled
+# at the node level (kubepods cpuset), as for the other core-stack workloads.
+# RBAC for the k8sobjects receiver (watches core v1 Events cluster-wide — the
+# k8s-native replacement for the docker-events-watcher). The collector runs under
+# this ServiceAccount; without the ClusterRole the receiver gets 403 and no events
+# flow.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dma-otel-collector
+  namespace: gaia
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gaia-otel-collector-events
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gaia-otel-collector-events
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gaia-otel-collector-events
+subjects:
+  - kind: ServiceAccount
+    name: dma-otel-collector
+    namespace: gaia
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dma-otel-collector
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dma-otel-collector
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: dma-otel-collector
+    spec:
+      serviceAccountName: dma-otel-collector
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      # Run as root: the filelog receiver reads root-owned container logs and the
+      # file/archive exporter writes the root-owned hostPath archive dir.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: dma-otel-collector
+          image: otel/opentelemetry-collector-contrib:0.123.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config=/etc/otelcol/otel-collector-config.yaml"]
+          env:
+            # hostNetwork: reach the bundled jaeger/loki on localhost (jaeger keeps
+            # its internal OTLP 4317; loki keeps 3100). Receiver moved to 10317/10318.
+            - { name: OTEL_JAEGER_ENDPOINT, value: "localhost:4317" }
+            - { name: OTEL_LOKI_ENDPOINT,   value: "http://localhost:10310/otlp" }
+          ports:
+            - { name: otlp-grpc, containerPort: 10317 }
+            - { name: otlp-http, containerPort: 10318 }
+            - { name: prom-exp,  containerPort: 10389 }
+          volumeMounts:
+            - { name: otel-config, mountPath: /etc/otelcol }
+            - { name: docker-containers, mountPath: /var/lib/docker/containers, readOnly: true }
+            - { name: pod-logs, mountPath: /var/log/pods, readOnly: true }
+            - { name: archive, mountPath: /var/log/dma-debug }
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "512Mi" }
+      volumes:
+        - name: otel-config
+          configMap:
+            name: gaia-otel-config
+        - name: docker-containers
+          hostPath:
+            path: /var/lib/docker/containers
+            type: Directory
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: archive
+          hostPath:
+            path: /data/gaia/archive
+            type: DirectoryOrCreate

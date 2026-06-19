@@ -1,0 +1,40 @@
+# =============================================================================
+# process-exporter groupings for the gaia stack (scraped by prometheus.yml).
+# The `name` becomes the `groupname` label on namedprocess_* metrics. We template
+# it FROM THE PROCESS so every process shows by its real NAME (dma_main, java,
+# gunicorn, ...) instead of a coarse class lump.
+#
+# MATCHING: first matching entry wins (top to bottom). Matcher types:
+#   comm:    /proc/<pid>/comm (process name, truncated to 15 chars)
+#   exe:     argv[0] — basename match (full path if it contains '/')
+#   cmdline: list of regexes; ALL must match the full command line
+# Template fields for `name`: {{.Comm}} {{.ExeBase}} {{.ExeFull}} {{.Matches.x}}
+# =============================================================================
+process_names:
+
+  # --- gaia's own collector scripts: kept AGGREGATED (watch the watcher) ------
+  # tegra-metrics.sh + gaia-gpu-metrics.sh + jetson-nvmap-mem-textfile.sh.
+  # num_procs drops -> a collector died (cross-check freshness with
+  # `time() - node_textfile_mtime_seconds`). Listed first so it isn't split up.
+  - name: "gaia_collectors"
+    cmdline:
+      - "tegra-metrics|gaia-gpu-metrics|jetson-nvmap-mem"
+
+  # --- known robot binaries: name by EXE (full, not the 15-char comm) ---------
+  # Matched first so their long names aren't truncated by {{.Comm}} below.
+  - name: "{{.ExeBase}}"
+    exe:
+      - "dma_main"                 # EtherCAT master (dma-ethercat.service)
+      - "dma_recorder"             # recorder
+      - "aersnal_variable_server"  # variable server
+      - "PhantomJavaPolicyRunner"  # phantom policy (native launcher hosting a JVM)
+
+  # --- everything else: one series PER PROCESS, named by its comm -------------
+  # gunicorn / uvicorn / python3 / java / mediamtx / ... each get their own
+  # groupname. `cmdline: ["."]` matches userspace procs only (kernel threads have
+  # an empty cmdline). The dashboards template on `groupname`, so they pick these
+  # up automatically. NOTE: higher cardinality than the old class lumps — fine
+  # for one robot; the first thing to trim if you ever fleet-scale Prometheus.
+  - name: "{{.Comm}}"
+    cmdline:
+      - "."

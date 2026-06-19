@@ -1,0 +1,62 @@
+# jaeger — trace store (persistent Badger) + UI on host :10386. Keeps its
+# internal OTLP receiver on 4317/4318 (the collector forwards traces there via
+# OTEL_JAEGER_ENDPOINT=localhost:4317). Translated from compose `jaeger`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      # root so Badger can own the hostPath store (compose used a named volume).
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.57
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: COLLECTOR_OTLP_ENABLED,        value: "true" }
+            - { name: SPAN_STORAGE_TYPE,             value: badger }
+            - { name: BADGER_EPHEMERAL,              value: "false" }
+            - { name: BADGER_DIRECTORY_VALUE,        value: /badger/data }
+            - { name: BADGER_DIRECTORY_KEY,          value: /badger/key }
+            - { name: BADGER_SPAN_STORE_TTL,         value: "72h" }
+            # UI/query on the established host port (compose mapped 10386->16686).
+            - { name: QUERY_HTTP_SERVER_HOST_PORT,   value: ":10386" }
+          ports:
+            - { name: ui,        containerPort: 10386 }
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+          livenessProbe:
+            httpGet: { path: /, port: 10386 }
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /badger }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+      volumes:
+        - name: data
+          hostPath:
+            path: /data/gaia/jaeger
+            type: DirectoryOrCreate

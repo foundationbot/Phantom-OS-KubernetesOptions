@@ -1,0 +1,91 @@
+# =============================================================================
+# gaia — Vector shipper: host/app logs -> the gaia OpenTelemetry collector
+# =============================================================================
+#
+# Used two ways:
+#   1) the bundled `vector` service in docker/docker-compose.yml (reads the
+#      Jetson host journal and ships it to dma-otel-collector), and
+#   2) as a sidecar you drop into another app's / host's compose — just point
+#      the sink URI at wherever the collector is reachable.
+#
+# NOT needed for plain container stdout/stderr: the collector's filelog receiver
+# already tails every container's json-file logs. Use this for host
+# systemd/journald or other sources the collector can't reach.
+#
+# NOTE ON TAGGING: logs arriving over OTLP skip the collector's filelog severity/
+# component operators, so this sets severity_text + component itself (from
+# journald PRIORITY and _SYSTEMD_UNIT) to keep the count connector
+# (dma_debug_dma_log_records_total) and the dashboards consistent.
+#
+# Vector's `opentelemetry` sink is an HTTP/OTLP wrapper; field names/options can
+# vary by Vector version — validate against the docs:
+#   https://vector.dev/docs/reference/configuration/sinks/opentelemetry/
+# =============================================================================
+
+sources:
+  host_journald:
+    type: journald
+    current_boot_only: true
+    # Containerized: the host journal is bind-mounted read-only here, and
+    # journalctl reads it via --directory (set by this option).
+    journal_directory: /var/log/journal
+
+transforms:
+  to_otel:
+    type: remap
+    inputs: [host_journald]
+    # The `otlp` codec requires each event to already be an OTLP logs envelope
+    # (resourceLogs -> resource -> scopeLogs -> logRecords), so build it here.
+    # Field accesses are infallible (null when absent) -> coalesce with `||`,
+    # NOT `??` (error-coalescing), which newer VRL rejects on non-failing exprs.
+    source: |
+      # journald PRIORITY (0 emerg .. 7 debug) -> OTLP severity
+      prio = to_int(.PRIORITY) ?? 6
+      sev_text = if prio <= 3 { "ERROR" } else if prio == 4 { "WARN" } else { "INFO" }
+      sev_num  = if prio <= 3 { 17 }      else if prio == 4 { 13 }     else { 9 }
+      component = ."_SYSTEMD_UNIT" || .SYSLOG_IDENTIFIER || "host"
+      hostname  = ."_HOSTNAME" || .host || "unknown"
+      body_str  = to_string(.message) ?? ""
+      # timeUnixNano MUST be a number (ns since epoch).
+      ts_nano   = to_unix_timestamp!(.timestamp || now(), unit: "nanoseconds")
+
+      . = {
+        "resourceLogs": [{
+          "resource": {
+            "attributes": [
+              { "key": "host.name",         "value": { "stringValue": hostname } },
+              { "key": "service.name",      "value": { "stringValue": component } },
+              { "key": "service.namespace", "value": { "stringValue": "dma.streams" } }
+            ]
+          },
+          "scopeLogs": [{
+            "scope": { "name": "gaia.vector.journald" },
+            "logRecords": [{
+              "timeUnixNano":   ts_nano,
+              "severityText":   sev_text,
+              "severityNumber": sev_num,
+              "body": { "stringValue": body_str },
+              # keep component + severity_text as record attributes so the
+              # collector's `count` connector can group on them.
+              "attributes": [
+                { "key": "component",     "value": { "stringValue": component } },
+                { "key": "severity_text", "value": { "stringValue": sev_text } }
+              ]
+            }]
+          }]
+        }]
+      }
+
+sinks:
+  to_gaia_collector:
+    type: opentelemetry
+    inputs: [to_otel]
+    protocol:
+      type: http
+      uri: http://localhost:10318/v1/logs
+      method: post
+      encoding:
+        # `otlp` = built-in OTLP protobuf encoding (supports native batching).
+        # NOT `protobuf` — that's for custom messages and needs desc_file/
+        # message_type, which fails here with "missing field `protobuf`".
+        codec: otlp

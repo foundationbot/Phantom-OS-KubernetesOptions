@@ -1,0 +1,56 @@
+# =============================================================================
+# Prometheus config for the gaia all-in-one stack (docker/docker-compose.yml).
+#
+# Scrapes:
+#   - dma-otel-collector:8889  log-derived + span-derived metrics
+#       dma_debug_dma_log_records_total{severity_text,component}  (log-derived)
+#       dma_debug_dma_tracing_*                                   (spanmetrics)
+#   - process-exporter:9256    per-process metrics, grouped (see process-exporter.yml)
+#
+# (Host system metrics via node-exporter are intentionally NOT scraped here — see
+# the metrics notes; re-add a 'node' job + the service to enable them.)
+#
+# Targets use in-compose service names (resolved on the gaia_default network);
+# the exporter publishes no host port. If you instead run an EXISTING Prometheus,
+# don't use this file — append ../otel/prometheus-scrape.yml to it.
+# =============================================================================
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+# Alerting/recording rules. Bridge-liveness staleness lives here (dma_docker_logs.md
+# #1): the dma-side bridges push a heartbeat gauge; this fires when it goes stale.
+# Mounted read-only into the prometheus container (see docker-compose.yml). No
+# Alertmanager is wired yet — alerts surface in the Prometheus UI / Grafana.
+rule_files:
+  - "prometheus-rules.yml"
+
+scrape_configs:
+  - job_name: 'dma-debug-otel'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:10389']
+
+  # DMA shared-memory queue metrics (dma_shmq_*). The dma-side
+  # dma_common.shm_stats_exporter (run as the gaia `shm-stats-exporter` service)
+  # samples every /dev/shm queue header and serves native Prometheus text.
+  - job_name: 'shm-stats'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:9300']
+
+  # Per-process metrics, grouped by process-exporter.yml (ROS2/camera/etc.).
+  - job_name: 'process-exporter'
+    scrape_interval: 5s
+    scrape_timeout: 500ms
+    static_configs:
+      - targets: ['localhost:9256']
+
+  # Host system metrics. Tight timing so a slow collector fails fast as we add
+  # them one by one (the default Jetson set hangs; see node-exporter command).
+  - job_name: 'node'
+    scrape_interval: 5s
+    scrape_timeout: 500ms
+    static_configs:
+      - targets: ['localhost:9101']

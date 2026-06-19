@@ -1,0 +1,25 @@
+# =============================================================================
+# Grafana datasource provisioning for the gaia all-in-one stack.
+# Auto-loaded at startup (mounted at /etc/grafana/provisioning).
+# =============================================================================
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus          # stable uid so provisioned dashboards bind deterministically
+    access: proxy
+    url: http://localhost:10390
+    isDefault: true
+
+  - name: Jaeger
+    type: jaeger
+    uid: jaeger
+    access: proxy
+    url: http://localhost:10386
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://localhost:10310

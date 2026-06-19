@@ -1,0 +1,43 @@
+# process-exporter — per-process metrics grouped by class (ROS2/python/camera/…)
+# via process-exporter.yml. Reads host procfs (ro). Serves :9256. Translated from
+# compose `process-exporter`.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: process-exporter
+  namespace: gaia
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  template:
+    metadata:
+      labels:
+        app: process-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      containers:
+        - name: process-exporter
+          image: ncabatoff/process-exporter:0.7.10
+          imagePullPolicy: IfNotPresent
+          args:
+            - --procfs=/host/proc
+            - --config.path=/config/process-exporter.yml
+          ports:
+            - { name: metrics, containerPort: 9256 }
+          volumeMounts:
+            - { name: proc,   mountPath: /host/proc, readOnly: true }
+            - { name: config, mountPath: /config }
+          resources:
+            requests: { cpu: "50m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+      volumes:
+        - name: proc
+          hostPath: { path: /proc, type: Directory }
+        - name: config
+          configMap:
+            name: gaia-process-exporter-config

@@ -1,0 +1,78 @@
+# gaia observability stack — k0s workloads (translated from gaia/docker/docker-compose.yml).
+# Every workload gates on foundation.bot/has-gaia=true via nodeSelector; robots
+# opt out by setting it 'false' in host-config.yaml's nodeLabels: block.
+#
+# Networking: every pod runs hostNetwork (like dma-video) so the dma-side bridges
+# (deb / host docker) and host OTLP producers reach the collector on localhost,
+# and the host exporters see real host /proc, /sys, /dev/shm. The bundled-service
+# ports were moved off compose's name-based DNS onto the established 103xx host
+# scheme inside config/ (collector OTLP 10317/10318, prometheus 10390, grafana
+# 10300, jaeger UI 10386; loki 3100 internal). CPU pinning to the housekeeping
+# cores is handled at the node level (kubepods cpuset), as for the rest of core.
+#
+# NOTE: the .rrd recorder + its retention are NOT here — they ship in
+# manifests/base/dma-streams (dma-recorder + janitor sidecar, has-recorder gate).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - otel-collector.yaml
+  - prometheus.yaml
+  - jaeger.yaml
+  - loki.yaml
+  - grafana.yaml
+  - vector.yaml
+  - node-exporter.yaml
+  - process-exporter.yaml
+  - shm-stats.yaml
+  - tegra-metrics.yaml
+
+# Config delivered as ConfigMaps generated from the gaia config tree copied under
+# config/ (rewritten for hostNetwork). Stable names (no hash suffix) so the
+# Deployments above can reference them directly.
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: gaia-otel-config
+    namespace: gaia
+    files:
+      - config/otel-collector-config.yaml
+  - name: gaia-loki-config
+    namespace: gaia
+    files:
+      - config/loki-config.yaml
+  - name: gaia-prometheus-config
+    namespace: gaia
+    files:
+      - config/prometheus.yml
+      - config/prometheus-rules.yml
+  - name: gaia-vector-config
+    namespace: gaia
+    files:
+      - config/vector.yaml
+  - name: gaia-process-exporter-config
+    namespace: gaia
+    files:
+      - config/process-exporter.yml
+  - name: gaia-tegra-script
+    namespace: gaia
+    files:
+      - config/tegra-metrics.sh
+  - name: gaia-grafana-datasources
+    namespace: gaia
+    files:
+      - config/grafana/datasources/datasources.yml
+  - name: gaia-grafana-dashboards
+    namespace: gaia
+    files:
+      - config/grafana/dashboards/dashboards.yml
+  - name: gaia-grafana-dashboards-json
+    namespace: gaia
+    files:
+      - config/grafana/dashboards/json/control.json
+      - config/grafana/dashboards/json/host.json
+      - config/grafana/dashboards/json/jetson.json
+      - config/grafana/dashboards/json/processes.json
+      - config/grafana/dashboards/json/shm_queues.json

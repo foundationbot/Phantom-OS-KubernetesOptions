@@ -1,0 +1,122 @@
+{
+  "uid": "dma-shm-queues",
+  "title": "gaia — DMA shm queues",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "templating": {
+    "list": [
+      {
+        "name": "queue",
+        "label": "queue",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(dma_shmq_write_rate_hz, queue)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "sort": 1,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Write rate (Hz)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "hertz", "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 15, "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_write_rate_hz{queue=~\"$queue\"}", "legendFormat": "{{queue}}" } ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Throughput (bytes/sec)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "Bps", "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 15, "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_bytes_per_sec{queue=~\"$queue\"}", "legendFormat": "{{queue}}" } ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Staleness (ms) — now - last_write",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100 } ] } }, "overrides": [] },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_staleness_ms{queue=~\"$queue\"}", "legendFormat": "{{queue}}" } ]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Producer LIVE (1=live)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "mappings": [ { "type": "value", "options": { "0": { "text": "STALLED", "color": "red" }, "1": { "text": "LIVE", "color": "green" } } } ], "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "colorMode": "background", "textMode": "value_and_name" },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_live{queue=~\"$queue\"}", "legendFormat": "{{queue}}" } ]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Readers (== 0 → no consumer/orphan)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "colorMode": "background", "textMode": "value_and_name" },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_readers{queue=~\"$queue\"}", "legendFormat": "{{queue}}" } ]
+    },
+    {
+      "id": 6, "type": "stat", "title": "Writes total / wraparounds",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "colorMode": "none", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_writes_total{queue=~\"$queue\"}", "legendFormat": "{{queue}} writes" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_wraparounds_total{queue=~\"$queue\"}", "legendFormat": "{{queue}} wraps" }
+      ]
+    },
+    {
+      "id": 7, "type": "gauge", "title": "/dev/shm used %",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 90 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_devshm_used_pct", "legendFormat": "/dev/shm" } ]
+    },
+    {
+      "id": 8, "type": "table", "title": "Per-queue stats (live snapshot)",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "One row per queue: instant values joined on the `queue` label. Sort/filter by any column.",
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true, "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "write (Hz)" }, "properties": [ { "id": "unit", "value": "hertz" }, { "id": "decimals", "value": 1 } ] },
+          { "matcher": { "id": "byName", "options": "bytes/s" }, "properties": [ { "id": "unit", "value": "Bps" } ] },
+          { "matcher": { "id": "byName", "options": "staleness (ms)" }, "properties": [ { "id": "unit", "value": "ms" }, { "id": "decimals", "value": 0 }, { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100 } ] } } ] },
+          { "matcher": { "id": "byName", "options": "live" }, "properties": [ { "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } }, { "id": "mappings", "value": [ { "type": "value", "options": { "0": { "text": "STALLED" }, "1": { "text": "LIVE" } } } ] } ] },
+          { "matcher": { "id": "byName", "options": "readers" }, "properties": [ { "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } ] }
+        ]
+      },
+      "options": { "showHeader": true, "footer": { "show": false }, "sortBy": [ { "displayName": "write (Hz)", "desc": true } ] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_write_rate_hz{queue=~\"$queue\"}", "instant": true, "format": "table" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_bytes_per_sec{queue=~\"$queue\"}", "instant": true, "format": "table" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_staleness_ms{queue=~\"$queue\"}", "instant": true, "format": "table" },
+        { "refId": "D", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_live{queue=~\"$queue\"}", "instant": true, "format": "table" },
+        { "refId": "E", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_readers{queue=~\"$queue\"}", "instant": true, "format": "table" },
+        { "refId": "F", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_writes_total{queue=~\"$queue\"}", "instant": true, "format": "table" },
+        { "refId": "G", "datasource": { "type": "prometheus", "uid": "prometheus" }, "editorMode": "code", "expr": "dma_shmq_wraparounds_total{queue=~\"$queue\"}", "instant": true, "format": "table" }
+      ],
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "queue", "mode": "outer" } },
+        { "id": "filterFieldsByName", "options": { "include": { "pattern": "^(queue|Value #.*)$" } } },
+        { "id": "organize", "options": {
+            "renameByName": { "queue": "queue", "Value #A": "write (Hz)", "Value #B": "bytes/s", "Value #C": "staleness (ms)", "Value #D": "live", "Value #E": "readers", "Value #F": "writes", "Value #G": "wraparounds" },
+            "indexByName": { "queue": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3, "Value #D": 4, "Value #E": 5, "Value #F": 6, "Value #G": 7 }
+        } }
+      ]
+    }
+  ]
+}
