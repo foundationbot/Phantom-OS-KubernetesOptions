@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# as-inference reuses the shared `positronic` namespace (defined by the
+# positronic base) — co-located with wm-inference; the z_ref + /as_action shm
+# contracts are host-level POSIX shm, so the namespace is cosmetic. No
+# namespace.yaml here to avoid a duplicate Namespace in the core stack.
+resources:
+  - configmap.yaml
+  - as-inference.yaml

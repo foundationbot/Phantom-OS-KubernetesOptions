@@ -167,6 +167,15 @@ stacks:
 #                          pins localhost:5443/wm-inference-models. busybox
 #                          bundle carrying the Thor-built TensorRT engines + PCA
 #                          + tokenizer + registry (arch-specific).
+#   as-inference           core stack — action-solver service DaemonSet
+#                          (has-as-inference gated, default-off). manifest pins
+#                          localhost:5443/as-inference; override to a real tag,
+#                          local-registry retag or DockerHub repo-swap
+#                          (foundationbot/as-inference). MUST be arm64/Thor.
+#   as-inference-models    core stack — as-inference's load-models init. manifest
+#                          pins localhost:5443/as-inference-models. busybox
+#                          bundle: Thor-built dinov2 + per-task AS engines + PCA
+#                          + norm-stats + state-machine + text-embeds + registry.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -187,6 +196,13 @@ images:
   #   image: localhost:5443/wm-inference:REPLACE-WITH-WM-BUILD-TAG
   # wm-inference-models:
   #   image: localhost:5443/wm-inference-models:REPLACE-WITH-WM-MODELS-TAG
+  # as-inference is default-off (nodeLabels has-as-inference: 'false');
+  # uncomment BOTH on hosts that opt in (pairs with wm-inference — the
+  # action-solver consumes WM z_ref). Local-registry retag or DockerHub swap.
+  # as-inference:
+  #   image: localhost:5443/as-inference:REPLACE-WITH-AS-BUILD-TAG
+  # as-inference-models:
+  #   image: localhost:5443/as-inference-models:REPLACE-WITH-AS-MODELS-TAG
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -678,6 +694,10 @@ nodeLabels:
   # wm-inference DaemonSet (world-model z_ref service; feeds positronic —
   # co-schedules with the control brain, NOT in the exclusion group)
   foundation.bot/has-wm-inference: 'false'
+  # as-inference DaemonSet (action-solver; consumes WM z_ref, produces
+  # /as_action for the WBC — co-schedules with wm-inference, NOT in the
+  # exclusion group)
+  foundation.bot/has-as-inference: 'false'
   # yovariable-server DaemonSet
   foundation.bot/has-yovariable: 'true'
 
@@ -711,6 +731,9 @@ nodeLabels:
 #   wm-inference           core stack, container 'wm-inference' (world-model
 #                                       z_ref service; mounts-only — no args,
 #                                       the service is the image entrypoint)
+#   as-inference           core stack, container 'as-inference' (action-solver
+#                                       service; mounts-only — no args, the
+#                                       service is the image entrypoint)
 #
 # deployments.okvis2x.extraArgs (optional):
 #   okvis2x's argv is POSITIONAL (<app> <okvis.yaml> <se2.yaml> <output>), so

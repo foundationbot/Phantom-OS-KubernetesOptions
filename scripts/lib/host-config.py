@@ -115,6 +115,11 @@ RESERVED_NODE_LABEL_KEYS: frozenset[str] = frozenset({"foundation.bot/robot"})
 #
 # Tuple: (key, default, description-shown-as-comment-in-host-config).
 NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
+    ("foundation.bot/has-as-inference",
+     "false",
+     "as-inference DaemonSet (action-solver z_ref consumer; produces "
+     "/as_action for the WBC — co-schedules with wm-inference, NOT in the "
+     "has-positronic/locomotion/sonic exclusion group)"),
     ("foundation.bot/has-cameras",
      "true",
      "dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)"),
@@ -1176,6 +1181,25 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/okvis2x-models",
     },
+    "as-inference": {
+        # as-inference DaemonSet (foundation.bot/has-as-inference gated): the
+        # action-solver z_ref consumer / /as_action producer. Base manifest
+        # pins localhost:5443/as-inference:PLACEHOLDER; a host overrides it to
+        # a real tag — local-registry retag or DockerHub repo-swap
+        # (foundationbot/as-inference, via dockerhub-creds). MUST be
+        # arm64/Thor; x86 fails CUDA init.
+        "stack": "core",
+        "manifest_image": "localhost:5443/as-inference",
+    },
+    "as-inference-models": {
+        # Consumed by as-inference's load-models initContainer — busybox bundle
+        # carrying the Thor-built TensorRT engines (dinov2 + per-task AS
+        # engines) + PCA + norm-stats + state-machine + text-embeds + registry.
+        # Image-only — an initContainer image, not a standalone workload, so it
+        # has NO DEPLOYMENT_TARGETS entry. Arch-specific (arm64/Thor).
+        "stack": "core",
+        "manifest_image": "localhost:5443/as-inference-models",
+    },
     "wm-inference": {
         # wm-inference DaemonSet (foundation.bot/has-wm-inference gated):
         # the world-model z_ref service. Base manifest pins
@@ -1463,6 +1487,15 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "kind": "DaemonSet",
         "namespace": "positronic",
         "container": "wm-inference",
+    },
+    # as-inference DaemonSet — action-solver service (positronic ns,
+    # has-as-inference gated). Mounts-only override channel (no args: the
+    # service is the image entrypoint, no DEPLOYMENT_BASE_ARGS entry).
+    "as-inference": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "as-inference",
     },
 }
 
