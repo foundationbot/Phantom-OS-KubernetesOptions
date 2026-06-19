@@ -1176,6 +1176,29 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/okvis2x-models",
     },
+    "wm-inference": {
+        # wm-inference DaemonSet (foundation.bot/has-wm-inference gated):
+        # the world-model z_ref service. Base manifest pins
+        # localhost:5443/wm-inference:PLACEHOLDER; a host overrides it to a
+        # real tag — either a local-registry retag
+        # (localhost:5443/wm-inference:<tag>) or a DockerHub repo-swap
+        # (foundationbot/wm-inference:<tag>, pulled via dockerhub-creds).
+        # The published image MUST be arm64/Thor (Dockerfile.thor); x86
+        # fails CUDA init.
+        "stack": "core",
+        "manifest_image": "localhost:5443/wm-inference",
+    },
+    "wm-inference-models": {
+        # Consumed by wm-inference's load-models initContainer — busybox
+        # bundle carrying the Thor-built TensorRT engines + PCA + tokenizer
+        # + registry, staged into a shared emptyDir. Same load-models
+        # pattern as phantom-models / okvis2x-models. Arm64/Thor-specific
+        # (the engines are arch- and TensorRT-version-bound). Image-only —
+        # an initContainer image, not a standalone workload, so it has NO
+        # DEPLOYMENT_TARGETS entry (nothing user-configurable to mount).
+        "stack": "core",
+        "manifest_image": "localhost:5443/wm-inference-models",
+    },
 }
 
 
@@ -1429,6 +1452,17 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "kind": "DaemonSet",
         "namespace": "positronic",
         "container": "okvis2x",
+    },
+    # wm-inference DaemonSet — world-model z_ref service (positronic ns,
+    # has-wm-inference gated). Mounts-only override channel (no args: the
+    # service is the image entrypoint, no DEPLOYMENT_BASE_ARGS entry). The
+    # base manifest declares the universal /dev/shm + /dev + models mounts;
+    # a robot can overlay extra host paths (e.g. a debug/log dir) by name.
+    "wm-inference": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "wm-inference",
     },
 }
 

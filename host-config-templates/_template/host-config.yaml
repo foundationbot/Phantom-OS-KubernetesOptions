@@ -157,6 +157,16 @@ stacks:
 #                          uses foundationbot/okvis2x-models. busybox bundle of
 #                          the SLAM model weights (~3.6 GB). Content-addressed +
 #                          published by CircleCI's build-models job.
+#   wm-inference           core stack — world-model z_ref service DaemonSet
+#                          (has-wm-inference gated, default-off). manifest pins
+#                          localhost:5443/wm-inference; override to a real tag,
+#                          either a local-registry retag or a DockerHub
+#                          repo-swap (foundationbot/wm-inference). MUST be
+#                          arm64/Thor (x86 engines fail CUDA init).
+#   wm-inference-models    core stack — wm-inference's load-models init. manifest
+#                          pins localhost:5443/wm-inference-models. busybox
+#                          bundle carrying the Thor-built TensorRT engines + PCA
+#                          + tokenizer + registry (arch-specific).
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -170,6 +180,13 @@ images:
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
   #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
+  # wm-inference is default-off (nodeLabels has-wm-inference: 'false');
+  # uncomment BOTH on hosts that opt in. Use a local-registry retag (push
+  # the arm64 images to localhost:5443 first) or a DockerHub repo-swap.
+  # wm-inference:
+  #   image: localhost:5443/wm-inference:REPLACE-WITH-WM-BUILD-TAG
+  # wm-inference-models:
+  #   image: localhost:5443/wm-inference-models:REPLACE-WITH-WM-MODELS-TAG
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -658,6 +675,9 @@ nodeLabels:
   foundation.bot/has-state-estimator: 'false'
   # rerun-streamer Deployment (dma-streams)
   foundation.bot/has-streamer: 'false'
+  # wm-inference DaemonSet (world-model z_ref service; feeds positronic —
+  # co-schedules with the control brain, NOT in the exclusion group)
+  foundation.bot/has-wm-inference: 'false'
   # yovariable-server DaemonSet
   foundation.bot/has-yovariable: 'true'
 
@@ -688,6 +708,9 @@ nodeLabels:
 #   rerun-streamer         core stack, container 'streamer' (DMA.streams live viewer)
 #   okvis2x                core stack, container 'okvis2x' (OKVIS2-X SLAM)
 #                                       (accepts extraArgs — full argv replace, see below)
+#   wm-inference           core stack, container 'wm-inference' (world-model
+#                                       z_ref service; mounts-only — no args,
+#                                       the service is the image entrypoint)
 #
 # deployments.okvis2x.extraArgs (optional):
 #   okvis2x's argv is POSITIONAL (<app> <okvis.yaml> <se2.yaml> <output>), so
