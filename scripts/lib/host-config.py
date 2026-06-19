@@ -146,6 +146,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-streamer",
      "false",
      "rerun-streamer Deployment (dma-streams)"),
+    ("foundation.bot/has-wm-inference",
+     "false",
+     "wm-inference DaemonSet (world-model z_ref service; feeds "
+     "positronic-control — co-schedules with the control brain, NOT "
+     "in the has-positronic/locomotion/sonic exclusion group)"),
     ("foundation.bot/has-yovariable",
      "true",
      "yovariable-server DaemonSet"),
