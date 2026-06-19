@@ -74,9 +74,9 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["--config=/etc/otelcol/otel-collector-config.yaml"]
           env:
-            # hostNetwork: reach the bundled jaeger/loki on localhost (jaeger keeps
-            # its internal OTLP 4317; loki keeps 3100). Receiver moved to 10317/10318.
-            - { name: OTEL_JAEGER_ENDPOINT, value: "localhost:4317" }
+            # hostNetwork: reach the bundled tempo/loki on localhost (tempo OTLP
+            # receiver on 4317; loki on 10310). Receiver moved to 10317/10318.
+            - { name: OTEL_TRACES_ENDPOINT, value: "localhost:4317" }
             - { name: OTEL_LOKI_ENDPOINT,   value: "http://localhost:10310/otlp" }
           ports:
             - { name: otlp-grpc, containerPort: 10317 }

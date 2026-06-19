@@ -12,9 +12,9 @@ datasources:
     url: http://localhost:10390
     isDefault: true
 
-  - name: Jaeger
-    type: jaeger
-    uid: jaeger
+  - name: Tempo
+    type: tempo
+    uid: tempo               # stable uid for provisioned dashboards/trace links
     access: proxy
     url: http://localhost:10386
 

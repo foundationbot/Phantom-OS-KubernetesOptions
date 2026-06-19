@@ -170,10 +170,10 @@ exporters:
     resource_to_telemetry_conversion:
       enabled: true
 
-  # Forward traces to the existing Jaeger. On the robot this is the central
-  # host; override via OTEL_JAEGER_ENDPOINT env in the systemd unit.
-  otlp/jaeger:
-    endpoint: ${env:OTEL_JAEGER_ENDPOINT:-jaeger:4317}
+  # Forward traces to Tempo (OTLP). hostNetwork: Tempo's OTLP receiver is on the
+  # host at localhost:4317. Override via OTEL_TRACES_ENDPOINT.
+  otlp/tempo:
+    endpoint: ${env:OTEL_TRACES_ENDPOINT:-localhost:4317}
     tls:
       insecure: true
 
@@ -221,7 +221,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [resourcedetection, resource, batch]
-      exporters: [spanmetrics, otlp/jaeger]
+      exporters: [spanmetrics, otlp/tempo]
     logs:
       receivers: [otlp, filelog/dma, filelog/k8s, k8sobjects]
       processors: [resourcedetection, resource, batch]

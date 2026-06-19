@@ -1,0 +1,37 @@
+# Grafana Tempo — monolithic single-binary config (replaces Jaeger as the trace
+# store). hostNetwork pod: it owns host :10386 (HTTP API + TraceQL search — the
+# port Jaeger's UI used; Tempo has no UI of its own, Grafana Explore is the UI),
+# :4317/:4318 (OTLP in, where the gaia collector exports traces), :9095 (gRPC).
+# Local-blocks storage on the hostPath /data/gaia/tempo. block_retention mirrors
+# the old Jaeger 72h TTL.
+server:
+  http_listen_port: 10386
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 72h          # = old JAEGER_SPAN_TTL
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# No phone-home.
+usage_report:
+  reporting_enabled: false

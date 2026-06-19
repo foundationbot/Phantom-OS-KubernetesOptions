@@ -19,7 +19,7 @@ resources:
   - namespace.yaml
   - otel-collector.yaml
   - prometheus.yaml
-  - jaeger.yaml
+  - tempo.yaml
   - loki.yaml
   - grafana.yaml
   - vector.yaml
@@ -39,6 +39,10 @@ configMapGenerator:
     namespace: gaia
     files:
       - config/otel-collector-config.yaml
+  - name: gaia-tempo-config
+    namespace: gaia
+    files:
+      - config/tempo.yaml
   - name: gaia-loki-config
     namespace: gaia
     files:
