@@ -1,0 +1,31 @@
+# Per-host / per-task knobs for the as-inference DaemonSet, consumed via
+# `envFrom: configMapRef: as-inference-config` in as-inference.yaml.
+#
+# Several of these are REQUIRED vars the binary boot-FATALs on if unset, so
+# the base ships defaults here (always present via the core kustomization);
+# per-host overrides overlay them (strategic-merge patch injected at bootstrap,
+# same mechanism as positronic-config / wm-inference-config). The fixed
+# image-contract paths (dinov2 engine/PCA, norm-stats) + GPU gate stay inline
+# in the DaemonSet.
+#
+# task<->engine<->text-embed lists are POSITIONALLY paired (same order/length).
+# The task_id strings are sent VERBATIM to the world model and MUST byte-match
+# WM's registered adapters.
+#
+# Defaults below = the Honda cover task on camera 0; override per-host.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: as-inference-config
+  namespace: positronic
+data:
+  AS_CAMERA_ID: "0"
+  AS_BASE_SHA: "foundation_v1_test_base_sha_0000000000"
+  AS_TASK_ID: "honda_reach_insert"
+  AS_TASK_IDS: "honda_reach_insert,honda_rehome"
+  AS_ENGINE: "/as-models/honda_cover_fe.engine"
+  AS_ENGINES: "/as-models/honda_cover_fe.engine,/as-models/honda_rehome.engine"
+  AS_REGISTRY: "/as-models/honda_cover_fe.registry.json"
+  AS_TEXT_EMBED: "/as-models/honda_cover_fe.text_embed.f32"
+  AS_TEXT_EMBEDS: "/as-models/honda_cover_fe.text_embed.f32,/as-models/honda_rehome.text_embed.f32"
+  AS_STATE_MACHINE_JSON: "/as-models/honda_cover_fe.json"

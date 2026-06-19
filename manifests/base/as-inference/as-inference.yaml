@@ -1,0 +1,195 @@
+# as-inference — DaemonSet that runs the action-solver inference service
+# (imu-policy/action-solver inference/). Ported from that repo's
+# inference/deploy/daemonset-nvidia.yaml into the fleet paradigm, alongside
+# wm-inference (mirror of that manifest).
+#
+# What it does: the continuous-producer serve loop (as_inference_main) reads
+# camera frames from the DMA.video shm rings, CONSUMES the world-model z_ref
+# rings (/wm_zref_req, /wm_zref_resp), and PUBLISHES one ActionCommand per
+# tick to the /as_action shm ring. The WBC + Hand Retargeting Bridge + Head
+# Servo Controller consume /as_action downstream.
+#
+# ====================== NOT PRODUCTION-READY (Phase 5 seam) ======================
+# AS_ALLOW_STUB_ROBOT_STATE is DELIBERATELY NOT SET (here or in the ConfigMap).
+# The serve binary therefore defaults to the SAFETY GUARD: every OK/HALT_CLAMP
+# tick is downgraded to NOT_READY with zeroed taskspace, so NO actionable
+# command leaves the binary. The pod runs, feeds /as_action NOT_READY
+# sentinels, and goes ready — but it CANNOT move the robot until the Phase-5
+# DMA varmap proprio reader lands AND a deliberate decision enables real state.
+# Do NOT add AS_ALLOW_STUB_ROBOT_STATE here to "make it move".
+# ===============================================================================
+#
+# Relationship to the control brain: as-inference CONSUMES wm-inference's
+# z_ref and PRODUCES /as_action (consumed downstream by the WBC). It does NOT
+# itself drive /desired, so — like wm-inference — it is NOT a competitor of
+# positronic-control / phantom-locomotion / phantom-sonic and is NOT in their
+# mutual-exclusion group. It co-schedules with wm-inference (its z_ref
+# provider) and the WBC (its consumer). Gate it with its own
+# foundation.bot/has-as-inference label; leave the exclusion validator
+# untouched. (OPEN: if positronic-control is the /as_action consumer/WBC, this
+# still holds — as-inference feeds it, it doesn't replace it.)
+#
+# Two images flow into this pod, both rewritten per-robot via Kustomize's
+# `images:` transformer:
+#   1. localhost:5443/as-inference:<tag>         — the C++ service binary.
+#   2. localhost:5443/as-inference-models:<tag>  — Thor(arm64)-built TensorRT
+#      engines + PCA + norm-stats + state-machine + text-embeds + registry,
+#      staged into an emptyDir mounted read-only at /as-models. Arm64/Thor
+#      specific; x86 engines fail CUDA init.
+#
+# Models load via initContainer + emptyDir copy (k0s 1.35.3 containerd
+# image-volume gap — same as positronic-control / wm-inference).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: as-inference
+  namespace: positronic
+spec:
+  selector:
+    matchLabels:
+      app: as-inference
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # One node at a time. Readiness gates on the first NON-STALE tick (the
+      # camera AND the wm-inference service must both be up), so a node whose
+      # camera or WM service isn't up yet won't go ready and — by design —
+      # stalls its own rollout rather than advancing a pod that can't serve.
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: as-inference
+    spec:
+      # Own gating label — co-schedules with wm-inference (its z_ref provider)
+      # and the WBC; NOT in the /desired mutual-exclusion group (see header).
+      # robot=true keeps the GPU/camera-bound pod off non-robot nodes.
+      nodeSelector:
+        foundation.bot/has-as-inference: "true"
+        foundation.bot/robot: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 15  # > the ~10s worst-case SIGINT lag (camera/WM retry waits)
+      imagePullSecrets:
+        - name: dockerhub-creds
+      # GPU via the nvidia container runtime. The NVIDIA_* env below is also
+      # required — runtimeClassName + privileged alone do NOT inject the device
+      # on this containerd/Tegra setup; the first TensorRT deserialize fails
+      # with CUDA init error 35 without it. (The standalone manifest omitted
+      # this; added here for the k0s/Tegra path, same as wm-inference.)
+      runtimeClassName: nvidia
+      initContainers:
+        # Copy the engine/PCA/norm-stats/state-machine/text-embed/registry
+        # payload into the shared emptyDir, then fail loud if the
+        # task-INDEPENDENT assets are missing. Per-task engines / text-embeds /
+        # registry / state-machine are config-driven (ConfigMap) so they are
+        # NOT asserted here — the binary's --self-check fails loud at boot if a
+        # configured asset is absent.
+        - name: load-models
+          image: localhost:5443/as-inference-models:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "==> copying /models -> /as-models"
+              cp -a /models/. /as-models/
+              test -f /as-models/dinov2.engine
+              test -f /as-models/prod_dinov2_pca.npz
+              test -f /as-models/norm_stats.npz
+              echo "==> done; /as-models contents:"
+              ls -la /as-models | head
+          volumeMounts:
+            - name: models
+              mountPath: /as-models
+          resources:
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "1", memory: "1Gi" }
+      containers:
+        - name: as-inference
+          image: localhost:5443/as-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # No command/args: the image entrypoint is as_inference_main.
+          envFrom:
+            # Per-host / per-task knobs (camera id, base sha, task<->engine /
+            # text-embed lists, registry + state-machine asset paths).
+            - configMapRef:
+                name: as-inference-config
+                optional: true
+          env:
+            # Image contract — fixed paths into the emptyDir + GPU gate; never
+            # vary per robot. (Task-specific REQUIRED vars — AS_ENGINE,
+            # AS_REGISTRY, AS_TASK_ID, AS_BASE_SHA, AS_TEXT_EMBED, etc. — come
+            # from the ConfigMap so a missing CM fails the boot loudly.)
+            - { name: AS_DINOV2_ENGINE,  value: /as-models/dinov2.engine }
+            - { name: AS_DINOV2_PCA_NPZ, value: /as-models/prod_dinov2_pca.npz }
+            - { name: AS_NORM_NPZ,       value: /as-models/norm_stats.npz }
+            - { name: AS_READY_FILE,     value: /tmp/as_ready }
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+          securityContext:
+            privileged: true  # /dev GPU (tegra) + camera device nodes
+          # While the startup probe fails, readiness + liveness are suspended —
+          # cold TensorRT deserialize of two engines + first camera frame +
+          # first WM round-trip can take tens of seconds on Thor (10s*30=300s).
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/as_ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          # Ready == engines + state machine loaded + camera/WM rings attached +
+          # FIRST non-stale tick served. The binary touches AS_READY_FILE only
+          # then. Latches once set.
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/as_ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          # Liveness is NOT gated on camera/WM (a later stall must not kill the
+          # pod — the serve loop publishes STALE_ZREF/NOT_READY sentinels). It
+          # confirms only that PID 1 (as_inference_main) is alive. No health
+          # heartbeat exists in the binary yet, so a wedged-but-alive process is
+          # not caught here (unlike wm-inference's metrics-mtime heartbeat);
+          # container exit is still caught by the kubelet.
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          # Guaranteed QoS (requests == limits) — the action-solver is a
+          # latency-critical 20-30 Hz producer (dinov2 every frame + the AS
+          # engine every chunk), so it wants CPU-manager pinning. Sizing
+          # carried from the standalone manifest. [RE-TUNE on Thor via
+          # as_inference_main --profile N.]
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - { name: models, mountPath: /as-models, readOnly: true }
+            - { name: shm,    mountPath: /dev/shm }
+            - { name: dev,    mountPath: /dev }
+      volumes:
+        # Engines/PCA/norm-stats/state-machine/text-embeds/registry staged by
+        # the init container.
+        - name: models
+          emptyDir: {}
+        # Shared POSIX shm: DMA.video camera rings + the WM z_ref rings + the
+        # /as_action output ring, shared with the camera producer, wm-inference,
+        # and the downstream WBC/publisher (all hostIPC).
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
+        # GPU + camera device nodes.
+        - name: dev
+          hostPath: { path: /dev, type: Directory }

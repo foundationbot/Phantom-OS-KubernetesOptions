@@ -34,3 +34,4 @@ resources:
   - ../../base/cpp-robot-state-estimator
   - ../../base/okvis2x
   - ../../base/wm-inference
+  - ../../base/as-inference
