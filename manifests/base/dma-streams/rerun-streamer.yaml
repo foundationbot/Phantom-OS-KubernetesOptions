@@ -124,7 +124,14 @@ spec:
           # the web viewer in rerun 0.32.x.
           # --server-memory-limit caps the in-memory ring; old chunks
           # get dropped past the cap. The alternative is OOM-kill
-          # under sustained backpressure.
+          # under sustained backpressure when the browser is slow or
+          # disconnected. 96 MB sits below the 192 MB container cap
+          # below; pre-2026-06-19 value was 32 MB but at ~500 Hz
+          # actuals + IMU + URDF that saturated within ~30 s and a
+          # transient memory-eviction stall caused the livenessProbe
+          # to trip and restart the server, which in turn broke the
+          # streamer's gRPC socket. Bigger ring + more lenient probe
+          # keeps the server up across normal load spikes.
           command: ["rerun"]
           args:
             - --serve-web
@@ -135,7 +142,7 @@ spec:
             - --bind
             - "0.0.0.0"
             - --server-memory-limit
-            - "32MB"
+            - "96MB"
 
           ports:
             - name: rerun-web
@@ -151,10 +158,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 64Mi
+              memory: 128Mi
             limits:
               cpu: 500m
-              memory: 128Mi
+              memory: 192Mi
 
           # Sidecar startup gate. Regular containers (streamer below)
           # wait on this to pass. 60 × 1 s = 60 s cold-start budget.
@@ -164,11 +171,18 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 1
             failureThreshold: 60
+          # Liveness checks gRPC ingest. Lenient timing here is
+          # deliberate — short blips while the server evicts old
+          # chunks under load should NOT kill the container, because
+          # a server restart breaks the streamer's gRPC socket. With
+          # the streamer's in-process reconnect (see streamer source),
+          # we recover anyway, but avoid the churn.
           livenessProbe:
             tcpSocket:
               port: 9877
-            periodSeconds: 30
-            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
             tcpSocket:
               port: 9877
@@ -220,13 +234,31 @@ spec:
               cpu: 2000m
               memory: 2Gi
 
-          # The streamer has no listening socket of its own; liveness
-          # via process presence.
+          # The streamer has no listening socket of its own. The
+          # process can be alive (pgrep would say so) while its gRPC
+          # publish pipeline is stuck on a dead transport — that's the
+          # failure mode we hit when the rerun-server sidecar restarts
+          # and the streamer's TCP socket gets a one-shot transport
+          # error but nothing reconnects in the SDK.
+          #
+          # The streamer writes /tmp/rerun_streamer.alive with a unix
+          # timestamp every successful flush_blocking (5 s cadence;
+          # see rerun_streamer.cpp's stats-report block). If the file
+          # is older than 30 s the publish pipeline is wedged — kill
+          # the container so kubelet restarts it with a fresh gRPC
+          # dial. The streamer's in-process reconnect handles the
+          # common case first; this probe is the backup for cases
+          # where the main thread is itself stuck.
           livenessProbe:
             exec:
-              command: ["pgrep", "-x", "rerun_streamer"]
-            initialDelaySeconds: 10
-            periodSeconds: 30
+              command:
+                - /bin/sh
+                - -c
+                - >
+                  test -f /tmp/rerun_streamer.alive &&
+                  [ "$(( $(date +%s) - $(stat -c %Y /tmp/rerun_streamer.alive) ))" -lt 30 ]
+            initialDelaySeconds: 60
+            periodSeconds: 15
             failureThreshold: 3
 
           volumeMounts:
