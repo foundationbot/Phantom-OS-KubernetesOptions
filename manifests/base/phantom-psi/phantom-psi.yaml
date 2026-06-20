@@ -5,18 +5,22 @@
 # that was brought up on ch4 (see Psi0-VLA/k0sdeployment.md + loco-vla-worklog.md).
 #
 # ── Topology ───────────────────────────────────────────────────────────────
-# Three containers share the host's /dev/shm (the DMA ring buffers) via
-# hostIPC + a /dev/shm hostPath, so the VLA, the bridge, and the walking
-# policy all read/write the same POSIX-shm tensor/video queues:
-#   psi0-vla  — Ψ₀ policy (psi.deploy.psi0_dma_runner) on the GPU. Reads the
+# Four containers share the host's /dev/shm (the DMA ring buffers) via
+# hostIPC + a /dev/shm hostPath, so the VLA, the bridge, the walking policy,
+# and the proprio producer all read/write the same POSIX-shm tensor/video
+# queues:
+#   psi0-vla   — Ψ₀ policy (psi.deploy.psi0_dma_runner) on the GPU. Reads the
 #               egocentric camera ring (/dev/shm/video_*_cam{N}, written by the
 #               dma-video producer) + the proprio state ring, runs the flow
 #               policy, and writes the (Ta,Da) action ring (psi0_actions_j24).
-#   bridge    — bridge.psi0_loco_bridge: reads the action ring and drives the
+#   bridge     — bridge.psi0_loco_bridge: reads the action ring and drives the
 #               locomotion command stream at a fixed rate (gait/height/yaw
 #               passthrough gated by the PSI0_ENABLE_* flags — OFF by default,
 #               see spec-004 AC-7).
-#   walking   — inference.policy_node: the lower-body walking ONNX policy.
+#   walking    — inference.policy_node: the lower-body walking ONNX policy.
+#   psi0-state — phantom_sonic.actuals_state_source: bridges the robot DMA
+#               daemon's /actuals + /config into the (1,72) proprio state ring
+#               psi0-vla reads (CPU-only; full notes on the container below).
 # hostNetwork (ROS/DDS + DMA), single GPU on psi0-vla via the nvidia device
 # plugin (nvidia.com/gpu: 1) + runtimeClassName nvidia.
 #

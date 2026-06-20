@@ -2674,8 +2674,8 @@ MOTION_RAMP_SECS=1.0"
 
 # ---- phase 8b: psi-config (phantom-psi-config ConfigMap) ----------
 
-# Per-host phantom-psi options file. Holds a ConfigMap manifest the three
-# phantom-psi containers (psi0-vla, bridge, walking) read via envFrom. Same
+# Per-host phantom-psi options file. Holds a ConfigMap manifest the four
+# phantom-psi containers (psi0-vla, bridge, walking, psi0-state) read via envFrom. Same
 # host-resident, ArgoCD-unmanaged, --reset-preserved lifecycle as the sonic CM.
 PSI_FILE="${PSI_FILE:-/etc/phantomos/phantom-psi-config.yaml}"
 PSI_NS="psi"
