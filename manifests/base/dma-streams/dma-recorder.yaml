@@ -88,9 +88,16 @@ spec:
         - name: recorder
           # Built and pushed by .circleci/config.yml under DMA.streams.
           # Bump the tag through host-config kustomize.images, not here.
-          image: foundationbot/dma-streams:main-latest
+          image: foundationbot/dma-streams:SOF-1167-latest
           imagePullPolicy: IfNotPresent
           command: ["dma_recorder"]
+          # NOTE (k0s health, SOF-1167 #4): intentionally NO liveness/readiness
+          # probe. dma_recorder is PID 1, so a crash already exits the container
+          # and the DaemonSet restarts it (no probe needed for that). There is no
+          # in-band health endpoint to detect a *hung* recorder, and a freshness
+          # probe can't work because --manual-arm leaves it idle (not writing) by
+          # design — such a probe would flap. Add a real heartbeat to dma_recorder
+          # first if hung-detection is needed (out of scope).
           # dma_recorder's argv parser is space-separated: `--flag value`,
           # not `--flag=value`. Each option/value is its own list element.
           #

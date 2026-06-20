@@ -82,6 +82,21 @@ spec:
             - { name: otlp-grpc, containerPort: 10317 }
             - { name: otlp-http, containerPort: 10318 }
             - { name: prom-exp,  containerPort: 10389 }
+            - { name: health,    containerPort: 13133 }
+          # health_check extension (config: service.extensions). Lenient so the
+          # log-tailing + RBAC startup can't flap it; failure → "Unhealthy" Event.
+          livenessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - { name: otel-config, mountPath: /etc/otelcol }
             - { name: docker-containers, mountPath: /var/lib/docker/containers, readOnly: true }

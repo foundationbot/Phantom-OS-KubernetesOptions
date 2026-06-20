@@ -26,6 +26,16 @@ spec:
           command: ["sh", "/scripts/tegra-metrics.sh"]
           env:
             - { name: INTERVAL, value: "5" }
+          # No HTTP server: liveness = the .prom is being refreshed (atomic
+          # rename every INTERVAL=5s). Stale >2min ⇒ the writer hung ⇒ restart +
+          # "Unhealthy" Event. Lenient threshold so a transient sysfs stall is ok.
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "find /textfile/tegra.prom -mmin -2 | grep -q ."]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
           volumeMounts:
             - { name: script,   mountPath: /scripts }
             - { name: sys,      mountPath: /host/sys, readOnly: true }

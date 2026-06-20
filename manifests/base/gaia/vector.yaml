@@ -32,6 +32,23 @@ spec:
           image: foundationbot/gaia-vector:SOF-1167
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/vector/vector.yaml"]
+          # Probes hit Vector's api (config: api.enabled, :8686). host:127.0.0.1
+          # because the api binds loopback (not exposed off-box) and this pod is
+          # hostNetwork — without it the kubelet probes the node IP and gets
+          # connection-refused. Lenient so journal backlog on boot can't flap it;
+          # failure → "Unhealthy" Event.
+          livenessProbe:
+            httpGet: { path: /health, port: 8686, host: 127.0.0.1 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /health, port: 8686, host: 127.0.0.1 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - { name: vector-config, mountPath: /etc/vector }
             - { name: journal,    mountPath: /var/log/journal, readOnly: true }

@@ -200,7 +200,16 @@ exporters:
     tls:
       insecure: true
 
+extensions:
+  # Liveness/readiness target for the k8s probes (otel-collector.yaml). The
+  # collector is the pipeline heart but shipped unprobed; GET :13133/ returns
+  # 200 when the collector is up, so a hang/crash surfaces as a k8s "Unhealthy"
+  # Event → mapped to healthcheck_failed by gaia (k8sobjects→loki_events).
+  health_check:
+    endpoint: 0.0.0.0:13133
+
 service:
+  extensions: [health_check]
   telemetry:
     # Quiet the collector's own INFO chatter (e.g. "Started watching file").
     # The collector tails /var/lib/docker/containers including its OWN container,

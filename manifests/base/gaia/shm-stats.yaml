@@ -30,6 +30,19 @@ spec:
           command: ["python3", "-m", "dma_common.shm_stats_exporter", "--metrics-port", "9300"]
           ports:
             - { name: metrics, containerPort: 9300 }
+          # /metrics doubles as the health endpoint; failure → "Unhealthy" Event.
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9300 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9300 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - { name: shm, mountPath: /dev/shm }
           resources:

@@ -22,6 +22,14 @@
 #   https://vector.dev/docs/reference/configuration/sinks/opentelemetry/
 # =============================================================================
 
+# Vector GraphQL/health API — the target for the k8s liveness/readiness probes
+# (vector.yaml). GET http://127.0.0.1:8686/health returns 200 when Vector is up,
+# so a hang surfaces as a k8s "Unhealthy" Event (gaia maps it to
+# healthcheck_failed). Bound to localhost (hostNetwork) — not exposed off-box.
+api:
+  enabled: true
+  address: 127.0.0.1:8686
+
 sources:
   host_journald:
     type: journald

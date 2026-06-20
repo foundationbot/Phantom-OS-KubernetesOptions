@@ -77,10 +77,15 @@ spec:
         - name: recorder
           # Same image as dma-recorder. Bump the tag through host-config
           # kustomize.images, not here.
-          image: foundationbot/dma-streams:main-latest
+          image: foundationbot/dma-streams:SOF-1167-latest
           imagePullPolicy: IfNotPresent
           # ENTRYPOINT defaults to dma_recorder; override to the video sidecar.
           command: ["dma-video-recorder"]
+          # NOTE (k0s health, SOF-1167 #4): intentionally NO liveness/readiness
+          # probe — same rationale as dma-recorder. It's PID 1 (crash → container
+          # exit → DaemonSet restart), has no in-band health endpoint, and its
+          # record-on-motor-state behavior means "idle" (motors off) is normal, so
+          # a freshness probe would flap. Add a heartbeat to the binary first.
           # Space-separated argv (--flag value). Per-host overlay knobs:
           #   cameras:        --cameras <comma ids>     (DMA.video camera ids)
           #   segmentSeconds: --segment-seconds <N>     (match the .rrd roll)
