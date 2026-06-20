@@ -28,16 +28,19 @@
 # Job pulls from local containerd (already imported by k0s) instead
 # of DockerHub — works on robots without dockerhub-creds.
 #
-# Beta pin: SOF-1167. The two arch-filtered lines bundle the same
-# SOF-1167 tag for both arm64 and amd64 robots. If DMA.ethercat's CI
-# publishes arch-suffixed SOF-1167 builds (e.g. SOF-1167-aarch64 /
-# SOF-1167-amd64) rather than a single multi-arch tag, adjust the
-# tags below (and images.dma-ethercat in the host-config template).
-foundationbot/dma-ethercat:SOF-1167    # arch:arm64
-foundationbot/dma-ethercat:SOF-1167    # arch:amd64
+# Beta pin: SOF-1167. DMA.ethercat (like dma-common) publishes per-arch
+# leaf tags `<branch>-latest-<kernel_arch>`, so we bundle the matching
+# leaf per arch via {KERNEL_ARCH} (-> SOF-1167-latest-aarch64 on arm64,
+# SOF-1167-latest-amd64 on amd64). NOTE: DMA.ethercat is out of this
+# session's repo scope, so the exact tag could not be verified — if its
+# CI names SOF-1167 builds differently, fix here and in the host-config
+# template (images.dma-ethercat).
+foundationbot/dma-ethercat:SOF-1167-latest-{KERNEL_ARCH}
 
-# dma.streams beta pin (SOF-1167). The dma-recorder / rerun-streamer
-# manifests still carry foundationbot/dma-streams:main-latest, so the
-# manifest scan would otherwise bundle main-latest; this line ensures
-# the SOF-1167 build the host-config override deploys is in the bundle.
-foundationbot/dma-streams:SOF-1167
+# dma.streams beta pin. dma.streams CI publishes a MULTI-ARCH manifest at
+# <branch>-latest (resolves to the puller's arch); k8s deploys pull that
+# unsuffixed tag. The dma-recorder / rerun-streamer manifests still carry
+# :main-latest, so the manifest scan would otherwise bundle main-latest;
+# this line ensures the SOF-1167-latest build the host-config override
+# deploys is in the bundle (build-images-deb resolves the per-arch leaf).
+foundationbot/dma-streams:SOF-1167-latest
