@@ -133,6 +133,16 @@ spec:
           # phantom-mk2-3 (2026-06-19) showed steady-state ring
           # depth near-empty because the browser drains it; this
           # cap mostly governs reconnect-history replay.
+          # --cors-allow-origin: the browser dials the gRPC ingest
+          # (:9877) from the WASM viewer page hosted on the same robot
+          # at :9788. Default CORS allow-list only covers localhost, so
+          # any remote operator URL (http://phantom-mk2-3:9788, an IP,
+          # or a DNS alias) triggers a preflight that returns 200 but
+          # WITHOUT an Access-Control-Allow-Origin header — the browser
+          # blocks the actual request and the WASM viewer reports
+          # "TypeError: failed to fetch source". The glob `http://*:9788`
+          # whitelists any robot-hostname variant operators might use.
+          # Tighten if multi-tenancy on the same network ever matters.
           command: ["rerun"]
           args:
             - --serve-web
@@ -144,6 +154,8 @@ spec:
             - "0.0.0.0"
             - --server-memory-limit
             - "32MB"
+            - --cors-allow-origin
+            - "http://*:9788"
 
           ports:
             - name: rerun-web
