@@ -1453,6 +1453,14 @@ RERUN_STREAMER_BASE_ARGS: list[str] = [
     # manifests/base/dma-streams/rerun-streamer.yaml.
     "--bind", "127.0.0.1",
     "--port", "9877",
+    # --downsample sets the publish rate (every Nth frame from the 500 Hz
+    # shm side). 25 → 20 Hz to Rerun. MUST live in BASE_ARGS rather than
+    # only in the base manifest because any host that sets variant /
+    # queueMemoryLimitMb / extraArgs triggers a full args replacement
+    # (see _build_streamer_patch_args below), which would drop a
+    # base-manifest-only flag silently. Keep this in sync with the
+    # `--downsample` value in manifests/base/dma-streams/rerun-streamer.yaml.
+    "--downsample", "25",
 ]
 DMA_RECORDER_BASE_ARGS: list[str] = [
     "--output", "/recordings",

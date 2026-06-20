@@ -123,15 +123,16 @@ spec:
           # Do NOT also pass --serve-grpc — combining them suppresses
           # the web viewer in rerun 0.32.x.
           # --server-memory-limit caps the in-memory ring; old chunks
-          # get dropped past the cap. The alternative is OOM-kill
-          # under sustained backpressure when the browser is slow or
-          # disconnected. 96 MB sits below the 192 MB container cap
-          # below; pre-2026-06-19 value was 32 MB but at ~500 Hz
-          # actuals + IMU + URDF that saturated within ~30 s and a
-          # transient memory-eviction stall caused the livenessProbe
-          # to trip and restart the server, which in turn broke the
-          # streamer's gRPC socket. Bigger ring + more lenient probe
-          # keeps the server up across normal load spikes.
+          # get dropped past the cap. Sized in concert with the
+          # streamer's --downsample (20 Hz publish rate, ~2.4 MB/s
+          # data rate) → 32 MB ring holds ~13 s of history. The
+          # earlier 96 MB value was sized for the un-downsampled
+          # 50 Hz push rate; with the streamer now publishing at
+          # 20 Hz the smaller ring suffices and the server-side
+          # eviction work per ingest drops. Field measurement on
+          # phantom-mk2-3 (2026-06-19) showed steady-state ring
+          # depth near-empty because the browser drains it; this
+          # cap mostly governs reconnect-history replay.
           command: ["rerun"]
           args:
             - --serve-web
@@ -142,7 +143,7 @@ spec:
             - --bind
             - "0.0.0.0"
             - --server-memory-limit
-            - "96MB"
+            - "32MB"
 
           ports:
             - name: rerun-web
@@ -218,7 +219,13 @@ spec:
             - --variant
             - "mk1"
             - --queue-memory-limit
-            - "8"
+            - "4"
+            # --downsample 25 → publish 1 in 25 frames from the 500 Hz
+            # shm side = 20 Hz to Rerun. Halved from the earlier 1/10
+            # (= 50 Hz) default to cut data volume ~60% — see
+            # DMA.streams/docs/superpowers/specs/2026-06-19-rerun-memory-buffer-redesign.md.
+            - --downsample
+            - "25"
             # - --urdf
             # - /opt/configs/robot.urdf       # optional, overrides --variant
 
