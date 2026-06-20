@@ -17,11 +17,13 @@ SRC="$REPO_ROOT/host-services/gaia"
 TEXTFILE_DIR="${TEXTFILE_DIR:-/var/lib/gaia/node-textfile}"
 DRY_RUN="${DRY_RUN:-0}"
 
-# RAG/incident services (docker run gaia-tools) + the host metric collectors.
-UNITS="gaia-ask-server.service gaia-incident-learner.service gaia-log-extractor.service \
-       gaia-gpu-metrics.service gaia-nvmap-metrics.service"
+# RAG/incident services (docker run gaia-tools). The GPU/NVMAP host metric
+# collectors (gaia-gpu-metrics / gaia-nvmap-metrics + their scripts) moved to the
+# phantomos-k0s deb postinst (SOF-1167 #6) so `dpkg -i` installs+enables them —
+# they are intentionally NOT managed here anymore (avoids double-enable).
+UNITS="gaia-ask-server.service gaia-incident-learner.service gaia-log-extractor.service"
 # collector scripts the *.service ExecStart=/usr/local/bin/... expect.
-SCRIPTS="gaia-gpu-metrics.sh jetson-nvmap-mem-textfile.sh"
+SCRIPTS=""
 
 run() { if [ "$DRY_RUN" = 1 ]; then echo "  DRY-RUN  $*"; else "$@"; fi; }
 

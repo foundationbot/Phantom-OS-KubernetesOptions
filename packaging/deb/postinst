@@ -11,6 +11,24 @@ case "$1" in
         -exec chmod 0755 {} +
     fi
 
+    # GPU/NVMAP host metric collectors (SOF-1167 #6) — install + enable straight
+    # from the deb (deb-install-only) instead of scripts/install-gaia-host-services.sh,
+    # so a plain `dpkg -i` brings them up. They write node-exporter textfiles to
+    # /var/lib/gaia/node-textfile, which the k0s node-exporter DaemonSet serves.
+    # (The docker-run gaia-tools RAG units stay in install-gaia-host-services.sh.)
+    GAIA_HS=/opt/Phantom-OS-KubernetesOptions/host-services/gaia
+    if command -v systemctl >/dev/null 2>&1 && [ -d "$GAIA_HS" ]; then
+      mkdir -p /var/lib/gaia/node-textfile
+      for s in gaia-gpu-metrics.sh jetson-nvmap-mem-textfile.sh; do
+        [ -f "$GAIA_HS/$s" ] && install -m 0755 "$GAIA_HS/$s" "/usr/local/bin/$s"
+      done
+      for u in gaia-gpu-metrics.service gaia-nvmap-metrics.service; do
+        [ -f "$GAIA_HS/$u" ] && install -m 0644 "$GAIA_HS/$u" "/etc/systemd/system/$u"
+      done
+      systemctl daemon-reload || true
+      systemctl enable --now gaia-gpu-metrics.service gaia-nvmap-metrics.service >/dev/null 2>&1 || true
+    fi
+
     cat <<'EOF'
 
 phantomos-k0s installed at /opt/Phantom-OS-KubernetesOptions
