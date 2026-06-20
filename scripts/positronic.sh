@@ -41,7 +41,7 @@ SONIC_CONTAINERS="control walking sonic motion-replay"
 
 PSI_NAMESPACE="${PSI_NAMESPACE:-psi}"
 PSI_APP_LABEL="${PSI_APP_LABEL:-app.kubernetes.io/name=phantom-psi}"
-PSI_CONTAINERS="psi0-vla bridge walking"
+PSI_CONTAINERS="psi0-vla bridge walking psi0-state"
 
 ARGO_NS="${ARGO_NS:-argocd}"
 
@@ -211,11 +211,12 @@ ${C_BOLD}Subcommands:${C_RESET}
                                [--previous] | exec <container> [-- cmd] |
                                restart | web. 'sonic --help' for details.
   psi <action> [args...]       Helpers for the phantom-psi DaemonSet (Ψ₀ VLA
-                               → locomotion; one pod, three containers:
-                               psi0-vla, bridge, walking, in the psi ns).
+                               → locomotion; one pod, four containers:
+                               psi0-vla, bridge, walking, psi0-state, in the
+                               psi ns).
                                Actions: status | logs [<container>] [-f]
-                               [--previous] | exec <container> [-- cmd] |
-                               restart. 'psi --help' for details.
+                               [--previous] | exec [<container>] [-- cmd] |
+                               shell [<container>] | restart. 'psi --help'.
   gpu-test                     Run a PyTorch CUDA matmul inside the pod;
                                PASS iff cuda is available and result != 0.
   set-cmd [--transient] <command...>
@@ -765,8 +766,8 @@ HELP
 }
 
 # ---------- subcommand: psi -----------------------------------------------
-# The phantom-psi DaemonSet is a single pod with three containers
-# (psi0-vla, bridge, walking) in the psi namespace. These helpers wrap the
+# The phantom-psi DaemonSet is a single pod with four containers
+# (psi0-vla, bridge, walking, psi0-state) in the psi namespace. These helpers wrap the
 # per-container kubectl incantations (label selector + -c <name>) so an
 # operator can shell in / tail logs without memorising them. Mirrors `sonic`.
 
@@ -823,7 +824,7 @@ cmd_psi_logs() {
     _psi_valid_container "$container" || die "unknown container: $container (one of: $PSI_CONTAINERS)"
     args+=(-c "$container")
   else
-    # No container named → all three, each line prefixed with [pod/container].
+    # No container named → all four, each line prefixed with [pod/container].
     args+=(--all-containers --prefix)
   fi
   [ "$follow" = 1 ]   && args+=(-f)
@@ -838,13 +839,15 @@ cmd_psi_logs() {
 
 cmd_psi_exec() {
   if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-    echo "psi exec <container> [-- command...]   (container: $PSI_CONTAINERS)"
+    echo "psi exec [<container>] [-- command...]   (container: $PSI_CONTAINERS; default: psi0-vla → bash)"
     return 0
   fi
   require_kubectl
   local container=""
   if [ $# -gt 0 ] && [ "$1" != "--" ]; then container="$1"; shift; fi
-  [ -n "$container" ] || die "psi exec requires a container (one of: $PSI_CONTAINERS)"
+  # Convenience: with no container, drop into a bash shell on the VLA container
+  # (so `psi exec` / `psi shell` Just Work for the common case).
+  [ -n "$container" ] || container="psi0-vla"
   _psi_valid_container "$container" || die "unknown container: $container (one of: $PSI_CONTAINERS)"
 
   local rest=()
@@ -882,7 +885,7 @@ cmd_psi() {
     -h|--help|help)
       cat <<HELP
 psi <action> — helpers for the phantom-psi DaemonSet.
-One pod, three containers: $PSI_CONTAINERS (psi ns).
+One pod, four containers: $PSI_CONTAINERS (psi ns).
 
 Actions:
   status                       DaemonSet + pod + per-container state/restarts.
@@ -890,15 +893,19 @@ Actions:
                                Per-container logs. <container> is one of
                                $PSI_CONTAINERS.
                                Omit <container> for all (each line prefixed).
-  exec <container> [-- cmd]    Shell (or one-off cmd) in <container>.
+  exec [<container>] [-- cmd]  Shell (or one-off cmd) in <container>
+                               (default: psi0-vla).
+  shell [<container>]          Bash shell in <container> (default: psi0-vla).
+                               Convenience alias of 'exec'.
   restart                      Roll the DaemonSet (rollout restart).
 
 Examples:
   bash scripts/positronic.sh psi status
+  bash scripts/positronic.sh psi shell                 # bash in psi0-vla
+  bash scripts/positronic.sh psi shell psi0-state      # bash in the proprio producer
   bash scripts/positronic.sh psi logs psi0-vla -f
-  bash scripts/positronic.sh psi logs bridge --previous
+  bash scripts/positronic.sh psi logs psi0-state       # proprio producer logs
   bash scripts/positronic.sh psi logs                  # all containers
-  bash scripts/positronic.sh psi exec psi0-vla
   bash scripts/positronic.sh psi exec psi0-vla -- python -c 'import torch; print(torch.cuda.get_device_name())'
   bash scripts/positronic.sh psi restart
 HELP
@@ -906,6 +913,7 @@ HELP
     status)  cmd_psi_status  "$@" ;;
     logs)    cmd_psi_logs    "$@" ;;
     exec)    cmd_psi_exec    "$@" ;;
+    shell)   cmd_psi_exec    "$@" ;;   # alias: bash on psi0-vla (or <container>)
     restart) cmd_psi_restart "$@" ;;
     *) die "unknown psi action: $action (try: psi --help)" ;;
   esac
