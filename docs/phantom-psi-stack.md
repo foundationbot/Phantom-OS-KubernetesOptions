@@ -9,17 +9,30 @@ DaemonSet, per-host knobs rendered into a ConfigMap by bootstrap, and a
 
 ## What it runs
 
-A single pod (`positronic`-style colocation) in the **`psi`** namespace, three
+A single pod (`positronic`-style colocation) in the **`psi`** namespace, **four**
 containers sharing the host `/dev/shm` DMA rings (hostNetwork + hostIPC):
 
 | Container | Image | Role |
 |---|---|---|
-| `psi0-vla` | `psi0-policy` | Ψ₀ flow policy on the GPU (`psi.deploy.psi0_dma_runner`): reads the egocentric camera ring + proprio state ring, writes the `(Ta,Da)` action ring. GPU via the NVIDIA device plugin (`nvidia.com/gpu: 1`). |
-| `bridge` | `phantom-loco` | `bridge.psi0_loco_bridge`: reads the action ring and drives the locomotion command stream (gait/height/yaw passthrough gated by `PSI0_ENABLE_*`, default off — spec-004 AC-7). |
+| `psi0-vla` | `psi0-policy` | Ψ₀ flow policy on the GPU (`psi.deploy.psi0_dma_runner`): reads the egocentric camera ring + proprio state ring, writes the `(Ta,Da)` action ring. On safe-stop it writes a `FORMAT_TENSOR_STOP` sentinel into the action ring (spec-011 §B). GPU via the NVIDIA device plugin (`nvidia.com/gpu: 1`). |
+| `bridge` | `phantom-loco` | `bridge.psi0_loco_bridge`: steps the `(Ta,Da)` action ring onto the walking-policy command topics, and reads the **`psi0_state` ring** (`[7:36]`) for the measured-pose HOLD base. Gait/height/yaw passthrough gated by `PSI0_ENABLE_*`, default off — spec-004 AC-7. |
 | `walking` | `phantom-loco` | `inference.policy_node`: the lower-body walking ONNX policy. |
+| `psi0-state` | `psi0-sonic` | `phantom_sonic.actuals_state_source`: reads the robot's DMA `/actuals` plane and writes the `(1,72)` `psi0_state` proprio ring @ 50 Hz — the live measured state both `psi0-vla` and `bridge` consume (zero-fills the taskspace mean when `meta/stats_psi0.json` is absent). |
 
-> Images are currently **local** (`psi0-policy:thor-cu130`, `phantom-loco:local`,
-> built on-device and imported into k0s containerd). They're registered in
+> **Bridge ↔ ring contract (two robustness fixes landed during Thor bring-up).**
+> (1) **STOP sentinel:** a `FORMAT_TENSOR_STOP` (101) frame written by `psi0-vla`
+> on safe-stop is read by the bridge as "no fresh chunk" → it holds the measured
+> pose rather than crashing on the unknown tensor format. (2) **Measured pose off
+> DDS:** the bridge's measured pose is sourced from the in-process `psi0_state`
+> ring (`[7:36]` — 29 joints, canonical IHMC order, raw rad), **not** the legacy
+> IHMC ROS topic `/java/output/robot_configuration_data`. On a `hostNetwork` psi
+> deploy that topic has no compatible publisher and picks up foreign-domain DDS
+> cross-talk that fails CDR decode (`sequence size exceeds remaining buffer`).
+> Both are pure `phantom-loco` (`bridge/`) changes; no manifest change required.
+
+> Images are currently **local** (`psi0-policy:thor-cu130`, `psi0-sonic:thor-cu130`,
+> `phantom-loco:local`, built on-device and imported into k0s containerd).
+> They're registered in
 > `CONTAINER_TARGETS` for per-robot tag override; publish them to the fleet
 > registry before relying on this on non-ch4 robots. `psi0-policy` MUST be a
 > CUDA-13 / sm_110 torch base on Thor (the Orin igpu base does not run there).
@@ -58,7 +71,7 @@ sudo k0s kubectl label node <robot> \
 
 Per-host knobs live in the `phantomPsi:` block of `host-config.yaml`. Bootstrap
 phase **8b `psi-config`** renders them into the `phantom-psi-config` ConfigMap
-(all three containers `envFrom` it); `psi0-vla`'s command carries
+(all four containers `envFrom` it); `psi0-vla`'s command carries
 `${VAR:-default}` shell-defaults so the pod still starts before the CM exists.
 Every field is optional and falls back to the documented default.
 
@@ -83,7 +96,7 @@ the CM and rolls the DaemonSet).
 ```bash
 bash scripts/positronic.sh psi status                 # DS + pod + per-container state
 bash scripts/positronic.sh psi logs psi0-vla -f       # tail one container
-bash scripts/positronic.sh psi logs                   # all three, prefixed
+bash scripts/positronic.sh psi logs                   # all four, prefixed
 bash scripts/positronic.sh psi exec psi0-vla          # shell into a container
 bash scripts/positronic.sh psi restart                # rollout restart the DS
 ```

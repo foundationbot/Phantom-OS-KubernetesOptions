@@ -572,7 +572,7 @@ images:
 # Per-host phantom-psi config (the Ψ₀ VLA → locomotion stack, gated on
 # foundation.bot/has-psi). Bootstrap phase psi-config renders
 # /etc/phantomos/phantom-psi-config.yaml from this block — a ConfigMap the
-# three phantom-psi containers (psi0-vla, bridge, walking) consume via envFrom.
+# four phantom-psi containers (psi0-vla, bridge, walking, psi0-state) consume via envFrom.
 # Same host-resident, ArgoCD-unmanaged, --reset-preserved lifecycle as
 # phantomSonic.
 #
