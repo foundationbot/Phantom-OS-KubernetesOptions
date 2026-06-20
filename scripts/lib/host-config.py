@@ -1511,7 +1511,29 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
 # Each list is exactly what the manifest's `args:` contains EXCEPT for
 # the fields we project from host-config (variant, queueMemoryLimitMb,
 # extraArgs). Those are appended onto the base list when set.
-RERUN_STREAMER_BASE_ARGS: list[str] = ["--port", "9788"]
+RERUN_STREAMER_BASE_ARGS: list[str] = [
+    # --bind + --port are the gRPC TARGET the streamer dials, NOT a bind
+    # port. The dial URL is `rerun+http://<bind>:<port>/proxy`. With the
+    # rerun-server colocated in the same pod (hostNetwork), 127.0.0.1:9877
+    # is the server's gRPC ingest socket; 9788 is the browser-facing web
+    # viewer (HTTP), which the streamer must NOT dial.
+    #
+    # Pre-2026-06-19 value was `--port 9788` — that pre-dated the
+    # rerun-server sidecar and made the streamer dial the web port,
+    # silently hanging the gRPC handshake. Keep this in sync with the
+    # `--port` arg the rerun-server's `--port` value in
+    # manifests/base/dma-streams/rerun-streamer.yaml.
+    "--bind", "127.0.0.1",
+    "--port", "9877",
+    # --downsample sets the publish rate (every Nth frame from the 500 Hz
+    # shm side). 25 → 20 Hz to Rerun. MUST live in BASE_ARGS rather than
+    # only in the base manifest because any host that sets variant /
+    # queueMemoryLimitMb / extraArgs triggers a full args replacement
+    # (see _build_streamer_patch_args below), which would drop a
+    # base-manifest-only flag silently. Keep this in sync with the
+    # `--downsample` value in manifests/base/dma-streams/rerun-streamer.yaml.
+    "--downsample", "25",
+]
 DMA_RECORDER_BASE_ARGS: list[str] = [
     "--output", "/recordings",
     "--max-duration", "60",
