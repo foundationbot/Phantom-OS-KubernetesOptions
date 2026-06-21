@@ -823,29 +823,43 @@ nodeLabels:
 #     # Raise only if frame loss during transient viewer stalls is a
 #     # bigger problem than RSS growth.
 #     queueMemoryLimitMb: 8
-#     # motorDiagnosticsDownsample: streamer-only override for the
-#     # /motor_diagnostics publish rate. The shm producer (dma_main)
+#     # Per-queue downsample overrides. The shm producer (dma_main)
 #     # writes every queue at ~482 Hz; the streamer's --downsample N
-#     # publishes every Nth shm sample, so the rate to the viewer is
-#     # 482 / N. The base manifest sets --downsample 25, giving the
-#     # joint actuals/desired/controller stream ≈ 20 Hz.
+#     # publishes 1 of every N shm samples, so the rate to the viewer
+#     # is 482 / N. The base manifest sets --downsample 25, giving the
+#     # joint stream ≈ 20 Hz at the viewer.
 #     #
-#     # /motor_diagnostics is treated differently because each snapshot
-#     # explodes into ~300 rerun entities (per-motor temp / fault /
-#     # status × ~30 joints + bus counters + per-slave state). At the
-#     # joint rate that's ~6000 series-updates/s from diagnostics alone
-#     # — usually more than the entire joint stream and enough to
-#     # saturate the streamer→server gRPC sender (manifesting as a high
-#     # AsyncLogQueue drop rate, holes in the live view).
+#     # EVERY high-rate queue has its own override. All default to 0
+#     # (= inherit --downsample); set positive to override for that
+#     # queue only. Useful when one queue's per-cycle entity count
+#     # saturates the gRPC sender at the global rate — most commonly:
+#     #   /motor_diagnostics  ~300 entities/cycle (per-motor temp/fault/
+#     #                       status × ~30 joints + bus + slave state)
+#     #   /state_estimator    ~120 entities/cycle (pelvis 6-DoF + joints
+#     #                       + IMU + F/T + contact)
+#     #   /raw_imu_actuals    shm depth 1024 vs other queues' 128
 #     #
-#     # Set this to a LARGER number than the global --downsample to
-#     # publish diagnostics at a slower rate without slowing joint data:
-#     #   125 → 482 / 125 ≈ 4 Hz   (reasonable for thermal trends)
-#     #   500 → 482 / 500 ≈ 1 Hz   (truly bare-minimum visibility)
-#     # Set to the same value (e.g. 25) — or omit / 0 — to inherit the
-#     # global --downsample. The recorder is unaffected (records the
-#     # full 482 Hz stream to .rrd regardless).
-#     motorDiagnosticsDownsample: 125
+#     # Set LARGER than --downsample to slow that queue. With
+#     # --downsample 25 (20 Hz joints):
+#     #   125 → 482 / 125 ≈ 4 Hz   (good for diagnostics / SE)
+#     #   500 → 482 / 500 ≈ 1 Hz   (truly bare minimum)
+#     #
+#     # Event-driven queues (/errors, /commands, /command_responses,
+#     # /motor_params_applied) are NOT downsampled — they fire rarely
+#     # enough that the global rate is fine and dropping events would
+#     # mask real activity.
+#     #
+#     # The recorder is unaffected — captures the full 482 Hz stream
+#     # to .rrd regardless of these knobs.
+#     actualsDownsample: 0              # /actuals             (0 = inherit)
+#     actualsTransformsDownsample: 0    # /actuals_transforms
+#     desiredDownsample: 0              # /desired
+#     desiredsControllerDownsample: 0   # /desireds_controller
+#     desiredsTransformsDownsample: 0   # /desireds_transforms
+#     rawImuDownsample: 50              # /raw_imu_actuals     → ~10 Hz
+#     motorDiagnosticsDownsample: 125   # /motor_diagnostics   → ~4 Hz
+#     stateEstimatorDownsample: 125     # /state_estimator     → ~4 Hz
+#     gripperDownsample: 0              # /desired_{left,right}_gripper
 #
 #   # cpp-robot-state-estimator: on robots without F/T sensors (0-F/T
 #   # hardware like mk11000009), the default ft_sensors contact source
