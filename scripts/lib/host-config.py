@@ -1623,8 +1623,8 @@ EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
 # which patches the positronic-config ConfigMap instead) don't trigger
 # an empty no-op patch on the workload.
 _WORKLOAD_PATCH_FIELDS: frozenset[str] = frozenset({
-    "mounts", "privileged", "variant", "queueMemoryLimitMb", "explodeJoints",
-    "extraArgs",
+    "mounts", "privileged", "variant", "queueMemoryLimitMb",
+    "motorDiagnosticsDownsample", "explodeJoints", "extraArgs",
 })
 
 
@@ -1695,8 +1695,15 @@ def _build_deployment_patch(
     variant = spec.get("variant")
     queue_limit_mb = spec.get("queueMemoryLimitMb")
     explode_joints = spec.get("explodeJoints")
+    motor_diag_downsample = spec.get("motorDiagnosticsDownsample")
     extra_args = spec.get("extraArgs") or []
-    if variant is not None or queue_limit_mb is not None or explode_joints or extra_args:
+    if (
+        variant is not None
+        or queue_limit_mb is not None
+        or explode_joints
+        or motor_diag_downsample is not None
+        or extra_args
+    ):
         base_args = DEPLOYMENT_BASE_ARGS.get(deployment_name)
         if base_args is None:
             # Defensive — validate() should have caught this. Skip silently
@@ -1708,6 +1715,14 @@ def _build_deployment_patch(
                 args_out += ["--variant", str(variant)]
             if queue_limit_mb is not None:
                 args_out += ["--queue-memory-limit", str(queue_limit_mb)]
+            if motor_diag_downsample is not None:
+                # Streamer-only flag — separate publish rate for the high-
+                # cardinality /motor_diagnostics queue (per-motor temp /
+                # fault / status × ~30 joints + bus counters + per-slave
+                # state ≈ 300 entities/cycle). At the joint actuals/desired
+                # rate it saturates the gRPC sender; operators usually
+                # want diagnostics at 2–5 Hz, not 20 Hz.
+                args_out += ["--motor-diagnostics-downsample", str(motor_diag_downsample)]
             if explode_joints:
                 # Recorder's parser expects a single comma-joined string
                 # ("SpineYaw,RightAnklePitch"), so flatten the list here.
@@ -2718,6 +2733,30 @@ def cmd_validate(cfg: dict) -> int:
                         errors.append(
                             f"deployments.{name}.queueMemoryLimitMb: "
                             f"must be >= 1 MB"
+                        )
+            # motorDiagnosticsDownsample: streamer-only override for the
+            # /motor_diagnostics publish rate (every Nth frame). 0 = inherit
+            # the global --downsample. Set when the global rate is fine
+            # for joint actuals but saturates the gRPC sender when also
+            # publishing ~300 diagnostic entities/cycle.
+            if "motorDiagnosticsDownsample" in spec:
+                if name != "rerun-streamer":
+                    errors.append(
+                        f"deployments.{name}.motorDiagnosticsDownsample: "
+                        f"only supported on rerun-streamer"
+                    )
+                else:
+                    d = spec["motorDiagnosticsDownsample"]
+                    if isinstance(d, bool) or not isinstance(d, int):
+                        errors.append(
+                            f"deployments.{name}.motorDiagnosticsDownsample: "
+                            f"must be a non-negative integer (0 = inherit "
+                            f"--downsample)"
+                        )
+                    elif d < 0:
+                        errors.append(
+                            f"deployments.{name}.motorDiagnosticsDownsample: "
+                            f"must be >= 0 (0 = inherit --downsample)"
                         )
             # extraArgs: generic append-only argv escape hatch. Supported
             # only on EXTRA_ARGS_SUPPORTED_DEPLOYMENTS (currently

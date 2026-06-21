@@ -557,6 +557,74 @@ bash scripts/positronic.sh sonic restart             # roll the DaemonSet
 bash scripts/positronic.sh sonic web                 # print the UI URL
 ```
 
+### 3.12 rerun-streamer (live web visualisation)
+
+The `rerun-streamer` DaemonSet hosts the live web view at
+`http://<robot>:9788` and the gRPC ingest at `:9877`. Off by default —
+enable per host by setting `foundation.bot/has-streamer: "true"` under
+`nodeLabels:` in `/etc/phantomos/host-config.yaml`, then rerun
+bootstrap (see [§3.10](#310-toggle-an-optional-workload-on-a-robot)).
+Manifest:
+[`manifests/base/dma-streams/rerun-streamer.yaml`](../manifests/base/dma-streams/rerun-streamer.yaml).
+
+**Operator URL.** Browsers landing on `http://<robot>:9788` without a
+query string hit the rerun Welcome page (the WASM viewer doesn't know
+which gRPC source to dial — the default points at `localhost:9877`,
+which from a remote browser is the operator's laptop, not the robot).
+Always use:
+
+```
+http://<robot>:9788/?url=rerun+http://<robot>:9877/proxy
+```
+
+The streamer's image whitelists the matching origin via
+`--cors-allow-origin 'http://*:9788'`.
+
+#### Tuning the live-view publish rate
+
+The shm producer (`dma_main`) writes every queue at the EtherCAT cycle
+rate (~482 Hz). The streamer publishes **1 out of every N samples** to
+the viewer; the per-host knobs are in the
+`deployments.rerun-streamer` block of `host-config.yaml`:
+
+```yaml
+deployments:
+  rerun-streamer:
+    variant: mk2
+    queueMemoryLimitMb: 4                # AsyncLogQueue cap (MB)
+    motorDiagnosticsDownsample: 125      # /motor_diagnostics-only override
+```
+
+The base manifest sets the GLOBAL `--downsample 25`, so:
+
+```
+viewer rate = 482 / 25  ≈ 20 Hz   (joints, desireds, controller, …)
+```
+
+`motorDiagnosticsDownsample` overrides `--downsample` for the
+`/motor_diagnostics` queue ONLY:
+
+| Value | Math | Diagnostics rate |
+|---|---|---|
+| `0` (or omitted) | inherits `--downsample` (25) | ≈ 20 Hz |
+| `25` | 482 / 25 | ≈ 20 Hz (same as inherit; explicit) |
+| `125` (recommended) | 482 / 125 | ≈ 4 Hz |
+| `500` | 482 / 500 | ≈ 1 Hz |
+
+**Why a separate knob exists.** Each `/motor_diagnostics` snapshot
+explodes into ~300 Rerun entities (per-motor temperature / fault /
+status × ~30 joints + bus counters + per-slave EtherCAT state). At the
+joint rate that's ~6000 series-updates/s from diagnostics alone —
+typically larger than the entire joint stream and enough to saturate
+the streamer→server gRPC sender. Symptom: high `gRPC queue dropped:`
+counter in the streamer's stats lines and holes / freezes in the live
+view. Setting `motorDiagnosticsDownsample: 125` drops that to ~1200
+series-updates/s without touching joint visibility.
+
+**The recorder is unaffected.** It captures every shm sample to `.rrd`
+regardless of either knob — downsampling only changes what reaches the
+live viewer.
+
 ---
 
 ## 4. Bootstrap phases reference

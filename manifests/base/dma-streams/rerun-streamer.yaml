@@ -168,13 +168,23 @@ spec:
           securityContext:
             runAsUser: 0
 
+          # Memory headroom = 32 MB ring (--server-memory-limit) +
+          # ~80 MB peak Tokio/gRPC working set + ~64 MB headroom for
+          # per-publish chunk handling once the streamer publishes ALL
+          # of: actuals, desired, desireds_controller, motor_diagnostics
+          # (~300 entities/cycle), motor_params_applied, errors,
+          # left/right gripper, /commands, /command_responses, and
+          # optionally /state_estimator. At the prior 128–192 Mi cap
+          # the server OOMKilled within a few minutes of the rerun-
+          # streamer-more-queues image landing, which severed the
+          # streamer's gRPC socket and zeroed the live view.
           resources:
             requests:
               cpu: 100m
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 192Mi
+              memory: 384Mi
 
           # Sidecar startup gate. Regular containers (streamer below)
           # wait on this to pass. 60 × 1 s = 60 s cold-start budget.
