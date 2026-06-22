@@ -819,37 +819,44 @@ def cmd_get_phantom_sonic_config_kv(cfg: dict) -> int:
 #   - ROS_DOMAIN_ID / PSI0_ACTION_QUEUE / PSI0_BRIDGE_RATE_HZ /
 #     PSI0_ENABLE_{GAIT,HEIGHT,YAW} are read by the bridge container.
 #   - ROS_DOMAIN_ID / POLICY_ONNX_PATH are read by the walking container.
+#   - ROS_DOMAIN_ID / PSI0_LOCO_HEALTH_PATH / PSI0_LOCO_MIRROR_HZ are read by
+#     the loco-state-mirror container (mirrors the walking FSM + Ψ₀ engage state
+#     to /dev/shm for the host-side deploy dashboard).
 # The loco passthrough flags default OFF (spec-004 AC-7 gating). Defaults
 # mirror the manifest shell-defaults exactly so a bare (or absent) phantomPsi
 # block renders a working ConfigMap.
 DEFAULT_PSI: dict[str, str] = {
-    "runDir":       "/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333",
-    "ckptStep":     "120000",
-    "cameraId":     "0",
-    "stateQueue":   "psi0_state_j24",
-    "actionQueue":  "psi0_actions_j24",
-    "instruction":  "Grasp and lift part.",
-    "rosDomainId":  "43",
-    "bridgeRateHz": "50",
-    "enableGait":   "0",
-    "enableHeight": "0",
-    "enableYaw":    "0",
-    "walkingOnnx":  "/models/walking/policy.onnx",
+    "runDir":         "/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333",
+    "ckptStep":       "120000",
+    "cameraId":       "0",
+    "stateQueue":     "psi0_state_j24",
+    "actionQueue":    "psi0_actions_j24",
+    "instruction":    "Grasp and lift part.",
+    "rosDomainId":    "43",
+    "bridgeRateHz":   "50",
+    "enableGait":     "0",
+    "enableHeight":   "0",
+    "enableYaw":      "0",
+    "walkingOnnx":    "/models/walking/policy.onnx",
+    "locoHealthPath": "/dev/shm/psi0_loco.health",
+    "locoMirrorHz":   "5",
 }
 
 PSI_FIELD_TO_ENV: dict[str, str] = {
-    "runDir":       "PSI0_RUN_DIR",
-    "ckptStep":     "PSI0_CKPT_STEP",
-    "cameraId":     "PSI0_CAMERA_ID",
-    "stateQueue":   "PSI0_STATE_QUEUE",
-    "actionQueue":  "PSI0_ACTION_QUEUE",
-    "instruction":  "PSI0_INSTRUCTION",
-    "rosDomainId":  "ROS_DOMAIN_ID",
-    "bridgeRateHz": "PSI0_BRIDGE_RATE_HZ",
-    "enableGait":   "PSI0_ENABLE_GAIT",
-    "enableHeight": "PSI0_ENABLE_HEIGHT",
-    "enableYaw":    "PSI0_ENABLE_YAW",
-    "walkingOnnx":  "POLICY_ONNX_PATH",
+    "runDir":         "PSI0_RUN_DIR",
+    "ckptStep":       "PSI0_CKPT_STEP",
+    "cameraId":       "PSI0_CAMERA_ID",
+    "stateQueue":     "PSI0_STATE_QUEUE",
+    "actionQueue":    "PSI0_ACTION_QUEUE",
+    "instruction":    "PSI0_INSTRUCTION",
+    "rosDomainId":    "ROS_DOMAIN_ID",
+    "bridgeRateHz":   "PSI0_BRIDGE_RATE_HZ",
+    "enableGait":     "PSI0_ENABLE_GAIT",
+    "enableHeight":   "PSI0_ENABLE_HEIGHT",
+    "enableYaw":      "PSI0_ENABLE_YAW",
+    "walkingOnnx":    "POLICY_ONNX_PATH",
+    "locoHealthPath": "PSI0_LOCO_HEALTH_PATH",
+    "locoMirrorHz":   "PSI0_LOCO_MIRROR_HZ",
 }
 
 
