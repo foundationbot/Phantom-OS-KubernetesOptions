@@ -29,7 +29,10 @@
 # DMA.ethercat's dma_main owns. hostIPC + the /dev/shm hostPath mirror the
 # `docker run --ipc host -v /dev/shm:/dev/shm` contract the node is built
 # against. dma_main itself runs as a bare-metal host systemd service, never
-# in k0s. No network ports → no hostNetwork (the node speaks only SHM).
+# in k0s. The node speaks only SHM to the master; the OPTIONAL web console
+# sidecar (WEB_ENABLED=1) adds one TCP port, so the pod uses hostNetwork +
+# the containerPort below — reach it at http://<robot-ip>:8088. With no
+# WEB_TOKEN the console is observe-only (telemetry + e-stop, no arming).
 #
 # ── Mutual exclusion with the other /desired drivers ──────────────────────
 # positronic-control, phantom-locomotion, phantom-sonic, and omni-wbc all
@@ -88,9 +91,12 @@ spec:
         - operator: Exists
           effect: NoSchedule
 
-      # SHM only — share the host IPC namespace + /dev/shm (mirrors
-      # `docker run --ipc host`). No network ports, so NO hostNetwork.
+      # Share the host IPC namespace + /dev/shm (mirrors `docker run --ipc host`).
       hostIPC: true
+      # The web console binds a TCP port on the robot; hostNetwork puts it on the
+      # node's IP (http://<robot-ip>:8088) — no Service/ingress needed.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         - name: dockerhub-creds
       terminationGracePeriodSeconds: 15
@@ -104,6 +110,9 @@ spec:
           # exec's the native node; =smoke runs the artifact-only self-test.
           stdin: true
           tty: true
+          ports:
+            # Web console (wolverine_web). hostNetwork → reachable at the node IP.
+            - { name: web, containerPort: 8088, hostPort: 8088 }
           envFrom:
             # Per-host knobs (clip id, rate, master gain, authority ramp, log
             # paths, joint unwrap). bootstrap's omni-wbc-config phase renders
@@ -122,6 +131,12 @@ spec:
             - { name: OBSERVE_ONLY, value: "1" }
             - { name: IMU_MOUNT,    value: "mk2-pelvis" }
             - { name: ENABLE_GATE,  value: "/dev/shm/wolverine_enable" }
+            # ── web console: observe-only telemetry until WEB_TOKEN is set ──
+            - { name: WEB_ENABLED, value: "1" }
+            - { name: WEB_PORT,    value: "8088" }
+            - { name: LOG_DIR,     value: "/recordings" }
+            # WEB_TOKEN: set via the omni-wbc-config ConfigMap to unlock the
+            # arming/authority controls. Unset here ⇒ the console is read-only.
           volumeMounts:
             # /dev/shm carries the DMA queues (actuals/desired/config) AND
             # the operator enable-gate file.
