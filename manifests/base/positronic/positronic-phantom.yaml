@@ -57,10 +57,10 @@ spec:
         name: positronic-phantom
         resources:
           limits:
-            cpu: '8'
+            cpu: '2'
             memory: 16Gi
           requests:
-            cpu: '8'
+            cpu: '2'
             memory: 16Gi
         securityContext:
           privileged: true
