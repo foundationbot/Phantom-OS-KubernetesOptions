@@ -5,10 +5,11 @@
 # that was brought up on ch4 (see Psi0-VLA/k0sdeployment.md + loco-vla-worklog.md).
 #
 # ── Topology ───────────────────────────────────────────────────────────────
-# Four containers share the host's /dev/shm (the DMA ring buffers) via
+# Six containers share the host's /dev/shm (the DMA ring buffers) via
 # hostIPC + a /dev/shm hostPath, so the VLA, the bridge, the walking policy,
-# and the proprio producer all read/write the same POSIX-shm tensor/video
-# queues:
+# the proprio producer, the operator gamepad, and the loco-state mirror all
+# read/write the same POSIX-shm tensor/video queues (the operator also reads
+# /dev/input):
 #   psi0-vla   — Ψ₀ policy (psi.deploy.psi0_dma_runner) on the GPU. Reads the
 #               egocentric camera ring (/dev/shm/video_*_cam{N}, written by the
 #               dma-video producer) + the proprio state ring, runs the flow
@@ -21,6 +22,13 @@
 #   psi0-state — phantom_sonic.actuals_state_source: bridges the robot DMA
 #               daemon's /actuals + /config into the (1,72) proprio state ring
 #               psi0-vla reads (CPU-only; full notes on the container below).
+#   operator   — bridge.psi0_operator_node: reads the handheld gamepad at
+#               /dev/input/js0 and publishes the walking start/stop +
+#               /phantom/psi0/engage topics (A=stand, X+Y=kill, Y+B/Y/B=Ψ₀).
+#   loco-state-mirror — bridge.psi0_loco_state_mirror: subscribes to
+#               /phantom/policy_state + /phantom/psi0/engage and writes
+#               /dev/shm/psi0_loco.health so the ROS-free host deploy dashboard
+#               can render walking FSM + Ψ₀ engage state.
 # hostNetwork (ROS/DDS + DMA), single GPU on psi0-vla via the nvidia device
 # plugin (nvidia.com/gpu: 1) + runtimeClassName nvidia.
 #
@@ -47,7 +55,8 @@
 #
 # ── Options ────────────────────────────────────────────────────────────────
 # Per-host knobs (run dir, ckpt step, camera, queue names, instruction, ROS
-# domain, bridge rate, loco enable flags, walking ONNX) come from the
+# domain, bridge rate, loco enable flags, walking ONNX, loco-state-mirror
+# health path + rate) come from the
 # phantom-psi-config ConfigMap, rendered by bootstrap's psi-config phase from
 # host-config.yaml's phantomPsi block. Each container envFrom's it
 # (optional: true) and psi0-vla's command carries "${VAR:-default}" shell-
@@ -229,6 +238,70 @@ spec:
             requests: { cpu: "1", memory: "1Gi" }
             limits:   { cpu: "2", memory: "2Gi" }
 
+        # ── operator — handheld gamepad → walking + Ψ₀ engage ─────────────
+        # Reads the controller at /dev/input/js0 (ASUS ROG Raikiri Pro, xpad
+        # "Generic X-Box pad"; A=0 B=1 X=2 Y=3) and publishes the ROS topics the
+        # rest of the pod already consumes:
+        #   A          → /phantom/start_startup  (STAND: walking OFF→STARTUP→CONTROL)
+        #   X+Y (both) → /phantom/stop_policy     (KILL ALL: CONTROL→SHUTDOWN→OFF, limp)
+        #   Y+B (both) → /phantom/psi0/engage=true  (START Ψ₀ arm tracking)
+        #   Y / B      → /phantom/psi0/engage=false / toggle (DISABLE / PAUSE Ψ₀)
+        # Same phantom-loco image as bridge/walking. privileged: the joystick char
+        # device is otherwise blocked by the device cgroup; hostNetwork already
+        # puts the node on the robot's DDS domain. PSI0_START_ENGAGED (CM) sets the
+        # boot engage default — leave unset/0 so Ψ₀ stays held until START (Y+B).
+        - name: operator
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "bridge.psi0_operator_node"]
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: devinput, mountPath: /dev/input }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
+        # ── loco-state-mirror — walking FSM + Ψ₀ engage → /dev/shm ─────────
+        # The host-side deploy dashboard (Psi0-VLA/scripts/viz/psi0_deploy_
+        # dashboard.py) is ROS-free — it reads /dev/shm only — so it cannot see
+        # the walking control-state or the operator engage latch, which live on
+        # ROS topics inside this pod's DDS domain. This container subscribes to
+        # /phantom/policy_state (Float32 ControlState) + /phantom/psi0/engage
+        # (Bool) and atomically rewrites /dev/shm/psi0_loco.health, which the
+        # dashboard reads (the shared dshm hostPath is how psi0_vla.health + the
+        # rings already cross pod→host). Same phantom-loco image as bridge/
+        # walking/operator; CPU-only; no /dev/input, no GPU, not privileged.
+        #
+        # Like psi0-vla/psi0-state it exposes its CLI options with "${VAR:-…}"
+        # shell-defaults so PSI0_LOCO_HEALTH_PATH / PSI0_LOCO_MIRROR_HZ from the
+        # phantom-psi-config CM (envFrom) override them per host; the image
+        # entrypoint sources the ROS env before exec'ing these args, so a plain
+        # `bash -c` wrapper keeps rclpy importable.
+        - name: loco-state-mirror
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - bash
+            - -c
+            - >-
+              exec python -m bridge.psi0_loco_state_mirror
+              --health-path "${PSI0_LOCO_HEALTH_PATH:-/dev/shm/psi0_loco.health}"
+              --write-hz "${PSI0_LOCO_MIRROR_HZ:-5}"
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
       volumes:
         # Checkpoint run dir(s) + the walking ONNX live on the host (staged at
         # /var/lib/psi0/models — the same tree the hand-applied psi0-models PV
@@ -241,3 +314,6 @@ spec:
           hostPath: { path: /var/lib/psi0/cache, type: DirectoryOrCreate }
         - name: dshm
           hostPath: { path: /dev/shm, type: Directory }
+        # Operator gamepad char device(s) for the `operator` container.
+        - name: devinput
+          hostPath: { path: /dev/input, type: Directory }

@@ -41,7 +41,7 @@ SONIC_CONTAINERS="control walking sonic motion-replay"
 
 PSI_NAMESPACE="${PSI_NAMESPACE:-psi}"
 PSI_APP_LABEL="${PSI_APP_LABEL:-app.kubernetes.io/name=phantom-psi}"
-PSI_CONTAINERS="psi0-vla bridge walking psi0-state"
+PSI_CONTAINERS="psi0-vla bridge walking psi0-state operator loco-state-mirror"
 
 ARGO_NS="${ARGO_NS:-argocd}"
 
@@ -211,9 +211,9 @@ ${C_BOLD}Subcommands:${C_RESET}
                                [--previous] | exec <container> [-- cmd] |
                                restart | web. 'sonic --help' for details.
   psi <action> [args...]       Helpers for the phantom-psi DaemonSet (Ψ₀ VLA
-                               → locomotion; one pod, four containers:
-                               psi0-vla, bridge, walking, psi0-state, in the
-                               psi ns).
+                               → locomotion; one pod, six containers:
+                               psi0-vla, bridge, walking, psi0-state, operator,
+                               loco-state-mirror, in the psi ns).
                                Actions: status | logs [<container>] [-f]
                                [--previous] | exec [<container>] [-- cmd] |
                                shell [<container>] | restart. 'psi --help'.
@@ -771,10 +771,11 @@ HELP
 }
 
 # ---------- subcommand: psi -----------------------------------------------
-# The phantom-psi DaemonSet is a single pod with four containers
-# (psi0-vla, bridge, walking, psi0-state) in the psi namespace. These helpers wrap the
-# per-container kubectl incantations (label selector + -c <name>) so an
-# operator can shell in / tail logs without memorising them. Mirrors `sonic`.
+# The phantom-psi DaemonSet is a single pod with six containers
+# (psi0-vla, bridge, walking, psi0-state, operator, loco-state-mirror) in the
+# psi namespace. These helpers wrap the per-container kubectl incantations
+# (label selector + -c <name>) so an operator can shell in / tail logs without
+# memorising them. Mirrors `sonic`.
 
 _psi_pod() {
   $KUBECTL -n "$PSI_NAMESPACE" get pod -l "$PSI_APP_LABEL" \
@@ -890,7 +891,7 @@ cmd_psi() {
     -h|--help|help)
       cat <<HELP
 psi <action> — helpers for the phantom-psi DaemonSet.
-One pod, four containers: $PSI_CONTAINERS (psi ns).
+One pod, six containers: $PSI_CONTAINERS (psi ns).
 
 Actions:
   status                       DaemonSet + pod + per-container state/restarts.
@@ -908,8 +909,10 @@ Examples:
   bash scripts/positronic.sh psi status
   bash scripts/positronic.sh psi shell                 # bash in psi0-vla
   bash scripts/positronic.sh psi shell psi0-state      # bash in the proprio producer
+  bash scripts/positronic.sh psi shell loco-state-mirror   # bash in the state mirror
   bash scripts/positronic.sh psi logs psi0-vla -f
   bash scripts/positronic.sh psi logs psi0-state       # proprio producer logs
+  bash scripts/positronic.sh psi logs loco-state-mirror    # walking/engage mirror logs
   bash scripts/positronic.sh psi logs                  # all containers
   bash scripts/positronic.sh psi exec psi0-vla -- python -c 'import torch; print(torch.cuda.get_device_name())'
   bash scripts/positronic.sh psi restart

@@ -9,7 +9,7 @@ DaemonSet, per-host knobs rendered into a ConfigMap by bootstrap, and a
 
 ## What it runs
 
-A single pod (`positronic`-style colocation) in the **`psi`** namespace, **four**
+A single pod (`positronic`-style colocation) in the **`psi`** namespace, **six**
 containers sharing the host `/dev/shm` DMA rings (hostNetwork + hostIPC):
 
 | Container | Image | Role |
@@ -18,6 +18,8 @@ containers sharing the host `/dev/shm` DMA rings (hostNetwork + hostIPC):
 | `bridge` | `phantom-loco` | `bridge.psi0_loco_bridge`: steps the `(Ta,Da)` action ring onto the walking-policy command topics, and reads the **`psi0_state` ring** (`[7:36]`) for the measured-pose HOLD base. Gait/height/yaw passthrough gated by `PSI0_ENABLE_*`, default off — spec-004 AC-7. |
 | `walking` | `phantom-loco` | `inference.policy_node`: the lower-body walking ONNX policy. |
 | `psi0-state` | `psi0-sonic` | `phantom_sonic.actuals_state_source`: reads the robot's DMA `/actuals` plane and writes the `(1,72)` `psi0_state` proprio ring @ 50 Hz — the live measured state both `psi0-vla` and `bridge` consume (zero-fills the taskspace mean when `meta/stats_psi0.json` is absent). |
+| `operator` | `phantom-loco` | `bridge.psi0_operator_node`: reads the handheld gamepad at `/dev/input/js0` (privileged) and publishes the walking start/stop + `/phantom/psi0/engage` topics — `A`=stand, `X+Y`=kill, `Y+B`/`Y`/`B`=start/disable/pause Ψ₀. |
+| `loco-state-mirror` | `phantom-loco` | `bridge.psi0_loco_state_mirror`: subscribes to `/phantom/policy_state` (walking FSM) + `/phantom/psi0/engage` and atomically writes `/dev/shm/psi0_loco.health` so the **ROS-free** host-side deploy dashboard can render walking + engage state. CPU-only; CLI/env knobs `PSI0_LOCO_HEALTH_PATH` / `PSI0_LOCO_MIRROR_HZ`. |
 
 > **Bridge ↔ ring contract (two robustness fixes landed during Thor bring-up).**
 > (1) **STOP sentinel:** a `FORMAT_TENSOR_STOP` (101) frame written by `psi0-vla`
@@ -71,8 +73,8 @@ sudo k0s kubectl label node <robot> \
 
 Per-host knobs live in the `phantomPsi:` block of `host-config.yaml`. Bootstrap
 phase **8b `psi-config`** renders them into the `phantom-psi-config` ConfigMap
-(all four containers `envFrom` it); `psi0-vla`'s command carries
-`${VAR:-default}` shell-defaults so the pod still starts before the CM exists.
+(all six containers `envFrom` it); `psi0-vla` / `psi0-state` / `loco-state-mirror`
+carry `${VAR:-default}` shell-defaults so the pod still starts before the CM exists.
 Every field is optional and falls back to the documented default.
 
 | host-config field | env var | default |
@@ -87,6 +89,8 @@ Every field is optional and falls back to the documented default.
 | `bridgeRateHz` | `PSI0_BRIDGE_RATE_HZ` | `50` |
 | `enableGait` / `enableHeight` / `enableYaw` | `PSI0_ENABLE_*` | `0` (AC-7 gated) |
 | `walkingOnnx` | `POLICY_ONNX_PATH` | `/models/walking/policy.onnx` |
+| `locoHealthPath` | `PSI0_LOCO_HEALTH_PATH` | `/dev/shm/psi0_loco.health` |
+| `locoMirrorHz` | `PSI0_LOCO_MIRROR_HZ` | `5` |
 
 Change a value → `sudo bash scripts/bootstrap-robot.sh --psi-config` (re-renders
 the CM and rolls the DaemonSet).
