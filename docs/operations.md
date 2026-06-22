@@ -652,7 +652,7 @@ reaches the live viewer.
 
 | Phase | Flag | What it does |
 |---|---|---|
-| 1. preflight | (always) | OS / arch / kernel / disk / sudo / port collisions |
+| 1. preflight | (always) | OS / arch / kernel / disk / sudo / port collisions; Tailscale present + daemon Running (WARN-only — needed for the cluster API address and the vr-web cert) |
 | 2. deps | `--deps` | apt installs, k0s binary, terraform binary |
 | 3. cluster | `--cluster` | require Tailscale; pin `spec.api.address` in `/etc/k0s/k0s.yaml`; `k0s install controller --single --enable-worker -c …`; systemd start; write `/root/.kube/config` (server pinned to `127.0.0.1`); reconcile `foundation.bot/*` node labels from `host-config.yaml`'s `nodeLabels:`. Self-heals already-installed clusters that bake the `1.1.1.1` sentinel — see [§3.10](#310-toggle-an-optional-workload-on-a-robot) for the day-2 toggle workflow. |
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |

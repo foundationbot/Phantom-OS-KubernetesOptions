@@ -455,6 +455,10 @@ PASS=0; FAIL=0; SKIP=0
 pass() { PASS=$((PASS + 1)); printf '  \033[32m✓ PASS\033[0m  %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  \033[31m✗ FAIL\033[0m  %s\n' "$1"; }
 skip() { SKIP=$((SKIP + 1)); printf '  \033[33m• SKIP\033[0m  %s\n' "$1"; }
+# warn: a visible complaint that does NOT count toward FAIL and so never
+# trips the bail-on-fail guard. Use for "this is wrong but bootstrap can
+# still proceed" cases (e.g. the preflight Tailscale check).
+warn() { printf '  \033[33m! WARN\033[0m  %s\n' "$1"; }
 info() { printf '  \033[2m·\033[0m %s\n' "$1"; }
 note() { printf '  \033[36m→\033[0m %s\n' "$1"; }
 phase() { printf '\n\033[1;36m──\033[0m \033[1m%s\033[0m\n' "$1"; }
@@ -1160,6 +1164,26 @@ preflight() {
       fail "port $port: held by $proc"
     fi
   done
+
+  # Tailscale: required for the cluster API address (phase 3) and the
+  # vr-web TLS cert (phase 6, `tailscale cert`). Presence + daemon-Running
+  # only — no version floor (the fleet tracks whatever the tailscale apt
+  # repo ships). WARN, not FAIL: the cluster phase has a default-gateway
+  # fallback, so a missing/stopped tailscale shouldn't halt bootstrap —
+  # but the operator should know before phases 3/6 surprise them.
+  if command -v tailscale >/dev/null 2>&1; then
+    ts_ver=$(tailscale version 2>/dev/null | head -1 | tr -d '[:space:]')
+    ts_state=$(tailscale status --json 2>/dev/null | python3 -c \
+      'import json,sys; print(json.load(sys.stdin).get("BackendState","Unknown"))' \
+      2>/dev/null || echo Unknown)
+    if [ "$ts_state" = "Running" ]; then
+      pass "tailscale: ${ts_ver:-unknown} (Running)"
+    else
+      warn "tailscale ${ts_ver:-unknown} installed but daemon not Running (BackendState=$ts_state) — needed for the cluster API address (phase 3) + vr-web cert (phase 6); run 'sudo tailscale up'"
+    fi
+  else
+    warn "tailscale not installed — needed for the cluster API address (phase 3) + vr-web TLS cert (phase 6); install from https://tailscale.com/download"
+  fi
 }
 
 # ---- phase 2: deps ------------------------------------------------------
