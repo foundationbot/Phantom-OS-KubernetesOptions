@@ -1182,7 +1182,7 @@ preflight() {
       warn "tailscale ${ts_ver:-unknown} installed but daemon not Running (BackendState=$ts_state) — needed for the cluster API address (phase 3) + vr-web cert (phase 6); run 'sudo tailscale up'"
     fi
   else
-    warn "tailscale not installed — needed for the cluster API address (phase 3) + vr-web TLS cert (phase 6); install from https://tailscale.com/download"
+    warn "tailscale not installed — needed for the cluster API address (phase 3) + vr-web TLS cert (phase 6); install with: curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up"
   fi
 }
 
