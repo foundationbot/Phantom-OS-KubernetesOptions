@@ -501,6 +501,157 @@ def cmd_clear_positronic_launch_command(path: str) -> int:
     return 0
 
 
+# Containers whose image MUST live in the in-cluster local registry
+# (localhost:5443/*). These are locally-built busybox carrier images with
+# no DockerHub upstream and no containerd mirror fallthrough — a non-local
+# ref would never resolve on the robot. Used by cmd_set_image (Component B
+# of the offline image-tarball provisioning design, 2026-06-22).
+LOCAL_REGISTRY_PREFIX: str = "localhost:5443/"
+LOCAL_REGISTRY_ONLY_CONTAINERS: frozenset[str] = frozenset(
+    {"phantom-models", "phantom-policies"}
+)
+
+
+def cmd_set_image(path: str, container: str, ref: str) -> int:
+    """Persist images.<container>.image: <ref> into the host-config file
+    in place, preserving surrounding comments / formatting. Component B
+    of the offline image-tarball provisioning design (2026-06-22) — the
+    setter the --load-image-tars bootstrap phase calls after pushing a
+    docker-save'd tarball into the local registry.
+
+    Line-based rewrite, mirroring cmd_set_positronic_launch_command.
+    Cases handled:
+      (a) images.<container>.image already exists -> replace value.
+      (b) images: block exists but has no <container> entry -> insert a
+          '  <container>:\\n    image: <ref>\\n' entry under images:.
+      (c) images: block absent entirely -> append a fresh images: block
+          at EOF with the one entry.
+
+    Validation:
+      - <container> must be a key in CONTAINER_TARGETS.
+      - <ref> must be a non-empty repo:tag string (per _split_image_ref).
+      - phantom-models / phantom-policies are local-registry-only: a ref
+        that does not start with 'localhost:5443/' is rejected."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+
+    if container not in CONTAINER_TARGETS:
+        print(
+            f"error: unknown container {container!r} "
+            f"(valid: {', '.join(sorted(CONTAINER_TARGETS))})",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not isinstance(ref, str) or not ref.strip():
+        print("error: image ref must be a non-empty string", file=sys.stderr)
+        return 2
+    ref = ref.strip()
+    try:
+        _split_image_ref(ref)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if (
+        container in LOCAL_REGISTRY_ONLY_CONTAINERS
+        and not ref.startswith(LOCAL_REGISTRY_PREFIX)
+    ):
+        print(
+            f"error: container {container!r} is local-registry-only; "
+            f"ref {ref!r} must start with {LOCAL_REGISTRY_PREFIX!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    src = p.read_text().splitlines(keepends=True)
+
+    def _line_indent(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    def _is_yaml_key_line(line: str) -> bool:
+        stripped = line.lstrip(" ")
+        return bool(stripped.strip()) and not stripped.startswith("#")
+
+    # Locate images:, <container>:, image: line spans. We record the END
+    # of the images block so a new <container> entry inserts at the right
+    # position.
+    images_line: "int | None" = None
+    container_line: "int | None" = None
+    image_line: "int | None" = None
+    images_block_end: "int | None" = None  # exclusive insert point
+
+    n = len(src)
+    i = 0
+    while i < n:
+        line = src[i]
+        if _line_indent(line) == 0 and line.lstrip(" ").startswith("images:"):
+            images_line = i
+            # Walk forward over the images block (indent > 0 or blank/comment).
+            j = i + 1
+            while j < n:
+                if _is_yaml_key_line(src[j]) and _line_indent(src[j]) == 0:
+                    break
+                stripped_j = src[j].lstrip(" ")
+                if (
+                    _line_indent(src[j]) == 2
+                    and stripped_j.startswith(f"{container}:")
+                ):
+                    container_line = j
+                    # Walk over the <container> block (indent >= 4).
+                    k = j + 1
+                    while k < n:
+                        if _is_yaml_key_line(src[k]) and _line_indent(src[k]) <= 2:
+                            break
+                        stripped_k = src[k].lstrip(" ")
+                        if (
+                            _line_indent(src[k]) == 4
+                            and stripped_k.startswith("image:")
+                        ):
+                            image_line = k
+                        k += 1
+                j += 1
+            images_block_end = j
+            break
+        i += 1
+
+    # Case (a): image: line already exists — replace the value in place.
+    if image_line is not None:
+        src[image_line] = f"    image: {ref}\n"
+        p.write_text("".join(src))
+        print(f"set images.{container}.image = {ref}")
+        return 0
+
+    # Case (a'): <container> exists but has no image: line — insert one.
+    if container_line is not None:
+        src.insert(container_line + 1, f"    image: {ref}\n")
+        p.write_text("".join(src))
+        print(f"set images.{container}.image = {ref}")
+        return 0
+
+    # Case (b): images: block exists, no <container> entry — append entry
+    # at the end of the images block.
+    if images_line is not None:
+        assert images_block_end is not None
+        block = f"  {container}:\n    image: {ref}\n"
+        src.insert(images_block_end, block)
+        p.write_text("".join(src))
+        print(f"set images.{container}.image = {ref}")
+        return 0
+
+    # Case (c): no images: block — append a fresh one at EOF.
+    if src and not src[-1].endswith("\n"):
+        src[-1] = src[-1] + "\n"
+    src.append("images:\n")
+    src.append(f"  {container}:\n")
+    src.append(f"    image: {ref}\n")
+    p.write_text("".join(src))
+    print(f"set images.{container}.image = {ref}")
+    return 0
+
+
 DEFAULT_LOCOMOTION_POLICY: str = "mk2-walking-lower-body-1imu"
 
 # Locomotion modes. 'policy' (default) runs the normal dma_policy_node
@@ -3084,6 +3235,14 @@ def main() -> int:
             )
             return 2
         return cmd_get_image_for_container(cfg, sys.argv[3])
+    if cmd == "set-image":
+        if len(sys.argv) != 5:
+            print(
+                "usage: host-config.py <path> set-image <container> <ref>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_set_image(path, sys.argv[3], sys.argv[4])
     if cmd == "get-dma-ethercat-config-set":
         return cmd_get_dma_ethercat_config_set(cfg)
     if cmd == "get-dma-ethercat-config-path":
