@@ -648,6 +648,109 @@ reaches the live viewer.
 
 ---
 
+### 3.13 Copy a locally-built image to other robots (offline tar transfer)
+
+`phantom-models` and `phantom-policies` are locally-built busybox carrier
+images pinned to `localhost:5443/*` — they have no DockerHub upstream and
+no containerd mirror fallthrough. Once you have built them on one robot
+(see [`scripts/build-images-deb.sh`](../scripts/build-images-deb.sh) and
+[`docs/internal/image-flow-and-registry-bootstrap.md`](internal/image-flow-and-registry-bootstrap.md)),
+you can move them to other robots as plain tarballs instead of rebuilding
+in place. The worked example below uses `phantom-models:2026-06-08` and
+`phantom-policies:2026-06-09-sonic-onnx`.
+
+**1. On the source robot — save the images to tarballs.**
+
+```bash
+# pull into the local docker daemon first if they aren't already there
+docker pull localhost:5443/phantom-models:2026-06-08
+docker pull localhost:5443/phantom-policies:2026-06-09-sonic-onnx
+
+docker save localhost:5443/phantom-models:2026-06-08 \
+  -o /root/phantom-models-2026-06-08.tar
+docker save localhost:5443/phantom-policies:2026-06-09-sonic-onnx \
+  -o /root/phantom-policies-2026-06-09-sonic-onnx.tar
+
+# optional: zstd compression (much smaller; load with `zstd -dc | docker load`)
+zstd -19 /root/phantom-models-2026-06-08.tar      # -> *.tar.zst
+zstd -19 /root/phantom-policies-2026-06-09-sonic-onnx.tar
+```
+
+No-docker fallback (skopeo, copies straight from the in-cluster registry
+to an OCI archive):
+
+```bash
+skopeo copy --src-tls-verify=false \
+  docker://localhost:5443/phantom-models:2026-06-08 \
+  oci-archive:/root/phantom-models-2026-06-08.tar:phantom-models:2026-06-08
+```
+
+**2. Relay to each target robot.** Pull the tarballs to a workstation,
+then push them out:
+
+```bash
+# on your workstation
+scp source-robot:/root/phantom-*.tar .
+scp phantom-*.tar target-robot:/root/
+```
+
+> **Arch matters.** A `docker save` tarball carries the architecture of
+> the robot it was built on — an `arm64` tar only loads on an `arm64`
+> target. The workstation is just a relay; it never loads the image, so
+> its own arch is irrelevant. Build (or save) on a host whose arch
+> matches the target fleet.
+
+**3. On each target robot — load and push into the local registry.**
+
+```bash
+docker load -i /root/phantom-models-2026-06-08.tar
+docker load -i /root/phantom-policies-2026-06-09-sonic-onnx.tar
+# (for *.tar.zst:  zstd -dc /root/phantom-models-2026-06-08.tar.zst | docker load)
+
+docker push localhost:5443/phantom-models:2026-06-08
+docker push localhost:5443/phantom-policies:2026-06-09-sonic-onnx
+```
+
+Verify the tags landed in the in-cluster registry:
+
+```bash
+curl -s http://localhost:5443/v2/phantom-models/tags/list
+curl -s http://localhost:5443/v2/phantom-policies/tags/list
+```
+
+This load+push step is automated by
+[`scripts/load-image-tars.sh`](../scripts/load-image-tars.sh)
+(`bash scripts/load-image-tars.sh <tarball> ...` — a pure registry op,
+usable off-robot, no `host-config.yaml` knowledge). A full bootstrap can
+do the whole thing end-to-end — load+push **and** wire the loaded tag
+into `host-config.yaml` — via the `--load-image-tars` phase with
+`--phantom-models-tar` / `--phantom-policies-tar` (see [§4](#4-bootstrap-phases-reference)
+and [§5](#5-per-phase-invocations-cheat-sheet)).
+
+**4. Point the manifests at the loaded tag.** Set the tag in the
+`images:` block of `/etc/phantomos/host-config.yaml` and apply it
+([§3.2](#32-bump-image-tags)):
+
+```bash
+sudo $EDITOR /etc/phantomos/host-config.yaml
+# images:
+#   - phantom-models:2026-06-08
+#   - phantom-policies:2026-06-09-sonic-onnx
+
+sudo bash scripts/bootstrap-robot.sh --gitops
+```
+
+> **Offline alternative.** With no in-cluster registry reachable you can
+> drop the tarballs into `/var/lib/k0s/images/` and run
+> `k0s ctr -n k8s.io images import /var/lib/k0s/images/<tar>` so
+> containerd has them locally. Caveat: for `localhost:5443/*` refs the
+> registry push (step 3) is the durable path — the manifests pull by that
+> ref, and a containerd-local import is lost on a `k0s reset` or a node
+> that didn't get the import. Use the import only as a stopgap when the
+> registry pod is down.
+
+---
+
 ## 4. Bootstrap phases reference
 
 | Phase | Flag | What it does |
@@ -666,6 +769,7 @@ reaches the live viewer.
 | 12. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the `.deb`, write `/etc/dma/dma-ethercat.env` (INTERFACE/DMA_RT_CPU/DMA_CPU_AFFINITY from `cpuIsolation`), render the `dma-ethercat.service` drop-in `Slice=<partition>.slice` + `CPUAffinity=` (so the service can actually run on the isolated cores under cgroup-v2), then enable + start. **Gates phase 13.** |
 | 13. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
 | 14. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
+| 14b. load-image-tars | `--load-image-tars` (with `--phantom-models-tar <path>` / `--phantom-policies-tar <path>`) | (optional) wait for the `k0s-registry` Deployment to become Available, then load + push the prebuilt `phantom-models` / `phantom-policies` tarballs into `localhost:5443` (via [`scripts/load-image-tars.sh`](../scripts/load-image-tars.sh)) and update the matching `images:` tag in `host-config.yaml`. On an interactive full bootstrap, prompts for any path not given by a flag. Runs **between gitops and image-overrides** so the unchanged image-overrides phase injects the new tag. Soft-skips if neither tarball is provided or the registry never comes up. See [§3.13](#313-copy-a-locally-built-image-to-other-robots-offline-tar-transfer). |
 | 15. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
 | 16. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
 | 17. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
@@ -692,6 +796,11 @@ sudo bash scripts/bootstrap-robot.sh --operator-ui-config
 
 # bump image tags
 sudo bash scripts/bootstrap-robot.sh --image-overrides
+
+# load + push prebuilt model/policy tarballs and wire the tag into host-config (see §3.13)
+sudo bash scripts/bootstrap-robot.sh --load-image-tars \
+  --phantom-models-tar /root/phantom-models-2026-06-08.tar \
+  --phantom-policies-tar /root/phantom-policies-2026-06-09-sonic-onnx.tar
 
 # add/remove hostPath mounts
 sudo bash scripts/bootstrap-robot.sh --deployments
