@@ -594,6 +594,8 @@ images:
 #   enableHeight: "0"                      # PSI0_ENABLE_HEIGHT(bridge; spec-004 AC-7, OFF)
 #   enableYaw:    "0"                      # PSI0_ENABLE_YAW   (bridge; spec-004 AC-7, OFF)
 #   walkingOnnx:  /models/walking/policy.onnx   # POLICY_ONNX_PATH (walking)
+#   locoHealthPath: /dev/shm/psi0_loco.health   # PSI0_LOCO_HEALTH_PATH (loco-state-mirror)
+#   locoMirrorHz: "5"                      # PSI0_LOCO_MIRROR_HZ (loco-state-mirror rewrite rate)
 #
 # Example — point at a different checkpoint and enable yaw passthrough:
 # phantomPsi:

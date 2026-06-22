@@ -2686,7 +2686,9 @@ PSI0_BRIDGE_RATE_HZ=50
 PSI0_ENABLE_GAIT=0
 PSI0_ENABLE_HEIGHT=0
 PSI0_ENABLE_YAW=0
-POLICY_ONNX_PATH=/models/walking/policy.onnx"
+POLICY_ONNX_PATH=/models/walking/policy.onnx
+PSI0_LOCO_HEALTH_PATH=/dev/shm/psi0_loco.health
+PSI0_LOCO_MIRROR_HZ=5"
   fi
 
   local run_line run_dir
