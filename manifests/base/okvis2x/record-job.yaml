@@ -1,0 +1,115 @@
+# okvis2x-record — ad-hoc Job that records raw camera frames (DMA.video) + IMU
+# (dma-ethercat) from the host /dev/shm queues to disk in EuRoC/ASL layout, for
+# offline replay / SLAM dev. The Kubernetes translation of navigation's
+# scripts/record_data.sh, but running the okvis2x_app_record binary baked into
+# the okvis2x image (selected via the entrypoint dispatcher: args[0] = "record").
+#
+# ── Relationship to the okvis2x DaemonSet ───────────────────────────────────
+# Same image, same node, same shm access as okvis2x.yaml — it is just a
+# different "app" off the shared entrypoint, and runs to completion instead of
+# forever. Key differences from the DaemonSet:
+#   * kind: Job (runs for --duration, then exits) — not a DaemonSet.
+#   * No models: the recorder never loads SLAM models, so the load-models
+#     initContainer + models volume are dropped.
+#   * No GPU: DMAVideoSource yields already-decoded BGR, so recording is
+#     CPU + disk only. runtimeClassName: nvidia is dropped.
+#   * OUTPUT IS A hostPath (NOT emptyDir): the whole point is to keep the
+#     recording, so it must survive the pod. Set it to a real host dir.
+#
+# ── NOT in kustomization.yaml on purpose ────────────────────────────────────
+# A recording is an operator action, not desired cluster state — you don't want
+# it re-created on every GitOps sync. It ships in the repo (and the .deb) as a
+# dormant template; apply it by hand on demand:
+#
+#   # edit --duration / output subdir / hostPath below, then:
+#   sudo k0s kubectl delete job okvis2x-record -n positronic --ignore-not-found
+#   sudo k0s kubectl apply -f manifests/base/okvis2x/record-job.yaml
+#   sudo k0s kubectl logs -f job/okvis2x-record -n positronic
+#   # recording lands in the node's hostPath dir; clean up when done:
+#   sudo k0s kubectl delete -f manifests/base/okvis2x/record-job.yaml
+#
+# Deleting the Job mid-run sends SIGTERM — the recorder stops cleanly and the
+# partial recording is valid.
+#
+# ── Local-iteration override (before the recorder is in published :latest) ──
+# The image below assumes the recorder ships in foundationbot/okvis2x:latest
+# (i.e. after the OKVIS2-X colby/record_data work merges + CircleCI republishes).
+# Until then, build locally and hand-import into containerd, and temporarily
+# swap the two image lines to the throwaway tag:
+#   cd ~/OKVIS2-X
+#   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t foundationbot/okvis2x:record-test .
+#   docker save foundationbot/okvis2x:record-test | sudo k0s ctr -n k8s.io images import -
+#   # then in this file:
+#   #   image: foundationbot/okvis2x:record-test
+#   #   imagePullPolicy: Never
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: okvis2x-record
+  namespace: positronic           # same namespace as okvis2x (dockerhub-creds is seeded here)
+  labels:
+    app.kubernetes.io/name: okvis2x-record
+    app.kubernetes.io/part-of: phantomos
+spec:
+  backoffLimit: 0                  # a recording is not idempotent — don't auto-retry
+  # ttlSecondsAfterFinished: 3600  # uncomment to auto-clean the finished Job after 1h
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: okvis2x-record
+    spec:
+      restartPolicy: Never
+      # Land on the SAME node as the DMA producers (dma-ethercat publishes
+      # /dev/shm/raw_imu_actuals there; dma-video the video_*_camN queues).
+      # Same gate as the okvis2x DaemonSet.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-okvis: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      hostIPC: true                # mmap the producers' /dev/shm POSIX queues
+      imagePullSecrets:
+        - name: dockerhub-creds
+      # The recorder stops + flushes CSVs on SIGTERM; give it a little room.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: record
+          # Published image (recorder baked into :latest). For local iteration
+          # before that exists, see the "Local-iteration override" note above.
+          image: foundationbot/okvis2x:latest
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT is docker/entrypoint.sh (the app dispatcher).
+          # args[0]="record" selects okvis2x_app_record; the rest is its argv:
+          #   <output-dir> [--cameras 0,1,2] [--duration S] [--lossy] [--jpeg-quality Q]
+          # --duration 0 records until the Job is deleted (SIGTERM).
+          args:
+            - record
+            - /output/recording          # subdir under the hostPath below
+            - --cameras
+            - "0,1,2"
+            - --duration
+            - "300"
+          env:
+            - { name: OKVIS_DMA_IMU_SHM,        value: /raw_imu_actuals }
+            - { name: OKVIS_SKIP_JETSON_CLOCKS, value: "1" }  # no privileged /sys here
+          volumeMounts:
+            - { name: shm,    mountPath: /dev/shm }
+            - { name: output, mountPath: /output }
+          resources:
+            # Guaranteed QoS (requests == limits, whole-number CPU). Recording is
+            # lighter than SLAM — a couple of cores for PNG encoding is plenty.
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "2", memory: "2Gi" }
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK           # mlock for the POSIX /dev/shm queues it mmaps
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
+        # Output — a REAL host dir so the recording persists after the Job ends.
+        # Point this at wherever recordings should live on the robot node.
+        - name: output
+          hostPath: { path: /data/okvis-recordings, type: DirectoryOrCreate }
