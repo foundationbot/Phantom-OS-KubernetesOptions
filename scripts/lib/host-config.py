@@ -857,6 +857,39 @@ PSI_FIELD_TO_ENV: dict[str, str] = {
     "walkingOnnx":    "POLICY_ONNX_PATH",
     "locoHealthPath": "PSI0_LOCO_HEALTH_PATH",
     "locoMirrorHz":   "PSI0_LOCO_MIRROR_HZ",
+    "runDir":       "/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333",
+    "ckptStep":     "120000",
+    "cameraId":     "0",
+    "stateQueue":   "psi0_state_j24",
+    "actionQueue":  "psi0_actions_j24",
+    "instruction":  "Grasp and lift part.",
+    "rosDomainId":  "43",
+    "bridgeRateHz": "50",
+    "enableGait":   "0",
+    "enableHeight": "0",
+    "enableYaw":    "0",
+    "walkingOnnx":  "/models/walking/policy.onnx",
+    # spec 017 AC-1: "1" lets the DMA walking node own the ENABLE_MOTORS /
+    # DISABLE_MOTORS handshake to DMA.ethercat (REQUIRED on real hardware — else
+    # /desired is pushed into un-enabled motors). "0" = no handshake (sim, or an
+    # external mode-manager owns enable). Default off; a robot opts in.
+    "autoEnableMotors": "0",
+}
+
+PSI_FIELD_TO_ENV: dict[str, str] = {
+    "runDir":       "PSI0_RUN_DIR",
+    "ckptStep":     "PSI0_CKPT_STEP",
+    "cameraId":     "PSI0_CAMERA_ID",
+    "stateQueue":   "PSI0_STATE_QUEUE",
+    "actionQueue":  "PSI0_ACTION_QUEUE",
+    "instruction":  "PSI0_INSTRUCTION",
+    "rosDomainId":  "ROS_DOMAIN_ID",
+    "bridgeRateHz": "PSI0_BRIDGE_RATE_HZ",
+    "enableGait":   "PSI0_ENABLE_GAIT",
+    "enableHeight": "PSI0_ENABLE_HEIGHT",
+    "enableYaw":    "PSI0_ENABLE_YAW",
+    "walkingOnnx":  "POLICY_ONNX_PATH",
+    "autoEnableMotors": "PSI0_AUTO_ENABLE_MOTORS",
 }
 
 
