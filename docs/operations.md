@@ -611,19 +611,40 @@ viewer rate = 482 / 25  ≈ 20 Hz   (joints, desireds, controller, …)
 | `125` (recommended) | 482 / 125 | ≈ 4 Hz |
 | `500` | 482 / 500 | ≈ 1 Hz |
 
-**Why a separate knob exists.** Each `/motor_diagnostics` snapshot
+**Why per-queue knobs exist.** Each `/motor_diagnostics` snapshot
 explodes into ~300 Rerun entities (per-motor temperature / fault /
-status × ~30 joints + bus counters + per-slave EtherCAT state). At the
-joint rate that's ~6000 series-updates/s from diagnostics alone —
-typically larger than the entire joint stream and enough to saturate
-the streamer→server gRPC sender. Symptom: high `gRPC queue dropped:`
-counter in the streamer's stats lines and holes / freezes in the live
-view. Setting `motorDiagnosticsDownsample: 125` drops that to ~1200
-series-updates/s without touching joint visibility.
+status × ~30 joints + bus counters + per-slave EtherCAT state).
+`/state_estimator` adds another ~120 (pelvis 6-DoF + 30 joints + IMU +
+F/T + contact). At the joint rate those alone are >9000
+series-updates/s — typically larger than the entire joint stream and
+enough to saturate the streamer→server gRPC sender. Symptom: high
+`gRPC queue dropped:` counter in the streamer's stats lines and holes /
+freezes in the live view. Setting `motorDiagnosticsDownsample: 125`
+drops that to ~1200 series-updates/s without touching joint
+visibility.
+
+**Every high-rate queue has its own knob.** All default to 0 = inherit
+`--downsample`; set positive to override:
+
+| Field | Streamer flag | Queue |
+|---|---|---|
+| `actualsDownsample` | `--actuals-downsample` | `/actuals` |
+| `actualsTransformsDownsample` | `--actuals-transforms-downsample` | `/actuals_transforms` |
+| `desiredDownsample` | `--desired-downsample` | `/desired` |
+| `desiredsControllerDownsample` | `--desireds-controller-downsample` | `/desireds_controller` |
+| `desiredsTransformsDownsample` | `--desireds-transforms-downsample` | `/desireds_transforms` |
+| `rawImuDownsample` | `--raw-imu-downsample` | `/raw_imu_actuals` |
+| `motorDiagnosticsDownsample` | `--motor-diagnostics-downsample` | `/motor_diagnostics` |
+| `stateEstimatorDownsample` | `--state-estimator-downsample` | `/state_estimator` |
+| `gripperDownsample` | `--gripper-downsample` | `/desired_{left,right}_gripper` |
+
+Event-driven queues (`/errors`, `/commands`, `/command_responses`,
+`/motor_params_applied`) are intentionally NOT downsampled — they fire
+rarely enough that downsampling them would hide real activity.
 
 **The recorder is unaffected.** It captures every shm sample to `.rrd`
-regardless of either knob — downsampling only changes what reaches the
-live viewer.
+regardless of any of these knobs — downsampling only changes what
+reaches the live viewer.
 
 ---
 

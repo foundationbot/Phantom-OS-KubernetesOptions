@@ -1624,7 +1624,14 @@ EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
 # an empty no-op patch on the workload.
 _WORKLOAD_PATCH_FIELDS: frozenset[str] = frozenset({
     "mounts", "privileged", "variant", "queueMemoryLimitMb",
-    "motorDiagnosticsDownsample", "explodeJoints", "extraArgs",
+    "explodeJoints", "extraArgs",
+    # Per-queue downsample overrides on rerun-streamer. Each becomes a
+    # --<queue>-downsample N flag in the rendered DaemonSet args.
+    "actualsDownsample", "actualsTransformsDownsample",
+    "desiredDownsample", "desiredsControllerDownsample",
+    "desiredsTransformsDownsample", "rawImuDownsample",
+    "motorDiagnosticsDownsample", "stateEstimatorDownsample",
+    "gripperDownsample",
 })
 
 
@@ -1688,20 +1695,39 @@ def _build_deployment_patch(
         container_spec["securityContext"] = {"privileged": True}
 
     # Argv-overlay fields (variant, queueMemoryLimitMb, explodeJoints,
-    # extraArgs). When any of these are set, strategic-merge REPLACES the
-    # whole args list, so we re-emit the base manifest's args from
-    # DEPLOYMENT_BASE_ARGS and append the overlay flags. validate()
-    # rejects each field on deployments where it isn't supported.
+    # extraArgs, per-queue downsample overrides). When any of these are
+    # set, strategic-merge REPLACES the whole args list, so we re-emit
+    # the base manifest's args from DEPLOYMENT_BASE_ARGS and append the
+    # overlay flags. validate() rejects each field on deployments where
+    # it isn't supported.
     variant = spec.get("variant")
     queue_limit_mb = spec.get("queueMemoryLimitMb")
     explode_joints = spec.get("explodeJoints")
-    motor_diag_downsample = spec.get("motorDiagnosticsDownsample")
     extra_args = spec.get("extraArgs") or []
+    # Per-queue downsample overrides for the streamer. Each maps a
+    # YAML key (camelCase, matching the host-config schema) to a CLI
+    # flag exposed by `rerun_streamer` in foundationbot/DMA.streams.
+    # Adding a new queue here is a 1-line change.
+    streamer_per_queue_downsamples = [
+        ("actualsDownsample",             "--actuals-downsample"),
+        ("actualsTransformsDownsample",   "--actuals-transforms-downsample"),
+        ("desiredDownsample",             "--desired-downsample"),
+        ("desiredsControllerDownsample",  "--desireds-controller-downsample"),
+        ("desiredsTransformsDownsample",  "--desireds-transforms-downsample"),
+        ("rawImuDownsample",              "--raw-imu-downsample"),
+        ("motorDiagnosticsDownsample",    "--motor-diagnostics-downsample"),
+        ("stateEstimatorDownsample",      "--state-estimator-downsample"),
+        ("gripperDownsample",             "--gripper-downsample"),
+    ]
+    per_queue_overrides = [
+        (flag, spec[key]) for key, flag in streamer_per_queue_downsamples
+        if key in spec
+    ]
     if (
         variant is not None
         or queue_limit_mb is not None
         or explode_joints
-        or motor_diag_downsample is not None
+        or per_queue_overrides
         or extra_args
     ):
         base_args = DEPLOYMENT_BASE_ARGS.get(deployment_name)
@@ -1715,14 +1741,11 @@ def _build_deployment_patch(
                 args_out += ["--variant", str(variant)]
             if queue_limit_mb is not None:
                 args_out += ["--queue-memory-limit", str(queue_limit_mb)]
-            if motor_diag_downsample is not None:
-                # Streamer-only flag — separate publish rate for the high-
-                # cardinality /motor_diagnostics queue (per-motor temp /
-                # fault / status × ~30 joints + bus counters + per-slave
-                # state ≈ 300 entities/cycle). At the joint actuals/desired
-                # rate it saturates the gRPC sender; operators usually
-                # want diagnostics at 2–5 Hz, not 20 Hz.
-                args_out += ["--motor-diagnostics-downsample", str(motor_diag_downsample)]
+            # Append per-queue downsample overrides in the schema-list
+            # order (deterministic for snapshot diffs). Each is a
+            # streamer-only CLI flag; validate() rejects them elsewhere.
+            for flag, value in per_queue_overrides:
+                args_out += [flag, str(value)]
             if explode_joints:
                 # Recorder's parser expects a single comma-joined string
                 # ("SpineYaw,RightAnklePitch"), so flatten the list here.
@@ -2734,30 +2757,42 @@ def cmd_validate(cfg: dict) -> int:
                             f"deployments.{name}.queueMemoryLimitMb: "
                             f"must be >= 1 MB"
                         )
-            # motorDiagnosticsDownsample: streamer-only override for the
-            # /motor_diagnostics publish rate (every Nth frame). 0 = inherit
-            # the global --downsample. Set when the global rate is fine
-            # for joint actuals but saturates the gRPC sender when also
-            # publishing ~300 diagnostic entities/cycle.
-            if "motorDiagnosticsDownsample" in spec:
+            # Per-queue downsample overrides on rerun-streamer. Each is
+            # a non-negative integer; 0 means "inherit the global
+            # --downsample". The list is kept in sync with the streamer's
+            # CLI surface in foundationbot/DMA.streams; adding a new
+            # queue here is a 1-line change.
+            _PER_QUEUE_DOWNSAMPLE_FIELDS = (
+                "actualsDownsample",
+                "actualsTransformsDownsample",
+                "desiredDownsample",
+                "desiredsControllerDownsample",
+                "desiredsTransformsDownsample",
+                "rawImuDownsample",
+                "motorDiagnosticsDownsample",
+                "stateEstimatorDownsample",
+                "gripperDownsample",
+            )
+            for field in _PER_QUEUE_DOWNSAMPLE_FIELDS:
+                if field not in spec:
+                    continue
                 if name != "rerun-streamer":
                     errors.append(
-                        f"deployments.{name}.motorDiagnosticsDownsample: "
-                        f"only supported on rerun-streamer"
+                        f"deployments.{name}.{field}: only supported on "
+                        f"rerun-streamer"
                     )
-                else:
-                    d = spec["motorDiagnosticsDownsample"]
-                    if isinstance(d, bool) or not isinstance(d, int):
-                        errors.append(
-                            f"deployments.{name}.motorDiagnosticsDownsample: "
-                            f"must be a non-negative integer (0 = inherit "
-                            f"--downsample)"
-                        )
-                    elif d < 0:
-                        errors.append(
-                            f"deployments.{name}.motorDiagnosticsDownsample: "
-                            f"must be >= 0 (0 = inherit --downsample)"
-                        )
+                    continue
+                d = spec[field]
+                if isinstance(d, bool) or not isinstance(d, int):
+                    errors.append(
+                        f"deployments.{name}.{field}: must be a non-"
+                        f"negative integer (0 = inherit --downsample)"
+                    )
+                elif d < 0:
+                    errors.append(
+                        f"deployments.{name}.{field}: must be >= 0 "
+                        f"(0 = inherit --downsample)"
+                    )
             # extraArgs: generic append-only argv escape hatch. Supported
             # only on EXTRA_ARGS_SUPPORTED_DEPLOYMENTS (currently
             # cpp-robot-state-estimator). Must be a list of scalars
