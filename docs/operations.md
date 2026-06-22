@@ -653,7 +653,7 @@ reaches the live viewer.
 | Phase | Flag | What it does |
 |---|---|---|
 | 1. preflight | (always) | OS / arch / kernel / disk / sudo / port collisions |
-| 2. deps | `--deps` | apt installs, k0s binary, terraform binary |
+| 2. deps | `--deps` | apt installs; k0s binary **pinned** to a known version (`K0S_VERSION`, default `v1.35.4+k0s.0`) for deterministic bringup — unpinned `get.k0s.sh` installs latest and silently jumped robots to containerd 2.x; terraform binary. Skips k0s install if already present (logs a note if the installed version differs from the pin). |
 | 3. cluster | `--cluster` | require Tailscale; pin `spec.api.address` in `/etc/k0s/k0s.yaml`; `k0s install controller --single --enable-worker -c …`; systemd start; write `/root/.kube/config` (server pinned to `127.0.0.1`); reconcile `foundation.bot/*` node labels from `host-config.yaml`'s `nodeLabels:`. Self-heals already-installed clusters that bake the `1.1.1.1` sentinel — see [§3.10](#310-toggle-an-optional-workload-on-a-robot) for the day-2 toggle workflow. |
 | 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
@@ -1281,6 +1281,51 @@ Note the `restartCount` on `walking`/`sonic` stays elevated after
 recovery — that's the historical count, not ongoing failure; check the
 container's current **state** (`Running`) and **start time**, not the
 counter. The same missing-`/dev/shm` cause also CrashLoops `dma-bridge`.
+
+---
+
+### 7.20 `k0scontroller` crash-loops: `unsupported configuration version: expected 3, got 2`
+
+**Symptom.** Cluster bringup "hangs" — `k0s kubectl` reports
+`connection to the server localhost:6443 was refused`, and
+`systemctl status k0scontroller` shows `activating` with a high restart
+counter. `journalctl -u k0scontroller` repeats:
+
+```
+Rejected: unsupported configuration version: expected 3, got 2
+  configuration contains a [plugins."io.containerd.grpc.v1.cri"] section
+  which is the containerd v1 CRI plugin format
+  pre-flight-check="containerd:configSnippets/file:10-registry-mirror.toml"
+```
+
+**Cause.** k0s **≥ 1.36** bundles **containerd 2.x**, whose config is
+`version = 3` with the split CRI plugins (`io.containerd.cri.v1.images`,
+`io.containerd.cri.v1.runtime`). The containerd drop-ins under
+`/etc/k0s/containerd.d/` were written in the old containerd-1.7.x format
+(`version = 2`, `io.containerd.grpc.v1.cri`) and k0s rejects them at
+pre-flight, so the controller never starts. This bites robots that
+installed k0s **before** the version pin landed (bootstrap now pins k0s —
+see [§4 phase 2](#4-bootstrap-phases-reference) — and the configure
+scripts now emit the format matching the bundled containerd).
+
+**Fix.** Re-run the host-config phase so the drop-ins are regenerated in
+the correct format, then restart:
+
+```bash
+sudo bash scripts/configure-k0s-containerd-mirror.sh
+sudo bash scripts/configure-k0s-nvidia-runtime.sh   # if the robot uses GPU
+sudo systemctl restart k0scontroller
+# watch it settle:
+sudo systemctl is-active k0scontroller        # -> active
+sudo k0s kubectl get nodes                     # -> Ready
+```
+
+Or convert the two files by hand: set `version = 3`, rename
+`[plugins."io.containerd.grpc.v1.cri".registry]` →
+`[plugins."io.containerd.cri.v1.images".registry]` and
+`[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]` →
+`[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia]`
+(and its `.options` table), then restart k0s.
 
 ---
 

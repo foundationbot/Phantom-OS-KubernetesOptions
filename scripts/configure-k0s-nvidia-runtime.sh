@@ -73,9 +73,41 @@ backup() {
   fi
 }
 
+# Determine the containerd config version to emit. containerd 2.x (shipped
+# by k0s >= 1.36) requires config `version = 3` and renamed the CRI plugin
+# (runtimes live under io.containerd.cri.v1.runtime); containerd 1.7.x
+# (k0s 1.35.x) uses `version = 2` and io.containerd.grpc.v1.cri. Emitting
+# the wrong one makes k0s reject the drop-in at pre-flight and crash-loop.
+# Prefer the version k0s already declared in its generated main config
+# (authoritative); fall back to the bundled containerd binary's major.
+containerd_config_version() {
+  local v ctr major
+  if [ -r "${CONTAINERD_CONFIG}" ]; then
+    v="$(grep -oE '^[[:space:]]*version[[:space:]]*=[[:space:]]*[0-9]+' "${CONTAINERD_CONFIG}" 2>/dev/null \
+          | grep -oE '[0-9]+' | head -1)"
+    if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+  fi
+  for ctr in /var/lib/k0s/bin/containerd "$(command -v containerd 2>/dev/null || true)"; do
+    if [ -z "$ctr" ] || [ ! -x "$ctr" ]; then continue; fi
+    major="$("$ctr" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+              | sed -E 's/^v//; s/\..*//')"
+    if [ -n "$major" ]; then [ "$major" -ge 2 ] && printf '3' || printf '2'; return; fi
+  done
+  printf '2'
+}
+
 # --- 1. Drop-in TOML registering the runtime --------------------------------
 
-echo "==> writing ${CONTAINERD_IMPORT}"
+CFG_VERSION="$(containerd_config_version)"
+if [ "$CFG_VERSION" = 3 ]; then
+  RUNTIMES_TABLE='[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia]'
+  RUNTIMES_OPTIONS_TABLE='  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia.options]'
+else
+  RUNTIMES_TABLE='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]'
+  RUNTIMES_OPTIONS_TABLE='  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]'
+fi
+
+echo "==> writing ${CONTAINERD_IMPORT} (containerd config version ${CFG_VERSION})"
 mkdir -p "$(dirname "${CONTAINERD_IMPORT}")"
 backup "${CONTAINERD_IMPORT}"
 cat > "${CONTAINERD_IMPORT}" <<EOF
@@ -84,10 +116,14 @@ cat > "${CONTAINERD_IMPORT}" <<EOF
 # "nvidia". Pods that set runtimeClassName: nvidia will be started via
 # this runtime, which bind-mounts host driver libraries + Tegra device
 # bits into the container.
+#
+# Format tracks the bundled containerd: version 3 +
+# io.containerd.cri.v1.runtime for containerd 2.x (k0s >= 1.36), or
+# version 2 + io.containerd.grpc.v1.cri for containerd 1.7.x (k0s 1.35.x).
 
-version = 2
+version = ${CFG_VERSION}
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+${RUNTIMES_TABLE}
   runtime_type = "io.containerd.runc.v2"
   privileged_without_host_devices = false
   # Don't set SystemdCgroup here. k0s's default runc runtime uses
@@ -95,7 +131,7 @@ version = 2
   # mismatch with the kubelet (which provides cgroupfs paths) and
   # the pod fails sandbox creation with "expected cgroupsPath to be
   # of format slice:prefix:name". Inherit the cluster default.
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+${RUNTIMES_OPTIONS_TABLE}
     BinaryName = "${NVIDIA_RUNTIME}"
 EOF
 

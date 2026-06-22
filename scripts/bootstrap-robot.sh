@@ -1236,14 +1236,27 @@ deps() {
     fi
   fi
 
+  # k0s — PINNED for deterministic bringup. get.k0s.sh installs the
+  # LATEST release by default, which silently jumped fresh robots from
+  # containerd 1.7.x (k0s 1.35.x) to containerd 2.x (k0s 1.36+). The two
+  # use different containerd config formats, so the unpinned jump broke
+  # the containerd drop-ins (configure-k0s-*). Pin so every fresh robot
+  # lands on the same validated version; bump deliberately with
+  # K0S_VERSION=v1.x.y+k0s.0 (and re-test the containerd config format).
+  K0S_VERSION="${K0S_VERSION:-v1.35.4+k0s.0}"
   if command -v k0s >/dev/null 2>&1; then
-    skip "k0s already in PATH ($(k0s version 2>/dev/null | head -1))"
+    installed_k0s="$(k0s version 2>/dev/null | head -1)"
+    if [ "$installed_k0s" = "$K0S_VERSION" ]; then
+      skip "k0s already in PATH ($installed_k0s, matches pin)"
+    else
+      skip "k0s already in PATH ($installed_k0s) — differs from pin $K0S_VERSION; not reinstalling ('k0s reset' then re-run to change)"
+    fi
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  curl -sSLf https://get.k0s.sh | sh"
-  elif curl -sSLf https://get.k0s.sh | sh >/dev/null 2>&1; then
-    pass "k0s installed"
+    info "DRY-RUN  curl -sSLf https://get.k0s.sh | K0S_VERSION=$K0S_VERSION sh"
+  elif curl -sSLf https://get.k0s.sh | K0S_VERSION="$K0S_VERSION" sh >/dev/null 2>&1; then
+    pass "k0s installed ($K0S_VERSION)"
   else
-    fail "k0s install failed (curl https://get.k0s.sh | sh)"
+    fail "k0s install failed (curl https://get.k0s.sh | K0S_VERSION=$K0S_VERSION sh)"
   fi
 
   # terraform — fixed minor version, matched binary by host arch. The

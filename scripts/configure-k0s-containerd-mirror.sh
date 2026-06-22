@@ -35,6 +35,30 @@ fi
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
 
+# Determine the containerd config version to emit. containerd 2.x (shipped
+# by k0s >= 1.36) requires config `version = 3` and renamed the CRI plugin
+# (split into io.containerd.cri.v1.images / .v1.runtime); containerd 1.7.x
+# (k0s 1.35.x) uses `version = 2` and io.containerd.grpc.v1.cri. Emitting
+# the wrong one makes k0s reject the drop-in at pre-flight and crash-loop.
+# Prefer the version k0s already declared in its generated main config
+# (authoritative); fall back to the bundled containerd binary's major.
+containerd_config_version() {
+  local v ctr major
+  if [ -r "${CONTAINERD_CONFIG}" ]; then
+    v="$(grep -oE '^[[:space:]]*version[[:space:]]*=[[:space:]]*[0-9]+' "${CONTAINERD_CONFIG}" 2>/dev/null \
+          | grep -oE '[0-9]+' | head -1)"
+    if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+  fi
+  for ctr in /var/lib/k0s/bin/containerd "$(command -v containerd 2>/dev/null || true)"; do
+    if [ -z "$ctr" ] || [ ! -x "$ctr" ]; then continue; fi
+    major="$("$ctr" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+              | sed -E 's/^v//; s/\..*//')"
+    if [ -n "$major" ]; then [ "$major" -ge 2 ] && printf '3' || printf '2'; return; fi
+  done
+  # Conservative default: the legacy v2 format the fleet ran for years.
+  printf '2'
+}
+
 backup() {
   # backup <file>  — if file exists, copy to <file>.bak.<ts>
   local f="$1"
@@ -94,17 +118,28 @@ EOF
 # k0s does NOT auto-import /etc/k0s/containerd.d/*.toml — the imports
 # directive has to be present in /etc/k0s/containerd.toml itself.
 
-echo "==> writing ${CONTAINERD_IMPORT}"
+CFG_VERSION="$(containerd_config_version)"
+if [ "$CFG_VERSION" = 3 ]; then
+  REGISTRY_SECTION='[plugins."io.containerd.cri.v1.images".registry]'
+else
+  REGISTRY_SECTION='[plugins."io.containerd.grpc.v1.cri".registry]'
+fi
+
+echo "==> writing ${CONTAINERD_IMPORT} (containerd config version ${CFG_VERSION})"
 mkdir -p "$(dirname "${CONTAINERD_IMPORT}")"
 backup "${CONTAINERD_IMPORT}"
 cat > "${CONTAINERD_IMPORT}" <<EOF
 # Managed by scripts/configure-k0s-containerd-mirror.sh
 # Pulled into containerd's main config via the imports line in
 # ${CONTAINERD_CONFIG} (also added by this script).
+#
+# Format tracks the bundled containerd: version 3 +
+# io.containerd.cri.v1.images for containerd 2.x (k0s >= 1.36), or
+# version 2 + io.containerd.grpc.v1.cri for containerd 1.7.x (k0s 1.35.x).
 
-version = 2
+version = ${CFG_VERSION}
 
-[plugins."io.containerd.grpc.v1.cri".registry]
+${REGISTRY_SECTION}
   config_path = "${HOSTS_DIR}"
 EOF
 
