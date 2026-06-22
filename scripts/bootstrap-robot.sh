@@ -3545,6 +3545,7 @@ install_dma_ethercat() {
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
     info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb  (if baked in; non-fatal)"
     info "DRY-RUN  resolve+write DMA_CONFIG, INTERFACE, DMA_CPU_AFFINITY, DMA_RT_CPU into $DMA_ETHERCAT_ENV_FILE"
     info "DRY-RUN  systemctl enable --now dma-ethercat.service"
     return
@@ -3620,6 +3621,24 @@ install_dma_ethercat() {
   else
     fail "dpkg -i $deb"
     ethercat_die "dpkg -i failed — check above output for missing dependencies or conflicting packages"
+  fi
+
+  # mk2-debug-tui: optional debug TUI baked into the same image (arm64
+  # only — see the dma-ethercat image's ci/fetch_mk2_debug_tui.sh and the
+  # installer Job's best-effort copy). NON-FATAL by design: it's a debug
+  # tool, not part of the realtime control path, so a missing/failed
+  # install must never ethercat_die and wedge the fleet bringup.
+  local tui_deb
+  tui_deb=$(ls -1t /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb 2>/dev/null | head -1 || true)
+  if [ -z "$tui_deb" ]; then
+    info "no mk2-debug-tui .deb baked into image — skipping (expected on amd64)"
+  else
+    note "installing mk2-debug-tui: $(basename "$tui_deb")"
+    if dpkg -i "$tui_deb"; then
+      pass "dpkg -i $(basename "$tui_deb")"
+    else
+      warn "dpkg -i $(basename "$tui_deb") failed — continuing (debug tool, non-fatal)"
+    fi
   fi
 
   # Resolve DMA_CONFIG and pin it in /etc/dma/dma-ethercat.env. The .deb
