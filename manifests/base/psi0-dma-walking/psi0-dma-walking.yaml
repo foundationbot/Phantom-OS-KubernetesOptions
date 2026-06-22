@@ -98,16 +98,48 @@ spec:
           # POLICY_ONNX_PATH / PSI0_ACTION_QUEUE / PSI0_ENABLE_{GAIT,HEIGHT,YAW}
           # come from the shared phantom-psi-config CM (envFrom). Do NOT add them
           # as explicit `env` — that would shadow per-host overrides.
+          # FAIL-CLOSED (spec 017 G6): the walking node defaults PSI0_ENABLE_*
+          # to motion-ENABLED when unset, so REQUIRE the gate ConfigMap (which
+          # ships them "0") rather than letting a missing CM default the robot to
+          # walking. Bootstrap's psi-config phase renders phantom-psi-config
+          # before this DaemonSet is label-gated on.
           envFrom:
             - configMapRef:
                 name: phantom-psi-config
-                optional: true
+                optional: false
           volumeMounts:
             - { name: models, mountPath: /models, readOnly: true }
             - { name: dshm,   mountPath: /dev/shm }
           resources:
             requests: { cpu: "2", memory: "2Gi" }
             limits:   { cpu: "4", memory: "4Gi" }
+
+        # ── gripper — Ψ₀ Inspire-hand actuation (spec 017 AC-5) ────────────
+        # walking-dma owns the 29 body joints over /desired; the grippers are a
+        # SEPARATE sink. This reads the SAME psi0_actions_j24 ring (Joint24 dims
+        # 14/15 = L/R closedness) and writes /desired_{left,right}_gripper via
+        # DmaGripperSink. It lives in Psi0-VLA's phantom_sonic package (needs
+        # psi.deploy.dma + gripper_sink), so it runs the psi0-sonic image — NOT
+        # phantom-loco, which lacks phantom_sonic. Same source-env-then-exec
+        # pattern as phantom-psi's psi0-state; no /models (reads only the ring).
+        - name: gripper
+          image: psi0-sonic:thor-cu130
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - >-
+              source /usr/local/bin/setup_env.sh && exec
+              python -m phantom_sonic.psi0_gripper_runner
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "1", memory: "512Mi" }
+            limits:   { cpu: "1", memory: "1Gi" }
 
       volumes:
         # The Early-fan ONNX lives on the host (staged at /var/lib/psi0/models —

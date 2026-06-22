@@ -835,6 +835,11 @@ DEFAULT_PSI: dict[str, str] = {
     "enableHeight": "0",
     "enableYaw":    "0",
     "walkingOnnx":  "/models/walking/policy.onnx",
+    # spec 017 AC-1: "1" lets the DMA walking node own the ENABLE_MOTORS /
+    # DISABLE_MOTORS handshake to DMA.ethercat (REQUIRED on real hardware — else
+    # /desired is pushed into un-enabled motors). "0" = no handshake (sim, or an
+    # external mode-manager owns enable). Default off; a robot opts in.
+    "autoEnableMotors": "0",
 }
 
 PSI_FIELD_TO_ENV: dict[str, str] = {
@@ -850,6 +855,7 @@ PSI_FIELD_TO_ENV: dict[str, str] = {
     "enableHeight": "PSI0_ENABLE_HEIGHT",
     "enableYaw":    "PSI0_ENABLE_YAW",
     "walkingOnnx":  "POLICY_ONNX_PATH",
+    "autoEnableMotors": "PSI0_AUTO_ENABLE_MOTORS",
 }
 
 
