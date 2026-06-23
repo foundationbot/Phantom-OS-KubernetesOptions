@@ -176,6 +176,19 @@ stacks:
 #                          pins localhost:5443/as-inference-models. busybox
 #                          bundle: Thor-built dinov2 + per-task AS engines + PCA
 #                          + norm-stats + state-machine + text-embeds + registry.
+#   wolverine-dma-inference-cpp
+#                          core stack — wolverine-loco's 1 kHz inference node
+#                          (has-wolverine-loco gated, default-off). Pure-C++,
+#                          CPU-only. manifest pins
+#                          foundationbot/wolverine-dma-inference-cpp; override to
+#                          a real CI tag (a plain amd64 tag or the -aarch64
+#                          sibling for Jetson/Thor).
+#   wolverine-policies     core stack — wolverine-loco's load-policies init. slim
+#                          DockerHub image (foundationbot/wolverine-policies)
+#                          carrying the ONNX under /models/policies.
+#   wolverine-teleop       core stack — wolverine-loco's teleop web-UI sidecar
+#                          (foundationbot/wolverine-teleop): joystick + e-stop +
+#                          Enable-Motors + Record on hostPort 8080.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -203,6 +216,16 @@ images:
   #   image: localhost:5443/as-inference:REPLACE-WITH-AS-BUILD-TAG
   # as-inference-models:
   #   image: localhost:5443/as-inference-models:REPLACE-WITH-AS-MODELS-TAG
+  # wolverine-loco is default-off (nodeLabels has-wolverine-loco: 'false') and
+  # is in the /desired exclusion group — opting in REQUIRES
+  # foundation.bot/has-positronic: 'false'. Uncomment all three on hosts that
+  # opt in; pin the -aarch64 inference tag on Jetson/Thor.
+  # wolverine-dma-inference-cpp:
+  #   image: foundationbot/wolverine-dma-inference-cpp:REPLACE-WITH-CPP-BUILD-TAG
+  # wolverine-policies:
+  #   image: foundationbot/wolverine-policies:REPLACE-WITH-POLICIES-TAG
+  # wolverine-teleop:
+  #   image: foundationbot/wolverine-teleop:REPLACE-WITH-TELEOP-TAG
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -660,10 +683,10 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
-# Mutual exclusion: positronic-control, phantom-locomotion, and
-# phantom-sonic each drive /desired, so at most ONE may be 'true' per
-# robot. positronic defaults to on, so enabling has-locomotion OR
-# has-sonic requires foundation.bot/has-positronic: 'false' (the
+# Mutual exclusion: positronic-control, phantom-locomotion, phantom-sonic,
+# and wolverine-loco each drive /desired, so at most ONE may be 'true' per
+# robot. positronic defaults to on, so enabling has-locomotion, has-sonic OR
+# has-wolverine-loco requires foundation.bot/has-positronic: 'false' (the
 # validator rejects the conflict with a pointed error).
 #
 # Values must be strings — quote 'true' / 'false' or the YAML parser
@@ -702,6 +725,10 @@ nodeLabels:
   # /as_action for the WBC — co-schedules with wm-inference, NOT in the
   # exclusion group)
   foundation.bot/has-as-inference: 'false'
+  # wolverine-loco DaemonSet (MK2 whole-body velocity-locomotion, pure-C++
+  # 1 kHz node + teleop web-UI sidecar; mutually exclusive with
+  # has-positronic/locomotion/sonic — all drive /desired)
+  foundation.bot/has-wolverine-loco: 'false'
   # yovariable-server DaemonSet
   foundation.bot/has-yovariable: 'true'
 
