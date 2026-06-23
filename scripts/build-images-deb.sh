@@ -324,6 +324,10 @@ HC_LOCAL_CONTAINERS=()   # parallel container labels for the bundle manifest
 # apart, but the host-config images: block keys can (and the two run at
 # different tags, so they're distinct keys here).
 declare -A HC_PULL_CONTAINER=()
+# repos host-config pins a pullable image for — used both to drop manifest-scan
+# defaults for the same repo (below) and to drop extra-images.txt entries for
+# the same repo in build_for_arch (so the host-config tag wins, no duplicate).
+declare -A _hc_pull_repos=()
 if [ "$USE_HOST_CONFIG" = 1 ] && [ -z "$FROM_FILE" ] && [ -r "$HOST_CONFIG_FILE" ]; then
   # Read the images: block DIRECTLY (PyYAML), not get-images-json: we need
   # the container KEY for every ref, which the kustomize find=replace form
@@ -348,8 +352,8 @@ PY
 )"
   if [ -n "$_hc_lines" ]; then
     # Repos host-config speaks to (pullable) — drop their manifest-scan
-    # default-tag entries so the host-config tag wins.
-    declare -A _hc_pull_repos=()
+    # default-tag entries so the host-config tag wins. (_hc_pull_repos is
+    # declared at top scope so build_for_arch can read it too.)
     _hc_pull=()
     while IFS=$'\t' read -r kind container ref; do
       [ -z "$ref" ] && continue
@@ -755,6 +759,14 @@ build_for_arch() {
   local extra
   while IFS= read -r extra; do
     if [ -n "$extra" ]; then
+      # Drop an extra-images.txt ref when host-config already pins that
+      # repo — host-config's deployed tag wins, so we don't bundle two
+      # tags of the same image (e.g. dma-ethercat main-latest-aarch64 from
+      # extra-images vs the host-config-pinned main-<ts>-aarch64).
+      if [ -n "${_hc_pull_repos[${extra%:*}]:-}" ]; then
+        echo "  - skipping extra-image $extra (host-config pins ${extra%:*})"
+        continue
+      fi
       arch_images+=("$extra")
       arch_image_sources+=("extra-images")
     fi
