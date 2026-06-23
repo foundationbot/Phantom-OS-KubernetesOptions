@@ -156,6 +156,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
      "wm-inference DaemonSet (world-model z_ref service; feeds "
      "positronic-control — co-schedules with the control brain, NOT "
      "in the has-positronic/locomotion/sonic exclusion group)"),
+    ("foundation.bot/has-wolverine-loco",
+     "false",
+     "wolverine-loco DaemonSet (MK2 whole-body velocity-locomotion, pure-C++ "
+     "1 kHz node + teleop web-UI sidecar; mutually exclusive with "
+     "has-positronic/locomotion/sonic — all drive /desired)"),
     ("foundation.bot/has-yovariable",
      "true",
      "yovariable-server DaemonSet"),
@@ -1373,6 +1378,33 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # DEPLOYMENT_TARGETS entry (nothing user-configurable to mount).
         "stack": "core",
         "manifest_image": "localhost:5443/wm-inference-models",
+    },
+    "wolverine-dma-inference-cpp": {
+        # wolverine-loco's 1 kHz inference node (foundation.bot/has-wolverine-loco
+        # gated). Pure-C++, CPU-only (onnxruntime) — base manifest pins
+        # foundationbot/wolverine-dma-inference-cpp:PLACEHOLDER directly (same
+        # foundationbot find-key pattern as phantom-dma-inference / ik-mk2). A
+        # host overrides it to a real tag. CI publishes a plain (amd64) tag and
+        # a -aarch64 sibling for Jetson/Thor.
+        "stack": "core",
+        "manifest_image": "foundationbot/wolverine-dma-inference-cpp",
+    },
+    "wolverine-policies": {
+        # Consumed by wolverine-loco's load-policies initContainer — slim image
+        # carrying the ONNX policies under /models/policies, staged into a shared
+        # emptyDir (same load pattern as phantom-policies, but a DockerHub image,
+        # not a localhost:5443 local-registry carrier — pulled via dockerhub-creds).
+        # Image-only (no standalone workload / DEPLOYMENT_TARGETS entry).
+        "stack": "core",
+        "manifest_image": "foundationbot/wolverine-policies",
+    },
+    "wolverine-teleop": {
+        # wolverine-loco's teleop web-UI sidecar (Python web command server):
+        # joystick + e-stop + Enable-Motors + Record on hostPort 8080. Writes the
+        # /dev/shm velocity command scratch and sends ENABLE_MOTORS / RECORDING_*
+        # opcodes onto the host /commands queue. DockerHub image (dockerhub-creds).
+        "stack": "core",
+        "manifest_image": "foundationbot/wolverine-teleop",
     },
 }
 
@@ -3057,23 +3089,25 @@ def cmd_validate(cfg: dict) -> int:
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
                     )
 
-            # Mutual exclusion: positronic-control, phantom-locomotion, and
-            # phantom-sonic are competing workloads — each drives /desired,
-            # so at most ONE may be enabled per robot. has-positronic
-            # defaults to "true" (the cluster phase reconciler injects it on
-            # every robot unless explicitly set false), so operators
-            # enabling locomotion or sonic MUST also explicitly disable
-            # positronic — otherwise both would render and fight for the
-            # robot.
+            # Mutual exclusion: positronic-control, phantom-locomotion,
+            # phantom-sonic, and wolverine-loco are competing workloads —
+            # each drives /desired, so at most ONE may be enabled per robot.
+            # has-positronic defaults to "true" (the cluster phase
+            # reconciler injects it on every robot unless explicitly set
+            # false), so operators enabling locomotion / sonic / wolverine-loco
+            # MUST also explicitly disable positronic — otherwise both would
+            # render and fight for the robot.
             effective_pos = nl.get("foundation.bot/has-positronic", "true")
             effective_loc = nl.get("foundation.bot/has-locomotion", "false")
             effective_sonic = nl.get("foundation.bot/has-sonic", "false")
+            effective_wloco = nl.get("foundation.bot/has-wolverine-loco", "false")
             enabled_drivers = [
                 label
                 for label, eff in (
                     ("foundation.bot/has-positronic", effective_pos),
                     ("foundation.bot/has-locomotion", effective_loc),
                     ("foundation.bot/has-sonic", effective_sonic),
+                    ("foundation.bot/has-wolverine-loco", effective_wloco),
                 )
                 if eff == "true"
             ]
@@ -3098,9 +3132,10 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(
                         "nodeLabels: the robot-driving workloads "
                         "foundation.bot/has-positronic, "
-                        "foundation.bot/has-locomotion and "
-                        "foundation.bot/has-sonic are mutually exclusive — "
-                        f"only one may be \"true\" (got: "
+                        "foundation.bot/has-locomotion, "
+                        "foundation.bot/has-sonic and "
+                        "foundation.bot/has-wolverine-loco are mutually "
+                        "exclusive — only one may be \"true\" (got: "
                         f"{', '.join(enabled_drivers)})"
                     )
 

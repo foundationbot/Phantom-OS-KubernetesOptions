@@ -35,3 +35,4 @@ resources:
   - ../../base/okvis2x
   - ../../base/wm-inference
   - ../../base/as-inference
+  - ../../base/wolverine-loco
