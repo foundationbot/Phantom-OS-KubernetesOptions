@@ -1039,6 +1039,19 @@ if [ "$inject_images" = 1 ]; then
         continue
       fi
       [ -z "$bref" ] && continue
+      # Defensive: a container key never contains '/'. A '/'-bearing name
+      # is a repo / manifest find-key that an older bundle builder recorded
+      # by mistake (e.g. 'foundationbot/phantom-psi0-loco' for the
+      # 'phantom-loco' container). Writing it as an images: key fails
+      # host-config validation and wedges the wizard's validate→re-run
+      # loop, so skip it. (Fixed bundles record the real container key;
+      # rebuild the image bundle to pick up the correct entry.)
+      case "$bcname" in
+        */*)
+          printf 'warning: bundle entry container %s looks like a repo, not a container key — skipping (rebuild the image bundle to fix)\n' \
+            "$bcname" >&2
+          continue ;;
+      esac
       bundle_seen_count=$((bundle_seen_count + 1))
       # Find existing row, or append.
       found_idx=-1

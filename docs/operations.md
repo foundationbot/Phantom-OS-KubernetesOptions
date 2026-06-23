@@ -1664,6 +1664,81 @@ Or convert the two files by hand: set `version = 3`, rename
 
 ---
 
+### 7.21 dma-video pods `Pending` — `/etc/phantom/head_camera.json` missing
+
+**Symptom.** `camera-params`, `producer`, and/or `rtsp-streamer` in the
+`dma-video` namespace stay `Pending`/`ContainerCreating`; a `describe`
+shows:
+
+```
+MountVolume.SetUp failed for volume "cameras-config" ...
+hostPath type check failed: /etc/phantom/head_camera.json is not a file
+```
+
+**Cause.** Those pods mount the **per-host** OAK camera config from
+`/etc/phantom/head_camera.json` via `hostPath` with `type: File`, so a
+missing (or directory-shaped) path makes the kubelet refuse to start the
+pod — deliberate loud failure, no silent fleet default. ArgoCD does
+**not** create or reconcile this file (it's per-robot hardware config).
+
+**Fix — create `/etc/phantom/head_camera.json` from the robot's OAK
+module ID (MXID).** Each OAK camera has a unique MXID (Luxonis device
+serial / "module ID"); the file maps boards (by MXID) to camera sockets
++ intrinsics. Discover the attached OAK's MXID with DepthAI:
+
+```bash
+python3 -c 'import depthai; print([d.getMxId() for d in depthai.Device.getAllAvailableDevices()])'
+# e.g. ['19443010819F4F2E00']
+```
+
+Then write the file (the head has three cameras — see the layout note
+below; add intrinsics per camera from calibration, omitted here for
+brevity):
+
+```json
+{
+  "boards": { "0": { "mxid": "19443010819F4F2E00" } },
+  "cameras": {
+    "bottom": { "queue_id": 0, "board": 0, "socket": "B", "type": "color", "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } },
+    "left":   { "queue_id": 1, "board": 0, "socket": "C", "type": "mono",  "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } },
+    "right":  { "queue_id": 2, "board": 0, "socket": "A", "type": "mono",  "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } }
+  }
+}
+```
+
+```bash
+sudo install -D -m 0644 head_camera.json /etc/phantom/head_camera.json
+# the dma-video pods schedule on the next reconcile (or: kubectl -n dma-video rollout restart deploy)
+```
+
+**Get these right when authoring/editing the file:**
+- **Camera module ID (MXID)** — `boards.<n>.mxid` must match the actual
+  OAK on this robot (from the DepthAI probe above). A wrong MXID means
+  the producer can't open the device.
+- **Each port's position and type** — the head has three cameras and
+  every entry must map to the correct physical position and sensor type:
+  **`bottom` (cam0) is COLOR; `left` and `right` are MONO**. Mixing up
+  positions or marking a mono camera as color (or vice-versa) yields
+  garbled/empty streams even though the pods come up.
+- **`socket`** — the `A`/`B`/`C` value is the OAK-D's physical port the
+  camera is plugged into; it must match your unit's wiring. The letters
+  in the example above are illustrative — verify against the actual board
+  (only `bottom: "B"` is confirmed from an in-fleet config).
+
+> **Use the OAK-D proprietary USB cable.** Third-party USB cables are
+> unreliable for the OAK-D's data rate — they cause intermittent
+> DepthAI disconnects / firmware-boot failures that look like camera
+> faults. Use the cable that ships with the OAK-D module.
+
+The OAK USB-power udev rule that keeps the device from dropping during
+DepthAI firmware boot is installed by bootstrap automatically
+([scripts/configure-usb-power.sh](../scripts/configure-usb-power.sh)) —
+no action needed there. On a host with **no** OAK hardware, leave
+`foundation.bot/has-cameras: 'false'` in `host-config.yaml`'s
+`nodeLabels:` so the dma-video stack isn't scheduled at all.
+
+---
+
 ## 8. Reference
 
 ### 8.1 Filesystem map
