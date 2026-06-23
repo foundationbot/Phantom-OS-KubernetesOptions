@@ -840,6 +840,11 @@ DEFAULT_PSI: dict[str, str] = {
     "walkingOnnx":    "/models/walking/policy.onnx",
     "locoHealthPath": "/dev/shm/psi0_loco.health",
     "locoMirrorHz":   "5",
+    # spec 017 AC-1: "1" lets the DMA walking node own the ENABLE_MOTORS /
+    # DISABLE_MOTORS handshake to DMA.ethercat (REQUIRED on real hardware — else
+    # /desired is pushed into un-enabled motors). "0" = no handshake (sim, or an
+    # external mode-manager owns enable). Default off; a robot opts in.
+    "autoEnableMotors": "0",
 }
 
 PSI_FIELD_TO_ENV: dict[str, str] = {
@@ -857,38 +862,6 @@ PSI_FIELD_TO_ENV: dict[str, str] = {
     "walkingOnnx":    "POLICY_ONNX_PATH",
     "locoHealthPath": "PSI0_LOCO_HEALTH_PATH",
     "locoMirrorHz":   "PSI0_LOCO_MIRROR_HZ",
-    "runDir":       "/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333",
-    "ckptStep":     "120000",
-    "cameraId":     "0",
-    "stateQueue":   "psi0_state_j24",
-    "actionQueue":  "psi0_actions_j24",
-    "instruction":  "Grasp and lift part.",
-    "rosDomainId":  "43",
-    "bridgeRateHz": "50",
-    "enableGait":   "0",
-    "enableHeight": "0",
-    "enableYaw":    "0",
-    "walkingOnnx":  "/models/walking/policy.onnx",
-    # spec 017 AC-1: "1" lets the DMA walking node own the ENABLE_MOTORS /
-    # DISABLE_MOTORS handshake to DMA.ethercat (REQUIRED on real hardware — else
-    # /desired is pushed into un-enabled motors). "0" = no handshake (sim, or an
-    # external mode-manager owns enable). Default off; a robot opts in.
-    "autoEnableMotors": "0",
-}
-
-PSI_FIELD_TO_ENV: dict[str, str] = {
-    "runDir":       "PSI0_RUN_DIR",
-    "ckptStep":     "PSI0_CKPT_STEP",
-    "cameraId":     "PSI0_CAMERA_ID",
-    "stateQueue":   "PSI0_STATE_QUEUE",
-    "actionQueue":  "PSI0_ACTION_QUEUE",
-    "instruction":  "PSI0_INSTRUCTION",
-    "rosDomainId":  "ROS_DOMAIN_ID",
-    "bridgeRateHz": "PSI0_BRIDGE_RATE_HZ",
-    "enableGait":   "PSI0_ENABLE_GAIT",
-    "enableHeight": "PSI0_ENABLE_HEIGHT",
-    "enableYaw":    "PSI0_ENABLE_YAW",
-    "walkingOnnx":  "POLICY_ONNX_PATH",
     "autoEnableMotors": "PSI0_AUTO_ENABLE_MOTORS",
 }
 
@@ -1288,21 +1261,44 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
     },
     "psi0-policy": {
         # psi0-vla container of the phantom-psi DaemonSet (foundation.bot/has-psi
-        # gated): the Ψ₀ VLA GPU policy. Built on-device from
-        # Psi0-VLA/infra/docker/Dockerfile.policy (MUST be a CUDA-13/sm_110 torch
-        # base for Thor — the Orin igpu base does not run there). Currently a
-        # LOCAL image (k0s containerd, not the fleet registry), so the in-repo
-        # tag is the working default; kustomize rewrites it from
-        # images.psi0-policy. TODO: publish to the registry for multi-robot.
+        # gated): the Ψ₀ VLA GPU policy. Built from Psi0-VLA/infra/docker/
+        # Dockerfile.policy (MUST be a CUDA-13/sm_110 torch base for Thor — the
+        # Orin igpu base does not run there). NOW CI-PUBLISHED to the fleet
+        # registry as foundationbot/psi0-policy:<branch>-<ts> (Psi0-VLA
+        # .circleci/config.yml, spec 005). The in-repo base-manifest tag
+        # (psi0-policy:thor-cu130, local) is the find-key + on-device fallback;
+        # kustomize rewrites the tag from images.psi0-policy. New robots pull the
+        # registry image; a local on-device build (psi0-policy:thor-cu130) is a
+        # repo-swap override in that robot's host-config.
         "stack": "core",
-        "manifest_image": "psi0-policy",
+        "manifest_image": "foundationbot/psi0-policy",
     },
     "phantom-loco": {
-        # bridge + walking containers of the phantom-psi DaemonSet. Local image
-        # (bridge.psi0_loco_bridge + inference.policy_node). Rewritten from
-        # images.phantom-loco. TODO: publish to the registry for multi-robot.
+        # bridge + walking + operator + loco-state-mirror containers of the
+        # phantom-psi DaemonSet (and the psi0-dma-walking DaemonSet — same
+        # find-key). bridge.psi0_* + inference.policy_node. CI-published by the
+        # phantom-locomotion repo as foundationbot/phantom-psi0-loco:<tag>-aarch64.
+        # The base manifest points at foundationbot/phantom-psi0-loco; rewritten
+        # from images.phantom-loco (tag, or full repo-swap for a local build).
+        # The host-config key stays 'phantom-loco' (legacy); the published repo
+        # is foundationbot/phantom-psi0-loco — same key/image indirection as the
+        # 'phantom-locomotion' / 'operator-ui' entries above.
         "stack": "core",
-        "manifest_image": "phantom-loco",
+        "manifest_image": "foundationbot/phantom-psi0-loco",
+    },
+    "psi0-sonic": {
+        # psi0-state container of the phantom-psi DaemonSet (foundation.bot/has-psi
+        # gated): the proprio producer (phantom_sonic.actuals_state_source). Built
+        # from Psi0-VLA/infra/docker/Dockerfile.sonic — a SUPERSET of psi0-policy
+        # (adds phantom_sonic + phantom_bridge + MJCF + mujoco + the dma_common IPC
+        # wheel) on the SAME CUDA-13/sm_110 torch base. NOW CI-PUBLISHED as
+        # foundationbot/psi0-sonic:<branch>-<ts> (Psi0-VLA .circleci/config.yml,
+        # spec 005). The in-repo base-manifest tag (psi0-sonic:thor-cu130, local)
+        # is a repo-swap override; new robots pull the registry image. kustomize
+        # rewrites the tag from images.psi0-sonic. Serves both phantom-psi's
+        # psi0-state and the psi0-dma-walking gripper container.
+        "stack": "core",
+        "manifest_image": "foundationbot/psi0-sonic",
     },
 }
 

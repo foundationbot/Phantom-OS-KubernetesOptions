@@ -147,6 +147,22 @@ stacks:
 #                          via the 'phantom-locomotion' key above (same
 #                          published image; the two workloads are mutually
 #                          exclusive so one find-key serves both).
+#   psi0-policy            core stack — psi0-vla (Ψ₀ VLA GPU policy) of the
+#                          phantom-psi DaemonSet (has-psi, default-off). CI
+#                          publishes foundationbot/psi0-policy:<branch>-<ts>
+#                          (Psi0-VLA .circleci/config.yml, spec 005). aarch64.
+#   psi0-sonic             core stack — psi0-state (proprio producer) of the
+#                          phantom-psi DaemonSet. CI publishes
+#                          foundationbot/psi0-sonic:<branch>-<ts> (superset of
+#                          psi0-policy + phantom_sonic/bridge + mujoco +
+#                          dma_common). aarch64.
+#   phantom-loco           core stack — bridge / walking / operator /
+#                          loco-state-mirror of phantom-psi (and the
+#                          psi0-dma-walking DaemonSet). Published as
+#                          foundationbot/phantom-psi0-loco:<tag>-aarch64 by the
+#                          phantom-locomotion repo CI (carries bridge.psi0_* +
+#                          inference.policy_node). One find-key serves both
+#                          workloads. aarch64.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -160,6 +176,28 @@ images:
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
   #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
+  #
+  # phantom-psi stack (has-psi gated, default-off). Three images, all CI-published;
+  # the base manifest defaults to the registry refs with a :PLACEHOLDER tag, so a
+  # has-psi robot MUST pin these (an unrewritten :PLACEHOLDER ImagePullBackOffs by
+  # design). Uncomment and pin a real CI tag on hosts that opt in (nodeLabels
+  # has-psi: 'true', has-positronic/has-sonic/has-locomotion: 'false'). To run a
+  # LOCAL on-device build instead, point the image at the local tag
+  # (psi0-policy:thor-cu130 / psi0-sonic:thor-cu130 / phantom-loco:local) —
+  # Kustomize repo-swaps it off the registry default. aarch64/Jetson Thor only.
+  #   - psi0-policy / psi0-sonic: foundationbot/psi0-{policy,sonic}:<branch>-<UTC-ts>
+  #     from Psi0-VLA CI (.circleci/config.yml, spec 005). Pin an immutable
+  #     <branch>-<ts> tag, NOT :latest (identical bits per robot, one-line rollback).
+  #   - phantom-loco: foundationbot/phantom-psi0-loco:<tag>-aarch64 from the
+  #     phantom-locomotion repo CI (carries bridge.psi0_* + inference.policy_node);
+  #     it rewrites BOTH the phantom-psi bridge/walking/operator/loco-state-mirror
+  #     containers AND the psi0-dma-walking DaemonSet (same find-key).
+  # psi0-policy:
+  #   image: foundationbot/psi0-policy:REPLACE-WITH-CI-TAG
+  # psi0-sonic:
+  #   image: foundationbot/psi0-sonic:REPLACE-WITH-CI-TAG
+  # phantom-loco:
+  #   image: foundationbot/phantom-psi0-loco:REPLACE-WITH-CI-TAG-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

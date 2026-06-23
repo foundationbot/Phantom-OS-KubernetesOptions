@@ -28,7 +28,10 @@
 # like psi0-sonic adds it for phantom-psi's psi0-state container — the stock
 # phantom-loco image lacks dma_common and the node ImportErrors at startup. The
 # per-robot tag is rewritten by Kustomize from host-config.yaml images.phantom-loco
-# (CONTAINER_TARGETS), same as phantom-psi.
+# (CONTAINER_TARGETS), same as phantom-psi. The base refs below point at the fleet
+# registry (foundationbot/phantom-psi0-loco, foundationbot/psi0-sonic) with a
+# :PLACEHOLDER sentinel tag — every has-psi-walking robot MUST set those two
+# images entries; an unrewritten :PLACEHOLDER fails loudly (ImagePullBackOff).
 #
 # ── Mutual exclusion ───────────────────────────────────────────────────────
 # foundation.bot/has-psi-dma-walking gates this DaemonSet. It drives /desired,
@@ -88,7 +91,7 @@ spec:
       containers:
         # ── walking-dma — Ψ₀ Early-fan policy over the DMA plane ───────────
         - name: walking-dma
-          image: phantom-loco:local
+          image: foundationbot/phantom-psi0-loco:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args: ["python", "-m", "bridge.psi0_dma_walking_node"]
           # stdin/tty so an operator can `kubectl exec -it` (or `positronic.sh
@@ -123,7 +126,7 @@ spec:
         # phantom-loco, which lacks phantom_sonic. Same source-env-then-exec
         # pattern as phantom-psi's psi0-state; no /models (reads only the ring).
         - name: gripper
-          image: psi0-sonic:thor-cu130
+          image: foundationbot/psi0-sonic:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
