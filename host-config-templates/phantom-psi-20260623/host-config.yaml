@@ -1,0 +1,117 @@
+# Release host-config TEMPLATE — phantom-psi stack, 2026-06-23
+#
+# Seed for the wizard:
+#   sudo bash scripts/configure-host.sh --from-template phantom-psi-20260623
+# (or --from-template /path/to/this/file when distributed on a USB stick).
+#
+# It carries the EXACT image tags that ship in the matching
+# phantomos-k0s-images-*-arm64.deb / .tar.zst bundle, so the wizard
+# pre-fills every image override — you only fill in the per-host fields
+# marked REPLACE-* below (robot id, AI PC URL, EtherCAT NIC MAC, dma
+# config). Derived from mk11000019 on 2026-06-23.
+#
+# IMPORTANT — psi0 models are NOT in the matching image bundle (psi0-policy
+# / psi0-sonic were excluded for size, ~71 GB). `nodeLabels.has-psi` is
+# therefore 'false' here: the robot comes up with cameras / recorder /
+# state-estimator / yovariable / dma-bridge but NO body driver. Flip the
+# ONE body driver you want (has-positronic / has-locomotion / has-sonic /
+# has-psi) to 'true' — and for has-psi, stage psi0-policy / psi0-sonic on
+# the node first or the pod ImagePullBackOffs.
+
+robot: ""                # REPLACE: DNS-1123 robot id (e.g. mk11000020)
+aiPcUrl: ""              # REPLACE: paired AI PC URL (e.g. http://100.x.y.z:5000)
+gitSource: local
+production: false
+stacks:
+  core:
+    selfHeal: false
+  operator:
+    selfHeal: false
+# Image tags — pinned to the matching image bundle. Do not hand-edit unless
+# you are also rebuilding the bundle at the new tag.
+images:
+  cpp-robot-state-estimator:
+    image: foundationbot/cpp-robot-state-estimator:main-0.0.1-20260618T064048-arm64
+  dma-ethercat:
+    image: foundationbot/dma-ethercat:main-20260622T162349-aarch64
+  dma-streams:
+    image: foundationbot/dma-streams:main-20260622T011143-aarch64
+  phantom-locomotion:
+    image: foundationbot/phantom-dma-inference:feat-sim2real-asap-20260615T072006-aarch64
+  phantom-motion-replay:
+    image: foundationbot/phantom-motion-replay:mk1-sonic-deployment-20260609T224806-aarch64
+  phantom-models:
+    image: localhost:5443/phantom-models:2026-06-08
+  phantom-policies:
+    image: localhost:5443/phantom-policies:2026-06-09-sonic-onnx
+  positronic-control:
+    image: foundationbot/phantom-cuda:0.2.48-dev.3-production-cu130-arm64
+  dma-bridge:
+    image: foundationbot/phantom-cuda:dma-bridge-SOF-1176-feat-arm64
+  vr-web:
+    image: foundationbot/argus.vr.web.react:2e3ee5bce1076858e5b4cad9408e794c2b08d15c-arm64
+  yovariable-server:
+    image: foundationbot/yovariable-server:V-1-0-21-20260603-021956-arm64
+  # psi0 images — NOT in the bundle (excluded for size). Listed for tag
+  # provenance; stage these on the node before flipping has-psi: 'true'.
+  psi0-policy:
+    image: localhost:5443/psi0-policy:thor-cu130-20260622
+  phantom-loco:
+    image: localhost:5443/phantom-loco:20260622
+  psi0-sonic:
+    image: localhost:5443/psi0-sonic:thor-cu130-20260622
+deployments:
+  positronic-control:
+    privileged: true
+    # Only used when has-positronic: 'true'. Adjust the policy_path for the
+    # robot's intended behaviour.
+    launchCommand: "RCUTILS_COLORIZED_OUTPUT=1 ros2 launch phantom_policies dma_policy_launch.py policy_path:=$PHANTOM_MODELS/walking-imu-hard-railing"
+    mounts:
+      - {name: data, host: /data, container: /data}
+      - {name: data2, host: /data2, container: /data2}
+      - {name: recordings, host: /root/recordings, container: /recordings}
+      - {name: torch-hub, host: /data/torch, container: /root/.cache/torch/hub}
+# phantom-psi knobs — dormant while has-psi is 'false'. runDir points at a
+# model tree that must be staged under /var/lib/psi0/models on the node.
+phantomPsi:
+  runDir: "/models/20260619-full_task-joints29.real.flow1000.cosine.lr1.0e-04.b128.gpus2.2606192300"
+  ckptStep: "142000"
+  cameraId: "0"
+  instruction: "Grasp and lift part."
+  rosDomainId: "43"
+  enableGait: "0"
+  enableHeight: "0"
+  enableYaw: "0"
+# Workload gates. SAFE DEFAULT: no body driver on. Flip exactly one of
+# has-positronic / has-locomotion / has-sonic / has-psi to 'true'.
+nodeLabels:
+  foundation.bot/has-as-inference: 'false'
+  foundation.bot/has-cameras: 'true'
+  foundation.bot/has-dma-bridge: 'true'
+  foundation.bot/has-ik-mk2: 'false'
+  foundation.bot/has-locomotion: 'false'
+  foundation.bot/has-okvis: 'false'
+  foundation.bot/has-positronic: 'false'
+  foundation.bot/has-psi: 'false'
+  foundation.bot/has-recorder: 'true'
+  foundation.bot/has-sonic: 'false'
+  foundation.bot/has-state-estimator: 'true'
+  foundation.bot/has-streamer: 'false'
+  foundation.bot/has-wm-inference: 'false'
+  foundation.bot/has-yovariable: 'true'
+# CPU isolation — Thor hardware layout (RT loop on first core 11, NIC IRQs
+# on last core 13; see operations.md §3.14). Only the NIC MAC is per-host.
+cpuIsolation:
+  enabled: true
+  partitions:
+  - name: ecat
+    cpus: 11-13
+  nic:
+    iface: ecat1
+    irqCore: 13
+    selector:
+      mac: "REPLACE-WITH-ECAT-NIC-MAC"   # REPLACE: this robot's EtherCAT NIC MAC
+  dmaRtCpu: 11
+  installAffinityDefaults: true
+dmaEthercat:
+  configPath: "REPLACE-WITH-ROBOT-ECAT-CONFIG.json"   # REPLACE: per-robot bus config (e.g. phantom-0014.json)
