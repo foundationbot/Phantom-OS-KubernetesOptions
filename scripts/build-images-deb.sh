@@ -122,16 +122,14 @@ NO_PROMPT="${NO_PROMPT:-0}"
 # (S3/rsync) and the operator only wants the manifest-bearing .deb.
 NO_DATA_BUNDLE="${NO_DATA_BUNDLE:-0}"
 # Host-config-driven discovery. By DEFAULT, if the system host-config
-# exists we read its images: block (via host-config.py get-images-json)
-# and merge it OVER the manifest scan: exact per-host deployed tags +
-# every localhost:5443/* local image, with no per-image flags. This is
-# the right source on a robot — the manifest scan only knows the
-# in-repo default tags, and skips localhost:5443/* entirely.
+# exists we read its images: block and merge it OVER the manifest scan:
+# exact per-host deployed tags + every localhost:5443/* local image, with
+# no per-image flags. This is the right source on a robot — the manifest
+# scan only knows the in-repo default tags, and skips localhost:5443/*.
 #   --host-config <path>  read a DIFFERENT host-config (implies on).
 #   --no-host-config      disable it (off-robot/CI builds with no host file).
 HOST_CONFIG_FILE="${HOST_CONFIG_FILE:-/etc/phantomos/host-config.yaml}"
 USE_HOST_CONFIG="${USE_HOST_CONFIG:-1}"
-HOST_CONFIG_HELPER="$REPO_ROOT/scripts/lib/host-config.py"
 # Exclude globs (repeatable --exclude); matched against the full ref.
 EXCLUDES=()
 # --list: print the resolved image set and exit without building.
@@ -320,46 +318,54 @@ fi
 # the host-config file is absent (off-robot build → manifest scan only).
 HC_LOCAL=()              # localhost:5443/* refs to docker-save
 HC_LOCAL_CONTAINERS=()   # parallel container labels for the bundle manifest
+# ref -> container for pullable host-config images, so the bundle sidecar
+# records the deployed CONTAINER even for swap repos. foundationbot/phantom-cuda
+# backs both positronic-control and dma-bridge: the repo alone can't tell them
+# apart, but the host-config images: block keys can (and the two run at
+# different tags, so they're distinct keys here).
+declare -A HC_PULL_CONTAINER=()
 if [ "$USE_HOST_CONFIG" = 1 ] && [ -z "$FROM_FILE" ] && [ -r "$HOST_CONFIG_FILE" ]; then
-  if [ ! -r "$HOST_CONFIG_HELPER" ]; then
-    echo "warning: $HOST_CONFIG_HELPER not found — skipping host-config merge" >&2
-  else
-    _hc_lines="$(python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" get-images-json 2>/dev/null \
-      | python3 -c '
-import json, sys
+  # Read the images: block DIRECTLY (PyYAML), not get-images-json: we need
+  # the container KEY for every ref, which the kustomize find=replace form
+  # get-images-json emits would drop. The value is already the deployed ref.
+  _hc_lines="$(python3 - "$HOST_CONFIG_FILE" 2>/dev/null <<'PY'
+import sys, yaml
 try:
-    entries = json.load(sys.stdin)
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
 except Exception:
-    entries = []
-for e in entries:
-    ref = e.split("=", 1)[1] if "=" in e else e
-    key = e.split("=", 1)[0] if "=" in e else ""
-    if ref.startswith("localhost:5443/"):
-        container = key or ref.rsplit("/", 1)[-1].rsplit(":", 1)[0]
-        print("LOCAL\t%s\t%s" % (container, ref))
-    else:
-        print("PULL\t%s" % ref)
-' 2>/dev/null || true)"
-    if [ -n "$_hc_lines" ]; then
-      # Repos host-config speaks to (pullable) — drop their manifest-scan
-      # default-tag entries so the host-config tag wins.
-      declare -A _hc_pull_repos=()
-      _hc_pull=()
-      while IFS=$'\t' read -r kind a b; do
-        case "$kind" in
-          PULL)  _hc_pull+=("$a"); _hc_pull_repos["${a%:*}"]=1 ;;
-          LOCAL) HC_LOCAL+=("$b"); HC_LOCAL_CONTAINERS+=("$a") ;;
-        esac
-      done <<< "$_hc_lines"
-      _kept=()
-      for img in "${IMAGES[@]}"; do
-        [ -n "${_hc_pull_repos[${img%:*}]:-}" ] || _kept+=("$img")
-      done
-      IMAGES=("${_kept[@]}" "${_hc_pull[@]}")
-      # host-config already supplies the local images — don't also prompt.
-      NO_PROMPT=1
-      echo "host-config merge: ${HOST_CONFIG_FILE} -> ${#_hc_pull[@]} pullable + ${#HC_LOCAL[@]} local image(s)"
-    fi
+    cfg = {}
+images = cfg.get("images") if isinstance(cfg, dict) else None
+if isinstance(images, dict):
+    for container, spec in images.items():
+        if not isinstance(spec, dict):
+            continue
+        ref = spec.get("image")
+        if not ref:
+            continue
+        kind = "LOCAL" if str(ref).startswith("localhost:5443/") else "PULL"
+        print("%s\t%s\t%s" % (kind, container, ref))
+PY
+)"
+  if [ -n "$_hc_lines" ]; then
+    # Repos host-config speaks to (pullable) — drop their manifest-scan
+    # default-tag entries so the host-config tag wins.
+    declare -A _hc_pull_repos=()
+    _hc_pull=()
+    while IFS=$'\t' read -r kind container ref; do
+      [ -z "$ref" ] && continue
+      case "$kind" in
+        PULL)  _hc_pull+=("$ref"); _hc_pull_repos["${ref%:*}"]=1; HC_PULL_CONTAINER["$ref"]="$container" ;;
+        LOCAL) HC_LOCAL+=("$ref"); HC_LOCAL_CONTAINERS+=("$container") ;;
+      esac
+    done <<< "$_hc_lines"
+    _kept=()
+    for img in "${IMAGES[@]}"; do
+      [ -n "${_hc_pull_repos[${img%:*}]:-}" ] || _kept+=("$img")
+    done
+    IMAGES=("${_kept[@]}" "${_hc_pull[@]}")
+    # host-config already supplies the local images — don't also prompt.
+    NO_PROMPT=1
+    echo "host-config merge: ${HOST_CONFIG_FILE} -> ${#_hc_pull[@]} pullable + ${#HC_LOCAL[@]} local image(s)"
   fi
 fi
 
@@ -801,7 +807,11 @@ build_for_arch() {
     # ...) are deliberately omitted — the wizard has nothing to do with
     # them.
     repo="$(image_repo "$img")"
-    container="$(canonical_container_for_repo "$repo")"
+    # Prefer the container the host-config images: block bound to this exact
+    # ref (unambiguous, covers swap repos like phantom-cuda); fall back to the
+    # repo lookup for manifest-scan images not declared in host-config.
+    container="${HC_PULL_CONTAINER[$img]:-}"
+    [ -n "$container" ] || container="$(canonical_container_for_repo "$repo")"
     if [ -n "$container" ]; then
       bundle_containers+=("$container")
       bundle_refs+=("$img")
