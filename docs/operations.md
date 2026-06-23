@@ -100,6 +100,40 @@ The wizard reads any existing `/etc/phantomos/host-config.yaml` as the
 seed and prompts for each field. Press enter to keep a default, or
 type a new value.
 
+#### Seeding from a template (`--from-template`)
+
+A fresh robot has no `/etc/phantomos/host-config.yaml`, so the wizard
+falls back to the generic `host-config-templates/_template/` defaults —
+every field starts blank. To pre-fill the prompts from a known-good
+config (another robot's values, or a team-canonical template), pass
+`--from-template`:
+
+```bash
+# by name -> host-config-templates/<name>/host-config.yaml in this repo
+sudo bash scripts/configure-host.sh --from-template mk09
+
+# by directory -> <dir>/host-config.yaml
+sudo bash scripts/configure-host.sh --from-template ~/phantom-fleet-config/mk11000019
+
+# by file -> use that YAML directly
+sudo bash scripts/configure-host.sh --from-template ~/configs/base.yaml
+```
+
+The chosen template only **seeds** the prompts — the wizard still walks
+every field so you can adjust the robot-specific ones (id, AI PC URL,
+core pinning). The seed precedence is:
+
+1. `--from-template <name|dir|file>` (when given)
+2. existing `/etc/phantomos/host-config.yaml`
+3. `host-config-templates/<hostname>/host-config.yaml`
+4. `host-config-templates/_template/host-config.yaml`
+
+This is the fast path for bringing up a robot identical to an existing
+one: point `--from-template` at the sibling's config tree, then change
+only the identity and pinning fields. (The repo ships only
+`_template/`; per-robot template trees are operator-supplied, e.g. a
+`phantom-fleet-config/` checkout.)
+
 #### Wizard prompts
 
 **Robot identity** — DNS-1123 name. Used in Application names
@@ -723,9 +757,30 @@ This load+push step is automated by
 (`bash scripts/load-image-tars.sh <tarball> ...` — a pure registry op,
 usable off-robot, no `host-config.yaml` knowledge). A full bootstrap can
 do the whole thing end-to-end — load+push **and** wire the loaded tag
-into `host-config.yaml` — via the `--load-image-tars` phase with
-`--phantom-models-tar` / `--phantom-policies-tar` (see [§4](#4-bootstrap-phases-reference)
-and [§5](#5-per-phase-invocations-cheat-sheet)).
+into `host-config.yaml` — via the `--load-image-tars` phase, which both
+loads/pushes the tarballs and updates the `images:` block (so you can
+skip step 4 below). Two ways to drive it:
+
+```bash
+# Explicit (non-interactive) — give the on-robot tarball paths as flags:
+sudo bash scripts/bootstrap-robot.sh --load-image-tars \
+  --phantom-models-tar   /root/phantom-models-2026-06-08.tar \
+  --phantom-policies-tar /root/phantom-policies-2026-06-09-sonic-onnx.tar
+
+# Interactive — a full bootstrap on a TTY prompts for each path:
+#   phantom-models tarball path?   [Enter to skip]
+#   phantom-policies tarball path? [Enter to skip]
+sudo bash scripts/bootstrap-robot.sh
+```
+
+The interactive prompt only fires on a TTY and when the flag wasn't
+given; under `-y`, in selected-phase mode, or with no TTY the phase acts
+only on the flags (and is a no-op if neither is set). The phase waits for
+the in-cluster registry to be Available first, so the tarballs must
+already be on the robot's filesystem (the registry push runs on the robot
+— it can't read a file on your workstation). See
+[§4](#4-bootstrap-phases-reference) and
+[§5](#5-per-phase-invocations-cheat-sheet).
 
 **4. Point the manifests at the loaded tag.** Set the tag in the
 `images:` block of `/etc/phantomos/host-config.yaml` and apply it
@@ -748,6 +803,177 @@ sudo bash scripts/bootstrap-robot.sh --gitops
 > ref, and a containerd-local import is lost on a `k0s reset` or a node
 > that didn't get the import. Use the import only as a stopgap when the
 > registry pod is down.
+
+---
+
+### 3.14 CPU isolation and core pinning (EtherCAT RT)
+
+The EtherCAT master runs a hard-real-time cyclic loop. To keep it
+jitter-free, bootstrap carves a set of CPU cores out of the kernel's
+general scheduling and dedicates them to the RT loop and its NIC. This is
+declared in the `cpuIsolation` block of `/etc/phantomos/host-config.yaml`
+and applied by phases [9 (ecat-interface)](#4-bootstrap-phases-reference),
+[10 (cpu-isolation)](#4-bootstrap-phases-reference), and
+[12 (install-dma-ethercat)](#4-bootstrap-phases-reference).
+
+```yaml
+cpuIsolation:
+  enabled: true
+  partitions:
+    - name: ecat
+      cpus: "11-13"            # the cpuset carved out for EtherCAT
+  nic:
+    iface: ecat1
+    irqCore: 13               # NIC IRQs -> LAST core of the partition
+    selector:
+      mac: 4c:bb:47:14:14:fc  # OR pci: "0000:01:00.0" OR {driver: igc, index: 0}
+  dmaRtCpu: 11                # SOEM cyclic RT loop -> FIRST core of the partition
+  installAffinityDefaults: true
+```
+
+**Pinning convention.** Within the partition's cpuset, split the RT loop
+and IRQ servicing onto opposite ends so they never contend for the same
+core:
+
+- **`dmaRtCpu` → the FIRST core of the partition** (`11` for `11-13`).
+  This is the SOEM cyclic loop core — the `nohz_full` target, governor
+  locked, kthreads/timers steered away. The DMA service runs here
+  (`DMA_RT_CPU` in `/etc/dma/dma-ethercat.env`, plus the partition slice
+  + `CPUAffinity`).
+- **`nic.irqCore` → the LAST core of the partition** (`13` for `11-13`).
+  The EtherCAT NIC's hardware IRQs are pinned here via
+  `/proc/irq/<n>/smp_affinity`, isolated from the RT loop so interrupt
+  handling never steals cycles from the cyclic deadline.
+- Cores in between (`12`) are headroom in the isolated partition — free
+  for additional RT-adjacent work that should stay off the housekeeping
+  CPUs.
+
+So for the default `11-13` partition: **RT loop on 11, IRQs on 13.** Keep
+`dmaRtCpu` and `nic.irqCore` inside `partitions[].cpus`, and keep them
+distinct (first vs last) — co-locating them reintroduces the IRQ-vs-loop
+contention isolation is meant to remove.
+
+**Worked example (mk11000019):** partition `ecat` = `11-13`,
+`dmaRtCpu: 11`, `nic.irqCore: 13` — RT loop on the first core, NIC IRQs
+on the last.
+
+**Applying changes.** Edit the block, then re-run the isolation phase:
+
+```bash
+sudo $EDITOR /etc/phantomos/host-config.yaml
+sudo bash scripts/bootstrap-robot.sh --cpu-isolation --yes
+```
+
+If the kernel cmdline changed (isolcpus / irqaffinity), the phase writes
+`/etc/phantomos/cpu-isolation.reboot-pending` — **reboot** to activate.
+Verify after reboot:
+
+```bash
+cat /sys/devices/system/cpu/isolated          # should list the partition cores
+cat /proc/irq/<nic-irq>/smp_affinity_list      # should be nic.irqCore
+grep DMA_RT_CPU /etc/dma/dma-ethercat.env      # should be dmaRtCpu
+```
+
+---
+
+### 3.15 Manage the dma-ethercat service
+
+The EtherCAT master (`dma_main`) runs as a host systemd service installed
+from the `dma-ethercat` `.deb` by [phase 12](#4-bootstrap-phases-reference)
+— **not** as a Kubernetes pod. It owns the EtherCAT bus and the
+`/dev/shm` DMA variable map that the in-cluster workloads read, so it runs
+on the host directly with RT scheduling.
+
+#### Where things live
+
+| What | Path |
+|------|------|
+| Master binary (the service) | `/usr/bin/dma_main` |
+| CLI tools | `/usr/bin/dma_cmd_client`, `dma_motor_motion`, `elmo_query`, `ethercat_error_viewer`, `ethercat_sine_test`, `health_monitor`, `tactile_verify`, … |
+| Uninstaller | `/usr/sbin/dma-ethercat-uninstall` |
+| systemd unit | `/lib/systemd/system/dma-ethercat.service` |
+| Drop-ins (slice, debug, overrides) | `/etc/systemd/system/dma-ethercat.service.d/*.conf` |
+| **Runtime config (env)** | `/etc/dma/dma-ethercat.env` (dpkg *conffile* — survives `.deb` upgrades) |
+| Shipped hardware configs | `/usr/share/dma-ethercat/config/*.json` (per-robot + variant subdirs) |
+| MuJoCo models | `/usr/share/dma-ethercat/config/mujoco/*.xml` |
+| cpuset helper scripts | `/usr/lib/dma-ethercat/cpusets/` |
+
+Everything under `/usr/bin`, `/usr/share/dma-ethercat`, and the unit file
+is **dpkg-managed** — a `.deb` upgrade overwrites it. Only
+`/etc/dma/dma-ethercat.env` and your own drop-ins persist across upgrades.
+
+#### Modifying runtime arguments
+
+The unit's `ExecStart` is:
+
+```
+ExecStart=/usr/bin/taskset -c ${DMA_CPU_AFFINITY} /usr/bin/dma_main \
+    --config ${DMA_CONFIG} --cpu ${DMA_RT_CPU} --interface ${INTERFACE} \
+    --mujoco-model ${DMA_MUJOCO_MODEL} --enable-emcy-monitor --enable-pdo-diagnostics
+```
+
+The `${...}` values come from `/etc/dma/dma-ethercat.env`, so most runtime
+tuning is just **editing that file and restarting** — no unit edits:
+
+| Argument | env var in `/etc/dma/dma-ethercat.env` |
+|----------|----------------------------------------|
+| `--config` (hardware JSON) | `DMA_CONFIG` |
+| `--interface` (EtherCAT NIC) | `INTERFACE` |
+| `--cpu` (RT loop core) | `DMA_RT_CPU` |
+| `taskset -c` (CPU affinity) | `DMA_CPU_AFFINITY` |
+| `--mujoco-model` | `DMA_MUJOCO_MODEL` |
+
+```bash
+sudo $EDITOR /etc/dma/dma-ethercat.env     # e.g. point DMA_CONFIG at a new robot JSON
+sudo systemctl restart dma-ethercat
+```
+
+To use a custom hardware config, drop the JSON in `/etc/dma/` (not under
+`/usr/share`, which dpkg owns) and set `DMA_CONFIG=/etc/dma/my-config.json`.
+`DMA_CPU_AFFINITY` / `DMA_RT_CPU` must stay consistent with the
+[cpuIsolation](#314-cpu-isolation-and-core-pinning-ethercat-rt) partition
+(affinity must be a superset that contains the RT core).
+
+To change the **hardcoded flags** (e.g. drop `--enable-pdo-diagnostics`,
+or add a new `dma_main` flag), don't edit the dpkg-owned unit — add a
+drop-in that resets and re-declares `ExecStart`:
+
+```bash
+sudo systemctl edit dma-ethercat      # writes /etc/systemd/system/dma-ethercat.service.d/override.conf
+```
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/taskset -c ${DMA_CPU_AFFINITY} /usr/bin/dma_main \
+    --config ${DMA_CONFIG} --cpu ${DMA_RT_CPU} --interface ${INTERFACE} \
+    --mujoco-model ${DMA_MUJOCO_MODEL} --enable-emcy-monitor
+```
+
+The empty `ExecStart=` is required — systemd appends otherwise. Run
+`sudo systemctl daemon-reload && sudo systemctl restart dma-ethercat`
+after.
+
+#### systemctl / journalctl cheat sheet
+
+```bash
+systemctl status dma-ethercat            # current state, last logs, the active ExecStart
+systemctl cat dma-ethercat               # merged unit + every drop-in (verify your override)
+sudo systemctl restart dma-ethercat      # apply env / config changes
+sudo systemctl stop dma-ethercat         # release the bus (SIGINT; clean stop, ~10s)
+sudo systemctl start dma-ethercat
+sudo systemctl disable --now dma-ethercat # stop + don't start on boot
+sudo systemctl enable  --now dma-ethercat # start + start on boot (bootstrap default)
+journalctl -u dma-ethercat -f            # follow logs (SyslogIdentifier=dma-ethercat)
+journalctl -u dma-ethercat -b --no-pager # this boot's logs
+```
+
+The unit is `Restart=always` (`RestartSec=5`), so a crash auto-restarts —
+a climbing restart count in `status` is history, not necessarily an active
+fault; check the current **state** and **start time**. `systemctl stop`
+sends `SIGINT` for a clean bus shutdown. For deeper failure triage (bus
+won't come up, install Job stuck) see
+[§7.15](#715-dma-ethercat-installer-job-stuck-or-service-wont-start) and
+[§7.16](#716-reading-dma-ethercat-logs).
 
 ---
 
