@@ -70,10 +70,12 @@ data:
             }
 
             location /api/control/ {
-                # Cluster DNS — Service in phantom ns fronts the
-                # hostNetwork DaemonSet. Endpoints resolve to the
-                # node IP automatically; no per-host templating.
-                proxy_pass http://phantomos-api-server.phantom.svc.cluster.local:5000/;
+                # Repointed to the host AI-API-server on :5000 (the
+                # /opt/phantom-control-api process) — rendered from the
+                # operator-ui-pairing AI_PC_HOST by the init container, so
+                # it's a literal IP (no startup DNS dependency on an
+                # in-cluster phantomos-api-server, which isn't deployed here).
+                proxy_pass http://__AI_PC_HOST__:5000/;
                 proxy_http_version 1.1;
                 proxy_set_header Upgrade $http_upgrade;
                 proxy_set_header Connection 'upgrade';

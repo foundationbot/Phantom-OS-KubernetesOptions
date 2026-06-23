@@ -1,0 +1,106 @@
+# eg-db — Postgres for eg-server (Encyclopedia Galactica episode index).
+# Internal (ClusterIP) — in the operator_ui compose it had no published port.
+# eg-jobs (the ingest) is intentionally NOT deployed, so the DB stays empty,
+# but the base `episodes` schema is created on first init via the
+# docker-entrypoint-initdb.d ConfigMap below (sourced from
+# nimbus.s3_dynamo_athena/scripts/init_postgres.sql) — eg-server's migrations
+# only ALTER `episodes`, they don't create it, so without this it crash-loops.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eg-db-init
+  namespace: argus
+data:
+  init_postgres.sql: |
+    -- Encyclopedia Galactica: Episodes schema for local PostgreSQL backend.
+    CREATE TABLE IF NOT EXISTS episodes (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        display_id        TEXT UNIQUE NOT NULL,
+        robot_name        TEXT NOT NULL,
+        robot_id          TEXT,
+        operator_id       TEXT NOT NULL,
+        task              TEXT,
+        quality           TEXT NOT NULL DEFAULT 'unlabeled'
+                          CHECK (quality IN ('good', 'bad', 'skip', 'unlabeled')),
+        collection_tool   TEXT,
+        started_at        TIMESTAMPTZ NOT NULL,
+        ended_at          TIMESTAMPTZ,
+        duration_seconds  DOUBLE PRECISION,
+        frame_count       INTEGER,
+        dropped_frames    INTEGER DEFAULT 0,
+        file_size_bytes   BIGINT,
+        interrupted       BOOLEAN DEFAULT FALSE,
+        reviewed_by       TEXT,
+        reviewed_at       TIMESTAMPTZ,
+        rejection_reason  TEXT,
+        notes             TEXT,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        assets            JSONB NOT NULL DEFAULT '{}'::jsonb,
+        upload_status     TEXT DEFAULT 'pending'
+                          CHECK (upload_status IN ('pending', 'queued', 'uploading', 'uploaded', 'failed', 'skip')),
+        upload_retry_count INTEGER DEFAULT 0,
+        uploaded_at       TIMESTAMPTZ,
+        local_path        TEXT,
+        local_files_deleted BOOLEAN DEFAULT FALSE
+    );
+    CREATE INDEX IF NOT EXISTS idx_episodes_robot    ON episodes (robot_name, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_task     ON episodes (task, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_quality  ON episodes (quality, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_operator ON episodes (operator_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_robot_id ON episodes (robot_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_upload   ON episodes (upload_status);
+    CREATE INDEX IF NOT EXISTS idx_episodes_started  ON episodes (started_at DESC);
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eg-db
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eg-db
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: eg-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_DB,       value: episodes }
+            - { name: POSTGRES_USER,     value: episodes }
+            - { name: POSTGRES_PASSWORD, value: episodes }
+            # subdir so initdb doesn't choke on a non-empty mount root
+            - { name: PGDATA,            value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { containerPort: 5432 }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            # *.sql here run automatically on first init of an empty DB.
+            - { name: init, mountPath: /docker-entrypoint-initdb.d }
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { cpu: "1",   memory: "1Gi" }
+      volumes:
+        - name: data
+          hostPath: { path: /var/lib/k0s-data/eg-db, type: DirectoryOrCreate }
+        - name: init
+          configMap:
+            name: eg-db-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eg-db
+  namespace: argus
+spec:
+  selector:
+    app: eg-db
+  ports:
+    - { port: 5432, targetPort: 5432 }

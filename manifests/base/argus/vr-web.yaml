@@ -1,7 +1,7 @@
 # vr-web: browser-based VR teleop UI (WebXR / Quest 3) for the paired
 # AI PC. Image entrypoint (argus.vr.web.react) renders /etc/nginx/
 # nginx.conf from the mounted nginx-template.conf, substituting
-# __ROSBRIDGE_PROXY__ / __CAMERA_PROXY__ / __VOICE_PROXY__ from the
+# __DMA_BRIDGE_PROXY__ / __CAMERA_PROXY__ / __VOICE_PROXY__ from the
 # CAMERA_SERVER_URL / ROSBRIDGE_URL / VOICE_SERVER_URL env vars at pod
 # start, then serves the SPA on :8010 over TLS (WebXR requires HTTPS).
 #
@@ -93,19 +93,19 @@ data:
         # proxy to the same backend during the rename migration. The new
         # SPA calls /api/dma_bridge; the old SPA calls /api/rosbridge.
         #
-        # MIGRATION-SAFE PLACEHOLDER: both blocks proxy via __ROSBRIDGE_PROXY__
+        # MIGRATION-SAFE PLACEHOLDER: both blocks proxy via __DMA_BRIDGE_PROXY__
         # on purpose. The image entrypoint substitutes __*_PROXY__ tokens by
         # hardcoded name; any token the running image doesn't know is left
         # literal and nginx fails to start (CrashLoop). Old images only know
-        # __ROSBRIDGE_PROXY__, so the template MUST NOT contain
+        # __DMA_BRIDGE_PROXY__, so the template MUST NOT contain
         # __DMA_BRIDGE_PROXY__ while any old image is still in the fleet.
-        # New images substitute __ROSBRIDGE_PROXY__ too (verified: /api/rosbridge
+        # New images substitute __DMA_BRIDGE_PROXY__ too (verified: /api/rosbridge
         # returns 101 under the new image), so this single token works on both.
         # Cutover to __DMA_BRIDGE_PROXY__ + drop the /api/rosbridge block only
         # after every robot runs the new image. WebSocket upgrade headers are
         # required on both or nginx returns 200 (SPA fallback) instead of 101.
         location /api/dma_bridge {
-          proxy_pass __ROSBRIDGE_PROXY__/;
+          proxy_pass __DMA_BRIDGE_PROXY__/;
           proxy_http_version 1.1;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection "upgrade";
@@ -114,7 +114,7 @@ data:
         }
 
         location /api/rosbridge {
-          proxy_pass __ROSBRIDGE_PROXY__/;
+          proxy_pass __DMA_BRIDGE_PROXY__/;
           proxy_http_version 1.1;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection "upgrade";
@@ -217,7 +217,7 @@ spec:
               mountPath: /tls
       containers:
         - name: vr-web
-          image: foundationbot/argus.vr.web.react:qa
+          image: foundationbot/argus.vr.web.react:SOF-1176-feat
           imagePullPolicy: IfNotPresent
           ports:
             # hostPort:8010 maps the container's port directly onto
@@ -274,7 +274,7 @@ spec:
             # endpoint moves from ws://AI_PC_HOST:9090 to the local bridge.
             #
             # ROSBRIDGE_URL is the name every image's entrypoint reads to fill
-            # __ROSBRIDGE_PROXY__ in nginx-template.conf — the single proxy
+            # __DMA_BRIDGE_PROXY__ in nginx-template.conf — the single proxy
             # placeholder both old and new images understand, and the only one
             # the template uses during the migration (see the nginx template
             # above). DMA_BRIDGE_URL is the same value under the new name,
@@ -283,9 +283,9 @@ spec:
             # Deployment. It is NOT referenced by the template yet; harmless to
             # publish. Drop ROSBRIDGE_URL only after the cutover.
             - name: ROSBRIDGE_URL
-              value: "ws://$(NODE_IP):9098"
+              value: "ws://localhost:9098"
             - name: DMA_BRIDGE_URL
-              value: "ws://$(NODE_IP):9098"
+              value: "ws://localhost:9098"
             # In-cluster Vosk recognizer. vr-web's nginx proxies
             # /api/voice to this so the browser only ever talks to vr-web.
             - name: VOICE_SERVER_URL
