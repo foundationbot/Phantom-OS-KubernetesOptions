@@ -176,19 +176,11 @@ stacks:
 #                          pins localhost:5443/as-inference-models. busybox
 #                          bundle: Thor-built dinov2 + per-task AS engines + PCA
 #                          + norm-stats + state-machine + text-embeds + registry.
-#   wolverine-dma-inference-cpp
-#                          core stack — wolverine-loco's 1 kHz inference node
-#                          (has-wolverine-loco gated, default-off). Pure-C++,
-#                          CPU-only. manifest pins
-#                          foundationbot/wolverine-dma-inference-cpp; override to
-#                          a real CI tag (a plain amd64 tag or the -aarch64
-#                          sibling for Jetson/Thor).
-#   wolverine-policies     core stack — wolverine-loco's load-policies init. slim
-#                          DockerHub image (foundationbot/wolverine-policies)
-#                          carrying the ONNX under /models/policies.
-#   wolverine-teleop       core stack — wolverine-loco's teleop web-UI sidecar
-#                          (foundationbot/wolverine-teleop): joystick + e-stop +
-#                          Enable-Motors + Record on hostPort 8080.
+#   (wolverine-loco's 3 images all share ONE repo
+#    foundationbot/dma-ghost-wbc-inference, tag-prefixed v / policies- / teleop-.
+#    Kustomize can't retag same-named images independently, so they are PINNED
+#    in manifests/base/wolverine-loco/ and NOT host-configurable here — bump by
+#    editing that manifest.)
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -216,16 +208,9 @@ images:
   #   image: localhost:5443/as-inference:REPLACE-WITH-AS-BUILD-TAG
   # as-inference-models:
   #   image: localhost:5443/as-inference-models:REPLACE-WITH-AS-MODELS-TAG
-  # wolverine-loco is default-off (nodeLabels has-wolverine-loco: 'false') and
-  # is in the /desired exclusion group — opting in REQUIRES
-  # foundation.bot/has-positronic: 'false'. Uncomment all three on hosts that
-  # opt in; pin the -aarch64 inference tag on Jetson/Thor.
-  # wolverine-dma-inference-cpp:
-  #   image: foundationbot/wolverine-dma-inference-cpp:REPLACE-WITH-CPP-BUILD-TAG
-  # wolverine-policies:
-  #   image: foundationbot/wolverine-policies:REPLACE-WITH-POLICIES-TAG
-  # wolverine-teleop:
-  #   image: foundationbot/wolverine-teleop:REPLACE-WITH-TELEOP-TAG
+  # wolverine-loco's images are PINNED in manifests/base/wolverine-loco/ (one
+  # shared repo, tag-prefixed) — nothing to set here. Opting in is just the
+  # nodeLabels gate below (has-wolverine-loco: 'true' + has-positronic: 'false').
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

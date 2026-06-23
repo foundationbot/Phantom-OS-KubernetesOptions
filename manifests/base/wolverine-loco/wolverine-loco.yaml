@@ -5,17 +5,20 @@
 #   * CPU-only — onnxruntime CPUExecutionProvider, so NO nvidia runtime / NVIDIA_*.
 #   * carries its own teleop web-UI as a sidecar container.
 #
-# ── Images (published by the omni-wbc repo CI — see its docker/dma_policy_cpp
-#    + the teleop/policies images) ──────────────────────────────────────────
-#   foundationbot/wolverine-dma-inference-cpp  — the 1 kHz C++ node. CI builds a
-#       plain (amd64) and a -aarch64 (Jetson/Thor) variant; per-robot tag is
-#       rewritten by Kustomize from host-config.yaml images.wolverine-dma-inference-cpp.
-#   foundationbot/wolverine-policies            — busybox image holding the ONNX
-#       under /models/policies/<name>.onnx (decoupled from the inference image
-#       so the policy can be swapped per-host without rebuilding the node).
-#   foundationbot/wolverine-teleop              — Python web command server
-#       (joystick page + e-stop + Enable-Motors + Record). Writes the velocity
-#       command scratch and sends ENABLE_MOTORS / RECORDING_START/STOP opcodes.
+# ── Images (all published by the omni-wbc repo CI to ONE shared DockerHub repo
+#    foundationbot/dma-ghost-wbc-inference, distinguished by tag prefix; the
+#    robot is arm64/Thor so the -aarch64 variant is pinned here) ─────────────
+#   :v<x.y.z>-aarch64           — the 1 kHz pure-C++ node (docker/dma_policy_cpp).
+#   :policies-v<x.y.z>-aarch64  — busybox carrier holding the ONNX under
+#       /models/policies/<name>.onnx (decoupled so the policy can be swapped
+#       without rebuilding the node).
+#   :teleop-v<x.y.z>-aarch64    — Python web command server (joystick + e-stop +
+#       Enable-Motors + Record); writes the velocity command scratch and sends
+#       ENABLE_MOTORS / RECORDING_START/STOP opcodes.
+#
+# NOTE: all three share one image NAME, so Kustomize's by-name image override
+# (host-config images:) CANNOT retag them independently — the tags are PINNED
+# here. Bump the version by editing the three image: lines below.
 #
 # ── Mutual exclusion ───────────────────────────────────────────────────────
 # Writes /desired, so it is in the positronic/locomotion/sonic mutual-exclusion
@@ -23,7 +26,8 @@
 # set has-positronic / has-locomotion / has-sonic all "false" in nodeLabels.
 #
 # ── Policies ───────────────────────────────────────────────────────────────
-# An initContainer copies /models/policies from the wolverine-policies image into
+# An initContainer copies /models/policies from the policies carrier image
+# (dma-ghost-wbc-inference:policies-*) into
 # a shared emptyDir; the node container mounts it at /data/policies. The policy
 # NAME per host comes from the wolverine-loco-config ConfigMap (WOLVERINE_POLICY);
 # launch.sh resolves POLICY_ONNX_PATH=/data/policies/$WOLVERINE_POLICY.onnx with a
@@ -75,11 +79,11 @@ spec:
       terminationGracePeriodSeconds: 15
 
       initContainers:
-        # Copy /models/policies from the wolverine-policies image into the shared
+        # Copy /models/policies from the policies carrier image into the shared
         # emptyDir; the node mounts it at /data/policies. Fail loud if the image
         # doesn't ship /models/policies (init logs name the missing path).
         - name: load-policies
-          image: foundationbot/wolverine-policies:PLACEHOLDER
+          image: foundationbot/dma-ghost-wbc-inference:policies-v0.1.0-aarch64
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -90,7 +94,7 @@ spec:
                 echo "==> copying /models/policies -> /shared"
                 cp -a /models/policies/. /shared/
               else
-                echo "==> /models/policies missing in wolverine-policies image" >&2
+                echo "==> /models/policies missing in policies carrier image" >&2
                 echo "    expected: /models/policies/<name>.onnx" >&2
                 exit 1
               fi
@@ -104,7 +108,7 @@ spec:
       containers:
         # ── The 1 kHz C++ inference node ──────────────────────────────────
         - name: node
-          image: foundationbot/wolverine-dma-inference-cpp:PLACEHOLDER
+          image: foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64
           imagePullPolicy: IfNotPresent
           # Image ENTRYPOINT is launch.sh (no ROS). launch.sh resolves the ONNX
           # from WOLVERINE_POLICY (-> /data/policies/$WOLVERINE_POLICY.onnx) with a
@@ -146,7 +150,7 @@ spec:
         # Bound 0.0.0.0:8080 with NO auth token for easiest operator access —
         # tighten with --token (from a Secret) if the robot is on an open network.
         - name: teleop
-          image: foundationbot/wolverine-teleop:PLACEHOLDER
+          image: foundationbot/dma-ghost-wbc-inference:teleop-v0.1.0-aarch64
           imagePullPolicy: IfNotPresent
           command:
             - python

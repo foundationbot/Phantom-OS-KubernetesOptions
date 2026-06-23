@@ -109,45 +109,23 @@ def test_wolverine_loco_alone_validates_clean(capsys):
     assert not any("mutually exclusive" in e for e in errors), errors
 
 
-def test_wolverine_images_retag():
-    """The base manifests already pin foundationbot/* find-keys, so a host
-    override of the same repo is a pure retag — emitted as the bare tagged ref
-    (no find=replace swap), exactly like phantom-dma-inference / ik-mk2."""
+def test_wolverine_images_not_host_configurable(capsys):
+    """The three wolverine-loco images share ONE DockerHub repo
+    (foundationbot/dma-ghost-wbc-inference, tag-prefixed), so Kustomize's
+    by-name override can't retag them independently — they are PINNED in the
+    base manifest and intentionally NOT registered in CONTAINER_TARGETS. A host
+    listing one under images: must fail loud as an unknown container."""
+    assert "wolverine-dma-inference-cpp" not in hc.CONTAINER_TARGETS
+    assert "wolverine-policies" not in hc.CONTAINER_TARGETS
+    assert "wolverine-teleop" not in hc.CONTAINER_TARGETS
+    assert "dma-ghost-wbc-inference" not in hc.CONTAINER_TARGETS
+
     cfg = {
         "robot": "ch4",
         "stacks": {"core": {}, "operator": {}},
-        "images": {
-            "wolverine-dma-inference-cpp": {
-                "image": "foundationbot/wolverine-dma-inference-cpp:V-1.0.0-aarch64",
-            },
-            "wolverine-policies": {
-                "image": "foundationbot/wolverine-policies:V-1.0.0",
-            },
-            "wolverine-teleop": {
-                "image": "foundationbot/wolverine-teleop:V-1.0.0",
-            },
-        },
+        "images": {"dma-ghost-wbc-inference": {"image": "foundationbot/dma-ghost-wbc-inference:v0.1.0"}},
     }
-    out = _images_json(cfg)
-    assert "foundationbot/wolverine-dma-inference-cpp:V-1.0.0-aarch64" in out
-    assert "foundationbot/wolverine-policies:V-1.0.0" in out
-    assert "foundationbot/wolverine-teleop:V-1.0.0" in out
-
-
-def test_wolverine_inference_cpp_local_registry_swap():
-    """A host MAY instead pull from the in-cluster local registry — then it IS
-    a find=replace swap from the foundationbot/* base find-key."""
-    cfg = {
-        "robot": "ch4",
-        "stacks": {"core": {}, "operator": {}},
-        "images": {
-            "wolverine-dma-inference-cpp": {
-                "image": "localhost:5443/wolverine-dma-inference-cpp:dev",
-            },
-        },
-    }
-    out = _images_json(cfg)
-    assert (
-        "foundationbot/wolverine-dma-inference-cpp="
-        "localhost:5443/wolverine-dma-inference-cpp:dev" in out
-    )
+    rc = hc.cmd_get_images_json(cfg)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "unknown container" in captured.err

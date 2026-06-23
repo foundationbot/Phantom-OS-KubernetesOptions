@@ -1379,33 +1379,14 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "localhost:5443/wm-inference-models",
     },
-    "wolverine-dma-inference-cpp": {
-        # wolverine-loco's 1 kHz inference node (foundation.bot/has-wolverine-loco
-        # gated). Pure-C++, CPU-only (onnxruntime) — base manifest pins
-        # foundationbot/wolverine-dma-inference-cpp:PLACEHOLDER directly (same
-        # foundationbot find-key pattern as phantom-dma-inference / ik-mk2). A
-        # host overrides it to a real tag. CI publishes a plain (amd64) tag and
-        # a -aarch64 sibling for Jetson/Thor.
-        "stack": "core",
-        "manifest_image": "foundationbot/wolverine-dma-inference-cpp",
-    },
-    "wolverine-policies": {
-        # Consumed by wolverine-loco's load-policies initContainer — slim image
-        # carrying the ONNX policies under /models/policies, staged into a shared
-        # emptyDir (same load pattern as phantom-policies, but a DockerHub image,
-        # not a localhost:5443 local-registry carrier — pulled via dockerhub-creds).
-        # Image-only (no standalone workload / DEPLOYMENT_TARGETS entry).
-        "stack": "core",
-        "manifest_image": "foundationbot/wolverine-policies",
-    },
-    "wolverine-teleop": {
-        # wolverine-loco's teleop web-UI sidecar (Python web command server):
-        # joystick + e-stop + Enable-Motors + Record on hostPort 8080. Writes the
-        # /dev/shm velocity command scratch and sends ENABLE_MOTORS / RECORDING_*
-        # opcodes onto the host /commands queue. DockerHub image (dockerhub-creds).
-        "stack": "core",
-        "manifest_image": "foundationbot/wolverine-teleop",
-    },
+    # NOTE: wolverine-loco's three images (node / policies / teleop) all live in
+    # ONE shared DockerHub repo foundationbot/dma-ghost-wbc-inference,
+    # distinguished only by tag prefix (v / policies- / teleop-). Kustomize's
+    # image override matches by image NAME, so it cannot retag three same-named
+    # images independently — they are PINNED in manifests/base/wolverine-loco/
+    # and bumped by editing the manifest. Hence NO CONTAINER_TARGETS entries
+    # (they would all collide on the shared name). The has-wolverine-loco gate +
+    # /desired mutual-exclusion are still registered above / enforced below.
 }
 
 
