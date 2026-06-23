@@ -276,17 +276,21 @@ images:
 # Reboot required to pick up cmdline changes; bootstrap warns when
 # they're written.
 #
+# Pinning convention: within partitions[].cpus, put the RT loop on the
+# FIRST core and the NIC IRQs on the LAST core so they never contend.
+# For cpus "11-13": dmaRtCpu=11 (first), irqCore=13 (last).
+#
 # cpuIsolation:
 #   enabled: true
 #   partitions:
 #     - {name: ecat, cpus: "11-13", description: "EtherCAT master RT loop"}
 #   nic:
 #     iface: ecat0
-#     irqCore: 13              # NIC IRQs pinned here (one core, isolated)
+#     irqCore: 13              # NIC IRQs pinned here -> LAST core of the partition
 #     selector:
 #       mac: aa:bb:cc:dd:ee:ff # OR pci: "0000:01:00.0"
 #                              # OR {driver: igc, index: 0}
-#   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
+#   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full) -> FIRST core
 #   installAffinityDefaults: true
 
 # Per-host phantom-locomotion config. Bootstrap phase locomotion-config
