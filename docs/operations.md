@@ -876,6 +876,107 @@ grep DMA_RT_CPU /etc/dma/dma-ethercat.env      # should be dmaRtCpu
 
 ---
 
+### 3.15 Manage the dma-ethercat service
+
+The EtherCAT master (`dma_main`) runs as a host systemd service installed
+from the `dma-ethercat` `.deb` by [phase 12](#4-bootstrap-phases-reference)
+— **not** as a Kubernetes pod. It owns the EtherCAT bus and the
+`/dev/shm` DMA variable map that the in-cluster workloads read, so it runs
+on the host directly with RT scheduling.
+
+#### Where things live
+
+| What | Path |
+|------|------|
+| Master binary (the service) | `/usr/bin/dma_main` |
+| CLI tools | `/usr/bin/dma_cmd_client`, `dma_motor_motion`, `elmo_query`, `ethercat_error_viewer`, `ethercat_sine_test`, `health_monitor`, `tactile_verify`, … |
+| Uninstaller | `/usr/sbin/dma-ethercat-uninstall` |
+| systemd unit | `/lib/systemd/system/dma-ethercat.service` |
+| Drop-ins (slice, debug, overrides) | `/etc/systemd/system/dma-ethercat.service.d/*.conf` |
+| **Runtime config (env)** | `/etc/dma/dma-ethercat.env` (dpkg *conffile* — survives `.deb` upgrades) |
+| Shipped hardware configs | `/usr/share/dma-ethercat/config/*.json` (per-robot + variant subdirs) |
+| MuJoCo models | `/usr/share/dma-ethercat/config/mujoco/*.xml` |
+| cpuset helper scripts | `/usr/lib/dma-ethercat/cpusets/` |
+
+Everything under `/usr/bin`, `/usr/share/dma-ethercat`, and the unit file
+is **dpkg-managed** — a `.deb` upgrade overwrites it. Only
+`/etc/dma/dma-ethercat.env` and your own drop-ins persist across upgrades.
+
+#### Modifying runtime arguments
+
+The unit's `ExecStart` is:
+
+```
+ExecStart=/usr/bin/taskset -c ${DMA_CPU_AFFINITY} /usr/bin/dma_main \
+    --config ${DMA_CONFIG} --cpu ${DMA_RT_CPU} --interface ${INTERFACE} \
+    --mujoco-model ${DMA_MUJOCO_MODEL} --enable-emcy-monitor --enable-pdo-diagnostics
+```
+
+The `${...}` values come from `/etc/dma/dma-ethercat.env`, so most runtime
+tuning is just **editing that file and restarting** — no unit edits:
+
+| Argument | env var in `/etc/dma/dma-ethercat.env` |
+|----------|----------------------------------------|
+| `--config` (hardware JSON) | `DMA_CONFIG` |
+| `--interface` (EtherCAT NIC) | `INTERFACE` |
+| `--cpu` (RT loop core) | `DMA_RT_CPU` |
+| `taskset -c` (CPU affinity) | `DMA_CPU_AFFINITY` |
+| `--mujoco-model` | `DMA_MUJOCO_MODEL` |
+
+```bash
+sudo $EDITOR /etc/dma/dma-ethercat.env     # e.g. point DMA_CONFIG at a new robot JSON
+sudo systemctl restart dma-ethercat
+```
+
+To use a custom hardware config, drop the JSON in `/etc/dma/` (not under
+`/usr/share`, which dpkg owns) and set `DMA_CONFIG=/etc/dma/my-config.json`.
+`DMA_CPU_AFFINITY` / `DMA_RT_CPU` must stay consistent with the
+[cpuIsolation](#314-cpu-isolation-and-core-pinning-ethercat-rt) partition
+(affinity must be a superset that contains the RT core).
+
+To change the **hardcoded flags** (e.g. drop `--enable-pdo-diagnostics`,
+or add a new `dma_main` flag), don't edit the dpkg-owned unit — add a
+drop-in that resets and re-declares `ExecStart`:
+
+```bash
+sudo systemctl edit dma-ethercat      # writes /etc/systemd/system/dma-ethercat.service.d/override.conf
+```
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/taskset -c ${DMA_CPU_AFFINITY} /usr/bin/dma_main \
+    --config ${DMA_CONFIG} --cpu ${DMA_RT_CPU} --interface ${INTERFACE} \
+    --mujoco-model ${DMA_MUJOCO_MODEL} --enable-emcy-monitor
+```
+
+The empty `ExecStart=` is required — systemd appends otherwise. Run
+`sudo systemctl daemon-reload && sudo systemctl restart dma-ethercat`
+after.
+
+#### systemctl / journalctl cheat sheet
+
+```bash
+systemctl status dma-ethercat            # current state, last logs, the active ExecStart
+systemctl cat dma-ethercat               # merged unit + every drop-in (verify your override)
+sudo systemctl restart dma-ethercat      # apply env / config changes
+sudo systemctl stop dma-ethercat         # release the bus (SIGINT; clean stop, ~10s)
+sudo systemctl start dma-ethercat
+sudo systemctl disable --now dma-ethercat # stop + don't start on boot
+sudo systemctl enable  --now dma-ethercat # start + start on boot (bootstrap default)
+journalctl -u dma-ethercat -f            # follow logs (SyslogIdentifier=dma-ethercat)
+journalctl -u dma-ethercat -b --no-pager # this boot's logs
+```
+
+The unit is `Restart=always` (`RestartSec=5`), so a crash auto-restarts —
+a climbing restart count in `status` is history, not necessarily an active
+fault; check the current **state** and **start time**. `systemctl stop`
+sends `SIGINT` for a clean bus shutdown. For deeper failure triage (bus
+won't come up, install Job stuck) see
+[§7.15](#715-dma-ethercat-installer-job-stuck-or-service-wont-start) and
+[§7.16](#716-reading-dma-ethercat-logs).
+
+---
+
 ## 4. Bootstrap phases reference
 
 | Phase | Flag | What it does |
