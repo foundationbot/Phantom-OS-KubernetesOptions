@@ -207,6 +207,13 @@ Common-and-expected failures:
 - **No OAK cameras**: dma-video producer/viewer exit cleanly and
   Kubernetes restarts them indefinitely → CrashLoopBackOff. Also
   environmental.
+- **dma-video pods `Pending` with `head_camera.json is not a file`**:
+  the `dma-video` pods mount the per-host OAK config from
+  `/etc/phantom/head_camera.json` (hostPath, `type: File`); it isn't
+  created by the install. Create it from the robot's **OAK module ID
+  (MXID)** — see [operations.md §7.21](operations.md#721-dma-video-pods-pending--etcphantomhead_camerajson-missing).
+  On a host with no OAK hardware, set `foundation.bot/has-cameras: 'false'`
+  in host-config `nodeLabels:` so the stack isn't scheduled.
 
 ### 6. Access the ArgoCD UI
 
@@ -510,10 +517,11 @@ host-config ref), you also need to refresh the bundle itself:
 **`gitSource: local`** (default — atomic via `.deb`):
 
 ```bash
-# On the build host (a configured robot): bump the tag(s) in its
-# /etc/phantomos/host-config.yaml images: block, then rebuild — the
-# bundle picks up the new refs from host-config automatically.
-bash scripts/build-images-deb.sh --arch arm64 --no-prompt
+# On the build host: rebuild the image bundle with new refs
+bash scripts/build-images-deb.sh \
+  --positronic-image foundationbot/phantom-cuda:<new-tag> \
+  --phantom-models-image localhost:5443/phantom-models:<new-tag> \
+  --arch amd64
 
 # Ship to the robot (matching version+arch on all three files)
 scp dist/phantomos-k0s-*-all.deb robot:~/
