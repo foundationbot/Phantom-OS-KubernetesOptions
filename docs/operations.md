@@ -1691,15 +1691,17 @@ python3 -c 'import depthai; print([d.getMxId() for d in depthai.Device.getAllAva
 # e.g. ['19443010819F4F2E00']
 ```
 
-Then write the file (minimal shape — add a `cameras:` entry per socket
-in use, with intrinsics; see another robot's file for the full schema):
+Then write the file (the head has three cameras — see the layout note
+below; add intrinsics per camera from calibration, omitted here for
+brevity):
 
 ```json
 {
   "boards": { "0": { "mxid": "19443010819F4F2E00" } },
   "cameras": {
-    "bottom": { "queue_id": 0, "board": 0, "socket": "B", "type": "color",
-                "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } }
+    "bottom": { "queue_id": 0, "board": 0, "socket": "B", "type": "color", "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } },
+    "left":   { "queue_id": 1, "board": 0, "socket": "C", "type": "mono",  "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } },
+    "right":  { "queue_id": 2, "board": 0, "socket": "A", "type": "mono",  "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } }
   }
 }
 ```
@@ -1708,6 +1710,25 @@ in use, with intrinsics; see another robot's file for the full schema):
 sudo install -D -m 0644 head_camera.json /etc/phantom/head_camera.json
 # the dma-video pods schedule on the next reconcile (or: kubectl -n dma-video rollout restart deploy)
 ```
+
+**Get these right when authoring/editing the file:**
+- **Camera module ID (MXID)** — `boards.<n>.mxid` must match the actual
+  OAK on this robot (from the DepthAI probe above). A wrong MXID means
+  the producer can't open the device.
+- **Each port's position and type** — the head has three cameras and
+  every entry must map to the correct physical position and sensor type:
+  **`bottom` (cam0) is COLOR; `left` and `right` are MONO**. Mixing up
+  positions or marking a mono camera as color (or vice-versa) yields
+  garbled/empty streams even though the pods come up.
+- **`socket`** — the `A`/`B`/`C` value is the OAK-D's physical port the
+  camera is plugged into; it must match your unit's wiring. The letters
+  in the example above are illustrative — verify against the actual board
+  (only `bottom: "B"` is confirmed from an in-fleet config).
+
+> **Use the OAK-D proprietary USB cable.** Third-party USB cables are
+> unreliable for the OAK-D's data rate — they cause intermittent
+> DepthAI disconnects / firmware-boot failures that look like camera
+> faults. Use the cable that ships with the OAK-D module.
 
 The OAK USB-power udev rule that keeps the device from dropping during
 DepthAI firmware boot is installed by bootstrap automatically
