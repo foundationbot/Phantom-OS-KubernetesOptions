@@ -142,7 +142,7 @@ accept any default. Things you'll be asked:
 | **targetRevision** | Skipped automatically when `gitSource: local` (bootstrap pins to the local commit SHA). Asked when `remote`; default is `main` |
 | **production mode** | `n` for dev/debug machines (no auto-revert of `kubectl edit`s); `y` for production |
 | **stack toggles** | Press Enter to accept defaults: `core` (always on), `operator` (on) |
-| **image overrides** | Press Enter to accept. The wizard's `--auto-images` mode reads the bundle manifest and fills positronic-control, phantom-models, operator-ui, and dma-ethercat with the right refs. You'll see a "Defaults from bundle:" preview before any prompts fire |
+| **image overrides** | Press Enter to accept. The wizard's `--auto-images` mode reads the bundle manifest and fills **every** deployed image with the right ref (positronic-control, phantom-models/policies, dma-bridge, cpp-robot-state-estimator, vr-web, yovariable-server, … — whatever the bundle's build host had in its host-config). You'll see a "Defaults from bundle:" preview before any prompts fire. (Older bundles built before full-coverage may only carry a few entries — those bundles ship a `release-host-config.yaml` you can seed with `configure-host.sh --from-template <path>`.) |
 | **CPU isolation** | `y` and pick the EtherCAT NIC for production robots. `n` on dev hosts without EtherCAT hardware — sets `cpuIsolation.enabled: false` and skips phases 7/8/9 cleanly |
 | **deployment mounts** (control runtime) | `production` preset (4 standard mounts) for normal robots |
 | **deployment mounts** (api server) | `n` unless you have on-host project trees to expose |
@@ -510,11 +510,10 @@ host-config ref), you also need to refresh the bundle itself:
 **`gitSource: local`** (default — atomic via `.deb`):
 
 ```bash
-# On the build host: rebuild the image bundle with new refs
-bash scripts/build-images-deb.sh \
-  --positronic-image foundationbot/phantom-cuda:<new-tag> \
-  --phantom-models-image localhost:5443/phantom-models:<new-tag> \
-  --arch amd64
+# On the build host (a configured robot): bump the tag(s) in its
+# /etc/phantomos/host-config.yaml images: block, then rebuild — the
+# bundle picks up the new refs from host-config automatically.
+bash scripts/build-images-deb.sh --arch arm64 --no-prompt
 
 # Ship to the robot (matching version+arch on all three files)
 scp dist/phantomos-k0s-*-all.deb robot:~/
