@@ -411,17 +411,38 @@ fi
 #
 # canonical_container_for_repo <repo>
 #   Print the canonical container name for the given repository (no
-#   tag, no digest) using the four-row lookup, or nothing if the repo
-#   doesn't satisfy a canonical container. Callers handle the
-#   --positronic-image / --phantom-models-image flag overrides
-#   separately, since those flags carry operator intent that the lookup
-#   cannot infer (e.g. a swap-repo like foundationbot/phantom-cuda).
+#   tag, no digest), or nothing if the repo doesn't map to a known
+#   container. The bundle manifest sidecar records one entry per match,
+#   which the wizard's auto-images mode reads to pre-fill image overrides
+#   without operator typing — so this lookup's coverage == how much of
+#   host-config's images: block auto-fills.
+#
+#   Keyed by the repo each container's image actually ships under (incl.
+#   the key/image indirections: phantom-locomotion -> phantom-dma-inference,
+#   vr-web -> argus.vr.web.react), mirroring host-config.py CONTAINER_TARGETS.
+#   Local saves carry their container via LOCAL_IMAGE_CONTAINERS, so the
+#   localhost:5443/* rows here only matter for the no-swap deploy case.
+#
+#   OMITTED (intentionally): foundationbot/phantom-cuda — it backs BOTH
+#   positronic-control and dma-bridge, so the repo alone can't identify
+#   the container. Those two are supplied via flag (--positronic-image)
+#   or the host-config release template, not auto-fill.
 canonical_container_for_repo() {
   case "$1" in
-    localhost:5443/positronic-control) printf 'positronic-control' ;;
-    localhost:5443/phantom-models)     printf 'phantom-models' ;;
-    foundationbot/argus.operator-ui)   printf 'operator-ui' ;;
-    foundationbot/dma-ethercat)        printf 'dma-ethercat' ;;
+    localhost:5443/positronic-control)    printf 'positronic-control' ;;
+    localhost:5443/phantom-models)        printf 'phantom-models' ;;
+    localhost:5443/phantom-policies)      printf 'phantom-policies' ;;
+    localhost:5443/psi0-policy)           printf 'psi0-policy' ;;
+    localhost:5443/psi0-sonic)            printf 'psi0-sonic' ;;
+    localhost:5443/phantom-loco)          printf 'phantom-loco' ;;
+    foundationbot/argus.operator-ui)      printf 'operator-ui' ;;
+    foundationbot/argus.vr.web.react)     printf 'vr-web' ;;
+    foundationbot/dma-ethercat)           printf 'dma-ethercat' ;;
+    foundationbot/dma-streams)            printf 'dma-streams' ;;
+    foundationbot/phantom-dma-inference)  printf 'phantom-locomotion' ;;
+    foundationbot/phantom-motion-replay)  printf 'phantom-motion-replay' ;;
+    foundationbot/cpp-robot-state-estimator) printf 'cpp-robot-state-estimator' ;;
+    foundationbot/yovariable-server)      printf 'yovariable-server' ;;
     *) : ;;
   esac
 }
