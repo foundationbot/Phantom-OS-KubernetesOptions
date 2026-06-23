@@ -12,6 +12,16 @@
 # can't be pulled from upstream (localhost:5443/* and *:PLACEHOLDER).
 # Override with --from-file <path> (one image per line, # comments OK).
 #
+# Host-config (default on a robot): the system host-config at
+# /etc/phantomos/host-config.yaml is read by default and merged OVER the
+# manifest scan — its images: block carries the EXACT per-host deployed
+# tags plus every localhost:5443/* local image (psi0-*, phantom-loco,
+# phantom-models, phantom-policies, …), so you don't need the per-image
+# flags below. Point at a different file with --host-config <path>, or
+# disable with --no-host-config (off-robot/CI builds where no host file
+# exists). --exclude <glob> drops refs (e.g. --exclude 'localhost:5443/psi0-*').
+# --list prints the resolved image set and exits without building.
+#
 # Extra images: refs whose tag isn't in manifests/ (e.g. dma-ethercat,
 # whose installer manifest carries :PLACEHOLDER and whose real tag is
 # operator-supplied via host-config.yaml) can be added via
@@ -111,6 +121,21 @@ NO_PROMPT="${NO_PROMPT:-0}"
 # debugging or when the tarballs are shipped via a separate channel
 # (S3/rsync) and the operator only wants the manifest-bearing .deb.
 NO_DATA_BUNDLE="${NO_DATA_BUNDLE:-0}"
+# Host-config-driven discovery. By DEFAULT, if the system host-config
+# exists we read its images: block (via host-config.py get-images-json)
+# and merge it OVER the manifest scan: exact per-host deployed tags +
+# every localhost:5443/* local image, with no per-image flags. This is
+# the right source on a robot — the manifest scan only knows the
+# in-repo default tags, and skips localhost:5443/* entirely.
+#   --host-config <path>  read a DIFFERENT host-config (implies on).
+#   --no-host-config      disable it (off-robot/CI builds with no host file).
+HOST_CONFIG_FILE="${HOST_CONFIG_FILE:-/etc/phantomos/host-config.yaml}"
+USE_HOST_CONFIG="${USE_HOST_CONFIG:-1}"
+HOST_CONFIG_HELPER="$REPO_ROOT/scripts/lib/host-config.py"
+# Exclude globs (repeatable --exclude); matched against the full ref.
+EXCLUDES=()
+# --list: print the resolved image set and exit without building.
+LIST_ONLY=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --from-file)
@@ -128,6 +153,16 @@ while [ "$#" -gt 0 ]; do
     --phantom-models-image)
       [ -n "${2:-}" ] || { echo "error: --phantom-models-image needs a value" >&2; exit 2; }
       PHANTOM_MODELS_IMAGE="$2"; shift 2 ;;
+    --host-config)
+      [ -n "${2:-}" ] || { echo "error: --host-config needs a value" >&2; exit 2; }
+      HOST_CONFIG_FILE="$2"; USE_HOST_CONFIG=1; shift 2 ;;
+    --no-host-config)
+      USE_HOST_CONFIG=0; shift ;;
+    --exclude)
+      [ -n "${2:-}" ] || { echo "error: --exclude needs a glob" >&2; exit 2; }
+      EXCLUDES+=("$2"); shift 2 ;;
+    --list)
+      LIST_ONLY=1; shift ;;
     --no-prompt)
       NO_PROMPT=1; shift ;;
     --no-data-bundle)
@@ -274,7 +309,89 @@ else
   done < <(discover_from_manifests)
 fi
 
-if [ "${#IMAGES[@]}" -eq 0 ]; then
+# ---- merge per-host deployed tags from host-config (default on a robot) --
+#
+# host-config.py get-images-json emits each declared/overridden image at
+# its real ref — plain `repo:tag`, or kustomize swap form `find=repo:tag`
+# (we keep the right-hand side). localhost:5443/* refs become local saves;
+# the rest are pullable and OVERRIDE any manifest-scan entry for the same
+# repo (the host-config tag is what's actually deployed). Skipped when
+# --from-file pins an explicit list, when --no-host-config is set, or when
+# the host-config file is absent (off-robot build → manifest scan only).
+HC_LOCAL=()              # localhost:5443/* refs to docker-save
+HC_LOCAL_CONTAINERS=()   # parallel container labels for the bundle manifest
+if [ "$USE_HOST_CONFIG" = 1 ] && [ -z "$FROM_FILE" ] && [ -r "$HOST_CONFIG_FILE" ]; then
+  if [ ! -r "$HOST_CONFIG_HELPER" ]; then
+    echo "warning: $HOST_CONFIG_HELPER not found — skipping host-config merge" >&2
+  else
+    _hc_lines="$(python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" get-images-json 2>/dev/null \
+      | python3 -c '
+import json, sys
+try:
+    entries = json.load(sys.stdin)
+except Exception:
+    entries = []
+for e in entries:
+    ref = e.split("=", 1)[1] if "=" in e else e
+    key = e.split("=", 1)[0] if "=" in e else ""
+    if ref.startswith("localhost:5443/"):
+        container = key or ref.rsplit("/", 1)[-1].rsplit(":", 1)[0]
+        print("LOCAL\t%s\t%s" % (container, ref))
+    else:
+        print("PULL\t%s" % ref)
+' 2>/dev/null || true)"
+    if [ -n "$_hc_lines" ]; then
+      # Repos host-config speaks to (pullable) — drop their manifest-scan
+      # default-tag entries so the host-config tag wins.
+      declare -A _hc_pull_repos=()
+      _hc_pull=()
+      while IFS=$'\t' read -r kind a b; do
+        case "$kind" in
+          PULL)  _hc_pull+=("$a"); _hc_pull_repos["${a%:*}"]=1 ;;
+          LOCAL) HC_LOCAL+=("$b"); HC_LOCAL_CONTAINERS+=("$a") ;;
+        esac
+      done <<< "$_hc_lines"
+      _kept=()
+      for img in "${IMAGES[@]}"; do
+        [ -n "${_hc_pull_repos[${img%:*}]:-}" ] || _kept+=("$img")
+      done
+      IMAGES=("${_kept[@]}" "${_hc_pull[@]}")
+      # host-config already supplies the local images — don't also prompt.
+      NO_PROMPT=1
+      echo "host-config merge: ${HOST_CONFIG_FILE} -> ${#_hc_pull[@]} pullable + ${#HC_LOCAL[@]} local image(s)"
+    fi
+  fi
+fi
+
+# ---- apply --exclude globs ----------------------------------------------
+if [ "${#EXCLUDES[@]}" -gt 0 ]; then
+  _filter_excluded() {  # reads refs on stdin, drops any matching a glob
+    local ref glob keep
+    while IFS= read -r ref; do
+      keep=1
+      for glob in "${EXCLUDES[@]}"; do
+        # shellcheck disable=SC2254  # $glob is intentionally a glob pattern
+        case "$ref" in $glob) keep=0; break ;; esac
+      done
+      [ "$keep" = 1 ] && printf '%s\n' "$ref"
+    done
+  }
+  _tmp=(); while IFS= read -r r; do [ -n "$r" ] && _tmp+=("$r"); done \
+    < <(printf '%s\n' "${IMAGES[@]}" | _filter_excluded); IMAGES=("${_tmp[@]}")
+  # Filter HC_LOCAL + its parallel container array together.
+  _tl=(); _tlc=()
+  for i in "${!HC_LOCAL[@]}"; do
+    keep=1
+    for glob in "${EXCLUDES[@]}"; do
+      # shellcheck disable=SC2254  # $glob is intentionally a glob pattern
+      case "${HC_LOCAL[$i]}" in $glob) keep=0; break ;; esac
+    done
+    [ "$keep" = 1 ] && { _tl+=("${HC_LOCAL[$i]}"); _tlc+=("${HC_LOCAL_CONTAINERS[$i]}"); }
+  done
+  HC_LOCAL=("${_tl[@]}"); HC_LOCAL_CONTAINERS=("${_tlc[@]}")
+fi
+
+if [ "${#IMAGES[@]}" -eq 0 ] && [ "${#HC_LOCAL[@]}" -eq 0 ]; then
   echo "error: no images to bundle (manifests/ scan empty and no --from-file)" >&2
   exit 1
 fi
@@ -385,6 +502,24 @@ fi
 if [ -n "$PHANTOM_MODELS_IMAGE" ]; then
   LOCAL_IMAGES+=("$PHANTOM_MODELS_IMAGE")
   LOCAL_IMAGE_CONTAINERS+=("phantom-models")
+fi
+# Fold in the localhost:5443/* images discovered from host-config, skipping
+# any a flag already added (flag wins, keeps its canonical-container label).
+for i in "${!HC_LOCAL[@]}"; do
+  _dup=0
+  for existing in "${LOCAL_IMAGES[@]:-}"; do
+    [ "$existing" = "${HC_LOCAL[$i]}" ] && { _dup=1; break; }
+  done
+  [ "$_dup" = 0 ] && { LOCAL_IMAGES+=("${HC_LOCAL[$i]}"); LOCAL_IMAGE_CONTAINERS+=("${HC_LOCAL_CONTAINERS[$i]}"); }
+done
+
+if [ "$LIST_ONLY" = 1 ]; then
+  echo "Resolved image set (arches: ${ARCHES_LIST[*]}) — no build (--list):"
+  echo "  pullable (${#IMAGES[@]}):"
+  for i in "${IMAGES[@]:-}"; do [ -n "$i" ] && echo "    - $i"; done
+  echo "  local-save (${#LOCAL_IMAGES[@]}):"
+  for i in "${LOCAL_IMAGES[@]:-}"; do [ -n "$i" ] && echo "    - $i"; done
+  exit 0
 fi
 
 echo "Bundling ${#IMAGES[@]} pullable image(s) for arches: ${ARCHES_LIST[*]}"
