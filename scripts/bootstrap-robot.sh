@@ -3596,8 +3596,9 @@ install_dma_ethercat() {
     info "DRY-RUN  render $DMA_ETHERCAT_TEMPLATE -> $DMA_ETHERCAT_RENDERED  (image=$image_ref)"
     info "DRY-RUN  kubectl create ns phantom (if missing)"
     info "DRY-RUN  kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
+    info "DRY-RUN  wait node Ready + coredns rollout (CNI gate before applying the Job)"
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
-    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
+    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer (10min budget, transient-tolerant)"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb  (if baked in; non-fatal)"
     info "DRY-RUN  resolve+write DMA_CONFIG, INTERFACE, DMA_CPU_AFFINITY, DMA_RT_CPU into $DMA_ETHERCAT_ENV_FILE"
@@ -3640,6 +3641,23 @@ install_dma_ethercat() {
     skip "no prior installer Job to remove"
   fi
 
+  # Gate on cluster networking before applying the Job. On a fresh bootstrap
+  # the node/CNI IPAM can briefly lag; the installer pod's first sandbox then
+  # fails with "no IP ranges specified" and the Job is delayed past the wait
+  # below. Waiting for the node Ready + coredns rollout (which proves pods can
+  # get IPs) lets the pod schedule cleanly on its first try.
+  note "waiting for node + CNI networking to be Ready..."
+  if "${KUBECTL[@]}" wait --for=condition=Ready node --all --timeout=180s >/dev/null 2>&1; then
+    pass "node Ready"
+  else
+    info "node not Ready within 180s — proceeding; the Job wait below tolerates transient CNI"
+  fi
+  if "${KUBECTL[@]}" -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null 2>&1; then
+    pass "CNI networking Ready (coredns rolled out)"
+  else
+    info "coredns not Available within 120s — proceeding; transient CNI is tolerated below"
+  fi
+
   note "applying installer manifest..."
   if "${KUBECTL[@]}" apply -f "$DMA_ETHERCAT_RENDERED" >/dev/null; then
     pass "installer Job applied"
@@ -3648,16 +3666,42 @@ install_dma_ethercat() {
     ethercat_die "could not apply installer Job — check rendered manifest at $DMA_ETHERCAT_RENDERED"
   fi
 
-  note "waiting up to 5min for installer Job to reach Complete..."
-  if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=300s job/dma-ethercat-installer >/dev/null 2>&1; then
+  # Wait for the installer Job to complete. A `kubectl wait` timeout is NOT a
+  # failure — the Job may still be retrying a transient (e.g. an early CNI
+  # "no IP ranges" sandbox error that clears on the pod's next attempt). So
+  # poll in 60s slices up to a 10min budget: succeed on the `complete`
+  # condition, bail early ONLY on a real `failed` condition (backoffLimit
+  # exhausted), otherwise keep waiting.
+  note "waiting up to 10min for installer Job to reach Complete..."
+  local _job_done=0 _job_failed=0 _waited=0
+  while [ "$_waited" -lt 600 ]; do
+    if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=60s \
+         job/dma-ethercat-installer >/dev/null 2>&1; then
+      _job_done=1; break
+    fi
+    if "${KUBECTL[@]}" -n phantom wait --for=condition=failed --timeout=1s \
+         job/dma-ethercat-installer >/dev/null 2>&1; then
+      _job_failed=1; break
+    fi
+    _waited=$((_waited + 60))
+    info "installer Job still running (${_waited}s elapsed of 600s budget)..."
+  done
+  if [ "$_job_done" = 1 ]; then
     pass "installer Job Complete"
   else
     local jstat
     jstat=$("${KUBECTL[@]}" -n phantom get job dma-ethercat-installer -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}' 2>/dev/null || true)
-    fail "installer Job did not Complete in 5min (status: ${jstat:-unknown})"
+    if [ "$_job_failed" = 1 ]; then
+      fail "installer Job FAILED (status: ${jstat:-unknown})"
+    else
+      fail "installer Job did not Complete within 10min (status: ${jstat:-unknown})"
+    fi
+    info "Job events:"
+    "${KUBECTL[@]}" -n phantom describe job dma-ethercat-installer 2>&1 \
+      | sed -n '/Events:/,$p' | sed 's/^/      /' || true
     info "pod logs:"
     "${KUBECTL[@]}" -n phantom logs -l app=dma-ethercat-installer --tail=50 2>&1 | sed 's/^/      /' || true
-    ethercat_die "installer Job never reached Complete — likely image pull (check dockerhub-creds in phantom ns) or wrong arch tag in host-config images"
+    ethercat_die "installer Job did not complete — check the events/logs above (CNI sandbox, image pull, or the Job's cp step)"
   fi
 
   # dpkg -i. Glob match: image bakes one .deb per arch — exactly one
