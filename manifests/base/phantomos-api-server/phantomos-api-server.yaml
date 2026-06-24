@@ -83,12 +83,12 @@ spec:
       # Models are loaded straight off the host at /root/models — the
       # production-canonical path on every robot. /policy/list does an
       # os.ReadDir on PHANTOM_MODELS, so the api container only needs
-      # the directory bind-mounted in. No init container, no images
-      # registry round-trip, no emptyDir gymnastics.
+      # the directory bind-mounted in. No init container, no image
+      # pull, no emptyDir gymnastics.
       #
       # ALTERNATIVE: load models from a baked image. Uncomment the
       # initContainers block and the matching emptyDir variant under
-      # `volumes:` below, then build/push localhost:5443/phantom-models
+      # `volumes:` below, then build/push foundationbot/phantom-models
       # with `scripts/phantom-models/build.py` and pin the tag through
       # `images.phantom-models.image` in host-config.yaml. This is the
       # path positronic-control uses; choose it if you need /root/models
@@ -97,7 +97,7 @@ spec:
       #
       # initContainers:
       #   - name: load-models
-      #     image: localhost:5443/phantom-models:PLACEHOLDER
+      #     image: foundationbot/phantom-models:PLACEHOLDER
       #     imagePullPolicy: IfNotPresent
       #     command:
       #       - sh

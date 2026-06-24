@@ -25,8 +25,8 @@ troubleshooting. For architecture and the *why*, see
   (replaces the legacy `devMode:` block).
 
 Flag style: `--<phase>` selects a single phase (selected-phases-only
-mode). `--skip-nvidia`, `--skip-validate` are targeted overrides that
-compose with both selected-phases and full-bootstrap modes.
+mode). `--skip-nvidia` is a targeted override that composes with both
+selected-phases and full-bootstrap modes.
 
 ## Table of contents
 
@@ -100,40 +100,6 @@ The wizard reads any existing `/etc/phantomos/host-config.yaml` as the
 seed and prompts for each field. Press enter to keep a default, or
 type a new value.
 
-#### Seeding from a template (`--from-template`)
-
-A fresh robot has no `/etc/phantomos/host-config.yaml`, so the wizard
-falls back to the generic `host-config-templates/_template/` defaults —
-every field starts blank. To pre-fill the prompts from a known-good
-config (another robot's values, or a team-canonical template), pass
-`--from-template`:
-
-```bash
-# by name -> host-config-templates/<name>/host-config.yaml in this repo
-sudo bash scripts/configure-host.sh --from-template mk09
-
-# by directory -> <dir>/host-config.yaml
-sudo bash scripts/configure-host.sh --from-template ~/phantom-fleet-config/mk11000019
-
-# by file -> use that YAML directly
-sudo bash scripts/configure-host.sh --from-template ~/configs/base.yaml
-```
-
-The chosen template only **seeds** the prompts — the wizard still walks
-every field so you can adjust the robot-specific ones (id, AI PC URL,
-core pinning). The seed precedence is:
-
-1. `--from-template <name|dir|file>` (when given)
-2. existing `/etc/phantomos/host-config.yaml`
-3. `host-config-templates/<hostname>/host-config.yaml`
-4. `host-config-templates/_template/host-config.yaml`
-
-This is the fast path for bringing up a robot identical to an existing
-one: point `--from-template` at the sibling's config tree, then change
-only the identity and pinning fields. (The repo ships only
-`_template/`; per-robot template trees are operator-supplied, e.g. a
-`phantom-fleet-config/` checkout.)
-
 #### Wizard prompts
 
 **Robot identity** — DNS-1123 name. Used in Application names
@@ -189,8 +155,8 @@ Bootstrap injects these into the live Application at phase
 
 ```
 == image tag overrides ==
-  localhost:5443/positronic-control tag [0.2.44-production-cu130]:
-  localhost:5443/phantom-models tag [2026-04-30]:
+  foundationbot/positronic-control tag [0.2.44-production-cu130]:
+  foundationbot/phantom-models tag [2026-04-30]:
   foundationbot/argus.operator-ui tag [<sha>]:
 ```
 
@@ -234,7 +200,8 @@ After bootstrap returns, confirm the cluster is healthy.
 
 ```bash
 # Every pod should eventually be Running. Init:ImagePullBackOff means
-# the image override didn't apply or the registry doesn't have the tag.
+# the image override didn't apply or the dockerhub-creds pull secret is
+# missing in the namespace.
 sudo k0s kubectl get pods -A
 
 # Both Applications should be Synced + Healthy.
@@ -476,6 +443,28 @@ particular, setting only `has-locomotion: "true"` or `has-sonic: "true"`
 is rejected because positronic is still on by default; you must also set
 `has-positronic: "false"` in the same edit.
 
+### Recorders (dma-streams) — arming behavior
+
+`dma-streams` ships three distinct workloads with **different** record
+triggers — there is no single "dma.streams recording" switch:
+
+| Workload | Records | Arming |
+|---|---|---|
+| `dma-recorder` (`has-recorder`) | EtherCAT IPC queues (`/actuals`, `/desired`, …) → `.rrd` | gates on the bus being **OPERATIONAL**; `--manual-arm` (in args) additionally requires an explicit `RECORDING_START` opcode on `/commands`. **Remove `--manual-arm` → always-armed**: auto-records as soon as the bus is operational, no operator trigger. |
+| `dma-video-recorder` (`has-video-recorder`) | camera streams → `.rrd` | **Automatic, no arm flag** — reads `/motor_diagnostics` and records while ≥1 EtherCAT slave is operational; it follows the bus (no `RECORDING_START`/`STOP`). |
+| `rerun-streamer` (`has-streamer`) | live Rerun stream (not a recorder) | n/a |
+
+So "auto-record" only ever concerned **`dma-recorder`** — `dma-video-recorder`
+was already automatic. Both write to `/root/recordings`; each has a `janitor`
+sidecar that bounds disk (retention days + folder-size cap), so always-armed
+recording is disk-safe. Trigger/stop a `--manual-arm` `dma-recorder` from any
+host with kubectl:
+
+```
+POD=$(kubectl -n phantom get pod -l app.kubernetes.io/name=dma-recorder -o name | head -1)
+kubectl -n phantom exec -c recorder $POD -- dma-cmd record start   # ... stop
+```
+
 Enable a default-off workload on `<robot>`:
 
 1. Edit `/etc/phantomos/host-config.yaml`, add to `nodeLabels:`:
@@ -560,7 +549,7 @@ robot until you press X).
 queues (`/actuals`, `/desired`, …). DMA.ethercat (the bare-metal
 `dma-ethercat.service`) must be running first, or `walking`/`sonic` will
 CrashLoop on `shm_open failed` — see
-[§7.19](#719-phantom-sonic-walkingsonic-crashloop-on-shm_open).
+[§7.18](#718-phantom-sonic-walkingsonic-crashloop-on-shm_open).
 
 **Per-host options** (`phantomSonic:` block → `phantom-sonic-config`
 ConfigMap, applied by `--sonic-config`):
@@ -591,390 +580,6 @@ bash scripts/positronic.sh sonic restart             # roll the DaemonSet
 bash scripts/positronic.sh sonic web                 # print the UI URL
 ```
 
-### 3.12 rerun-streamer (live web visualisation)
-
-The `rerun-streamer` DaemonSet hosts the live web view at
-`http://<robot>:9788` and the gRPC ingest at `:9877`. Off by default —
-enable per host by setting `foundation.bot/has-streamer: "true"` under
-`nodeLabels:` in `/etc/phantomos/host-config.yaml`, then rerun
-bootstrap (see [§3.10](#310-toggle-an-optional-workload-on-a-robot)).
-Manifest:
-[`manifests/base/dma-streams/rerun-streamer.yaml`](../manifests/base/dma-streams/rerun-streamer.yaml).
-
-**Operator URL.** Browsers landing on `http://<robot>:9788` without a
-query string hit the rerun Welcome page (the WASM viewer doesn't know
-which gRPC source to dial — the default points at `localhost:9877`,
-which from a remote browser is the operator's laptop, not the robot).
-Always use:
-
-```
-http://<robot>:9788/?url=rerun+http://<robot>:9877/proxy
-```
-
-The streamer's image whitelists the matching origin via
-`--cors-allow-origin 'http://*:9788'`.
-
-#### Tuning the live-view publish rate
-
-The shm producer (`dma_main`) writes every queue at the EtherCAT cycle
-rate (~482 Hz). The streamer publishes **1 out of every N samples** to
-the viewer; the per-host knobs are in the
-`deployments.rerun-streamer` block of `host-config.yaml`:
-
-```yaml
-deployments:
-  rerun-streamer:
-    variant: mk2
-    queueMemoryLimitMb: 4                # AsyncLogQueue cap (MB)
-    motorDiagnosticsDownsample: 125      # /motor_diagnostics-only override
-```
-
-The base manifest sets the GLOBAL `--downsample 25`, so:
-
-```
-viewer rate = 482 / 25  ≈ 20 Hz   (joints, desireds, controller, …)
-```
-
-`motorDiagnosticsDownsample` overrides `--downsample` for the
-`/motor_diagnostics` queue ONLY:
-
-| Value | Math | Diagnostics rate |
-|---|---|---|
-| `0` (or omitted) | inherits `--downsample` (25) | ≈ 20 Hz |
-| `25` | 482 / 25 | ≈ 20 Hz (same as inherit; explicit) |
-| `125` (recommended) | 482 / 125 | ≈ 4 Hz |
-| `500` | 482 / 500 | ≈ 1 Hz |
-
-**Why per-queue knobs exist.** Each `/motor_diagnostics` snapshot
-explodes into ~300 Rerun entities (per-motor temperature / fault /
-status × ~30 joints + bus counters + per-slave EtherCAT state).
-`/state_estimator` adds another ~120 (pelvis 6-DoF + 30 joints + IMU +
-F/T + contact). At the joint rate those alone are >9000
-series-updates/s — typically larger than the entire joint stream and
-enough to saturate the streamer→server gRPC sender. Symptom: high
-`gRPC queue dropped:` counter in the streamer's stats lines and holes /
-freezes in the live view. Setting `motorDiagnosticsDownsample: 125`
-drops that to ~1200 series-updates/s without touching joint
-visibility.
-
-**Every high-rate queue has its own knob.** All default to 0 = inherit
-`--downsample`; set positive to override:
-
-| Field | Streamer flag | Queue |
-|---|---|---|
-| `actualsDownsample` | `--actuals-downsample` | `/actuals` |
-| `actualsTransformsDownsample` | `--actuals-transforms-downsample` | `/actuals_transforms` |
-| `desiredDownsample` | `--desired-downsample` | `/desired` |
-| `desiredsControllerDownsample` | `--desireds-controller-downsample` | `/desireds_controller` |
-| `desiredsTransformsDownsample` | `--desireds-transforms-downsample` | `/desireds_transforms` |
-| `rawImuDownsample` | `--raw-imu-downsample` | `/raw_imu_actuals` |
-| `motorDiagnosticsDownsample` | `--motor-diagnostics-downsample` | `/motor_diagnostics` |
-| `stateEstimatorDownsample` | `--state-estimator-downsample` | `/state_estimator` |
-| `gripperDownsample` | `--gripper-downsample` | `/desired_{left,right}_gripper` |
-
-Event-driven queues (`/errors`, `/commands`, `/command_responses`,
-`/motor_params_applied`) are intentionally NOT downsampled — they fire
-rarely enough that downsampling them would hide real activity.
-
-**The recorder is unaffected.** It captures every shm sample to `.rrd`
-regardless of any of these knobs — downsampling only changes what
-reaches the live viewer.
-
----
-
-### 3.13 Copy a locally-built image to other robots (offline tar transfer)
-
-`phantom-models` and `phantom-policies` are locally-built busybox carrier
-images pinned to `localhost:5443/*` — they have no DockerHub upstream and
-no containerd mirror fallthrough. Once you have built them on one robot
-(see [`scripts/build-images-deb.sh`](../scripts/build-images-deb.sh) and
-[`docs/internal/image-flow-and-registry-bootstrap.md`](internal/image-flow-and-registry-bootstrap.md)),
-you can move them to other robots as plain tarballs instead of rebuilding
-in place. The worked example below uses `phantom-models:2026-06-08` and
-`phantom-policies:2026-06-09-sonic-onnx`.
-
-**1. On the source robot — save the images to tarballs.**
-
-```bash
-# pull into the local docker daemon first if they aren't already there
-docker pull localhost:5443/phantom-models:2026-06-08
-docker pull localhost:5443/phantom-policies:2026-06-09-sonic-onnx
-
-docker save localhost:5443/phantom-models:2026-06-08 \
-  -o /root/phantom-models-2026-06-08.tar
-docker save localhost:5443/phantom-policies:2026-06-09-sonic-onnx \
-  -o /root/phantom-policies-2026-06-09-sonic-onnx.tar
-
-# optional: zstd compression (much smaller; load with `zstd -dc | docker load`)
-zstd -19 /root/phantom-models-2026-06-08.tar      # -> *.tar.zst
-zstd -19 /root/phantom-policies-2026-06-09-sonic-onnx.tar
-```
-
-No-docker fallback (skopeo, copies straight from the in-cluster registry
-to an OCI archive):
-
-```bash
-skopeo copy --src-tls-verify=false \
-  docker://localhost:5443/phantom-models:2026-06-08 \
-  oci-archive:/root/phantom-models-2026-06-08.tar:phantom-models:2026-06-08
-```
-
-**2. Relay to each target robot.** Pull the tarballs to a workstation,
-then push them out:
-
-```bash
-# on your workstation
-scp source-robot:/root/phantom-*.tar .
-scp phantom-*.tar target-robot:/root/
-```
-
-> **Arch matters.** A `docker save` tarball carries the architecture of
-> the robot it was built on — an `arm64` tar only loads on an `arm64`
-> target. The workstation is just a relay; it never loads the image, so
-> its own arch is irrelevant. Build (or save) on a host whose arch
-> matches the target fleet.
-
-**3. On each target robot — load and push into the local registry.**
-
-```bash
-docker load -i /root/phantom-models-2026-06-08.tar
-docker load -i /root/phantom-policies-2026-06-09-sonic-onnx.tar
-# (for *.tar.zst:  zstd -dc /root/phantom-models-2026-06-08.tar.zst | docker load)
-
-docker push localhost:5443/phantom-models:2026-06-08
-docker push localhost:5443/phantom-policies:2026-06-09-sonic-onnx
-```
-
-Verify the tags landed in the in-cluster registry:
-
-```bash
-curl -s http://localhost:5443/v2/phantom-models/tags/list
-curl -s http://localhost:5443/v2/phantom-policies/tags/list
-```
-
-This load+push step is automated by
-[`scripts/load-image-tars.sh`](../scripts/load-image-tars.sh)
-(`bash scripts/load-image-tars.sh <tarball> ...` — a pure registry op,
-usable off-robot, no `host-config.yaml` knowledge). A full bootstrap can
-do the whole thing end-to-end — load+push **and** wire the loaded tag
-into `host-config.yaml` — via the `--load-image-tars` phase, which both
-loads/pushes the tarballs and updates the `images:` block (so you can
-skip step 4 below). Two ways to drive it:
-
-```bash
-# Explicit (non-interactive) — give the on-robot tarball paths as flags:
-sudo bash scripts/bootstrap-robot.sh --load-image-tars \
-  --phantom-models-tar   /root/phantom-models-2026-06-08.tar \
-  --phantom-policies-tar /root/phantom-policies-2026-06-09-sonic-onnx.tar
-
-# Interactive — a full bootstrap on a TTY prompts for each path:
-#   phantom-models tarball path?   [Enter to skip]
-#   phantom-policies tarball path? [Enter to skip]
-sudo bash scripts/bootstrap-robot.sh
-```
-
-The interactive prompt only fires on a TTY and when the flag wasn't
-given; under `-y`, in selected-phase mode, or with no TTY the phase acts
-only on the flags (and is a no-op if neither is set). The phase waits for
-the in-cluster registry to be Available first, so the tarballs must
-already be on the robot's filesystem (the registry push runs on the robot
-— it can't read a file on your workstation). See
-[§4](#4-bootstrap-phases-reference) and
-[§5](#5-per-phase-invocations-cheat-sheet).
-
-**4. Point the manifests at the loaded tag.** Set the tag in the
-`images:` block of `/etc/phantomos/host-config.yaml` and apply it
-([§3.2](#32-bump-image-tags)):
-
-```bash
-sudo $EDITOR /etc/phantomos/host-config.yaml
-# images:
-#   - phantom-models:2026-06-08
-#   - phantom-policies:2026-06-09-sonic-onnx
-
-sudo bash scripts/bootstrap-robot.sh --gitops
-```
-
-> **Offline alternative.** With no in-cluster registry reachable you can
-> drop the tarballs into `/var/lib/k0s/images/` and run
-> `k0s ctr -n k8s.io images import /var/lib/k0s/images/<tar>` so
-> containerd has them locally. Caveat: for `localhost:5443/*` refs the
-> registry push (step 3) is the durable path — the manifests pull by that
-> ref, and a containerd-local import is lost on a `k0s reset` or a node
-> that didn't get the import. Use the import only as a stopgap when the
-> registry pod is down.
-
----
-
-### 3.14 CPU isolation and core pinning (EtherCAT RT)
-
-The EtherCAT master runs a hard-real-time cyclic loop. To keep it
-jitter-free, bootstrap carves a set of CPU cores out of the kernel's
-general scheduling and dedicates them to the RT loop and its NIC. This is
-declared in the `cpuIsolation` block of `/etc/phantomos/host-config.yaml`
-and applied by phases [9 (ecat-interface)](#4-bootstrap-phases-reference),
-[10 (cpu-isolation)](#4-bootstrap-phases-reference), and
-[12 (install-dma-ethercat)](#4-bootstrap-phases-reference).
-
-```yaml
-cpuIsolation:
-  enabled: true
-  partitions:
-    - name: ecat
-      cpus: "11-13"            # the cpuset carved out for EtherCAT
-  nic:
-    iface: ecat1
-    irqCore: 13               # NIC IRQs -> LAST core of the partition
-    selector:
-      mac: 4c:bb:47:14:14:fc  # OR pci: "0000:01:00.0" OR {driver: igc, index: 0}
-  dmaRtCpu: 11                # SOEM cyclic RT loop -> FIRST core of the partition
-  installAffinityDefaults: true
-```
-
-**Pinning convention.** Within the partition's cpuset, split the RT loop
-and IRQ servicing onto opposite ends so they never contend for the same
-core:
-
-- **`dmaRtCpu` → the FIRST core of the partition** (`11` for `11-13`).
-  This is the SOEM cyclic loop core — the `nohz_full` target, governor
-  locked, kthreads/timers steered away. The DMA service runs here
-  (`DMA_RT_CPU` in `/etc/dma/dma-ethercat.env`, plus the partition slice
-  + `CPUAffinity`).
-- **`nic.irqCore` → the LAST core of the partition** (`13` for `11-13`).
-  The EtherCAT NIC's hardware IRQs are pinned here via
-  `/proc/irq/<n>/smp_affinity`, isolated from the RT loop so interrupt
-  handling never steals cycles from the cyclic deadline.
-- Cores in between (`12`) are headroom in the isolated partition — free
-  for additional RT-adjacent work that should stay off the housekeeping
-  CPUs.
-
-So for the default `11-13` partition: **RT loop on 11, IRQs on 13.** Keep
-`dmaRtCpu` and `nic.irqCore` inside `partitions[].cpus`, and keep them
-distinct (first vs last) — co-locating them reintroduces the IRQ-vs-loop
-contention isolation is meant to remove.
-
-**Worked example (mk11000019):** partition `ecat` = `11-13`,
-`dmaRtCpu: 11`, `nic.irqCore: 13` — RT loop on the first core, NIC IRQs
-on the last.
-
-**Applying changes.** Edit the block, then re-run the isolation phase:
-
-```bash
-sudo $EDITOR /etc/phantomos/host-config.yaml
-sudo bash scripts/bootstrap-robot.sh --cpu-isolation --yes
-```
-
-If the kernel cmdline changed (isolcpus / irqaffinity), the phase writes
-`/etc/phantomos/cpu-isolation.reboot-pending` — **reboot** to activate.
-Verify after reboot:
-
-```bash
-cat /sys/devices/system/cpu/isolated          # should list the partition cores
-cat /proc/irq/<nic-irq>/smp_affinity_list      # should be nic.irqCore
-grep DMA_RT_CPU /etc/dma/dma-ethercat.env      # should be dmaRtCpu
-```
-
----
-
-### 3.15 Manage the dma-ethercat service
-
-The EtherCAT master (`dma_main`) runs as a host systemd service installed
-from the `dma-ethercat` `.deb` by [phase 12](#4-bootstrap-phases-reference)
-— **not** as a Kubernetes pod. It owns the EtherCAT bus and the
-`/dev/shm` DMA variable map that the in-cluster workloads read, so it runs
-on the host directly with RT scheduling.
-
-#### Where things live
-
-| What | Path |
-|------|------|
-| Master binary (the service) | `/usr/bin/dma_main` |
-| CLI tools | `/usr/bin/dma_cmd_client`, `dma_motor_motion`, `elmo_query`, `ethercat_error_viewer`, `ethercat_sine_test`, `health_monitor`, `tactile_verify`, … |
-| Uninstaller | `/usr/sbin/dma-ethercat-uninstall` |
-| systemd unit | `/lib/systemd/system/dma-ethercat.service` |
-| Drop-ins (slice, debug, overrides) | `/etc/systemd/system/dma-ethercat.service.d/*.conf` |
-| **Runtime config (env)** | `/etc/dma/dma-ethercat.env` (dpkg *conffile* — survives `.deb` upgrades) |
-| Shipped hardware configs | `/usr/share/dma-ethercat/config/*.json` (per-robot + variant subdirs) |
-| MuJoCo models | `/usr/share/dma-ethercat/config/mujoco/*.xml` |
-| cpuset helper scripts | `/usr/lib/dma-ethercat/cpusets/` |
-
-Everything under `/usr/bin`, `/usr/share/dma-ethercat`, and the unit file
-is **dpkg-managed** — a `.deb` upgrade overwrites it. Only
-`/etc/dma/dma-ethercat.env` and your own drop-ins persist across upgrades.
-
-#### Modifying runtime arguments
-
-The unit's `ExecStart` is:
-
-```
-ExecStart=/usr/bin/taskset -c ${DMA_CPU_AFFINITY} /usr/bin/dma_main \
-    --config ${DMA_CONFIG} --cpu ${DMA_RT_CPU} --interface ${INTERFACE} \
-    --mujoco-model ${DMA_MUJOCO_MODEL} --enable-emcy-monitor --enable-pdo-diagnostics
-```
-
-The `${...}` values come from `/etc/dma/dma-ethercat.env`, so most runtime
-tuning is just **editing that file and restarting** — no unit edits:
-
-| Argument | env var in `/etc/dma/dma-ethercat.env` |
-|----------|----------------------------------------|
-| `--config` (hardware JSON) | `DMA_CONFIG` |
-| `--interface` (EtherCAT NIC) | `INTERFACE` |
-| `--cpu` (RT loop core) | `DMA_RT_CPU` |
-| `taskset -c` (CPU affinity) | `DMA_CPU_AFFINITY` |
-| `--mujoco-model` | `DMA_MUJOCO_MODEL` |
-
-```bash
-sudo $EDITOR /etc/dma/dma-ethercat.env     # e.g. point DMA_CONFIG at a new robot JSON
-sudo systemctl restart dma-ethercat
-```
-
-To use a custom hardware config, drop the JSON in `/etc/dma/` (not under
-`/usr/share`, which dpkg owns) and set `DMA_CONFIG=/etc/dma/my-config.json`.
-`DMA_CPU_AFFINITY` / `DMA_RT_CPU` must stay consistent with the
-[cpuIsolation](#314-cpu-isolation-and-core-pinning-ethercat-rt) partition
-(affinity must be a superset that contains the RT core).
-
-To change the **hardcoded flags** (e.g. drop `--enable-pdo-diagnostics`,
-or add a new `dma_main` flag), don't edit the dpkg-owned unit — add a
-drop-in that resets and re-declares `ExecStart`:
-
-```bash
-sudo systemctl edit dma-ethercat      # writes /etc/systemd/system/dma-ethercat.service.d/override.conf
-```
-```ini
-[Service]
-ExecStart=
-ExecStart=/usr/bin/taskset -c ${DMA_CPU_AFFINITY} /usr/bin/dma_main \
-    --config ${DMA_CONFIG} --cpu ${DMA_RT_CPU} --interface ${INTERFACE} \
-    --mujoco-model ${DMA_MUJOCO_MODEL} --enable-emcy-monitor
-```
-
-The empty `ExecStart=` is required — systemd appends otherwise. Run
-`sudo systemctl daemon-reload && sudo systemctl restart dma-ethercat`
-after.
-
-#### systemctl / journalctl cheat sheet
-
-```bash
-systemctl status dma-ethercat            # current state, last logs, the active ExecStart
-systemctl cat dma-ethercat               # merged unit + every drop-in (verify your override)
-sudo systemctl restart dma-ethercat      # apply env / config changes
-sudo systemctl stop dma-ethercat         # release the bus (SIGINT; clean stop, ~10s)
-sudo systemctl start dma-ethercat
-sudo systemctl disable --now dma-ethercat # stop + don't start on boot
-sudo systemctl enable  --now dma-ethercat # start + start on boot (bootstrap default)
-journalctl -u dma-ethercat -f            # follow logs (SyslogIdentifier=dma-ethercat)
-journalctl -u dma-ethercat -b --no-pager # this boot's logs
-```
-
-The unit is `Restart=always` (`RestartSec=5`), so a crash auto-restarts —
-a climbing restart count in `status` is history, not necessarily an active
-fault; check the current **state** and **start time**. `systemctl stop`
-sends `SIGINT` for a clean bus shutdown. For deeper failure triage (bus
-won't come up, install Job stuck) see
-[§7.15](#715-dma-ethercat-installer-job-stuck-or-service-wont-start) and
-[§7.16](#716-reading-dma-ethercat-logs).
-
 ---
 
 ## 4. Bootstrap phases reference
@@ -982,24 +587,21 @@ won't come up, install Job stuck) see
 | Phase | Flag | What it does |
 |---|---|---|
 | 1. preflight | (always) | OS / arch / kernel / disk / sudo / port collisions |
-| 2. deps | `--deps` | apt installs; k0s binary **pinned** to a known version (`K0S_VERSION`, default `v1.35.4+k0s.0`) for deterministic bringup — unpinned `get.k0s.sh` installs latest and silently jumped robots to containerd 2.x; terraform binary. Skips k0s install if already present (logs a note if the installed version differs from the pin). |
+| 2. deps | `--deps` | apt installs, k0s binary, terraform binary |
 | 3. cluster | `--cluster` | require Tailscale; pin `spec.api.address` in `/etc/k0s/k0s.yaml`; `k0s install controller --single --enable-worker -c …`; systemd start; write `/root/.kube/config` (server pinned to `127.0.0.1`); reconcile `foundation.bot/*` node labels from `host-config.yaml`'s `nodeLabels:`. Self-heals already-installed clusters that bake the `1.1.1.1` sentinel — see [§3.10](#310-toggle-an-optional-workload-on-a-robot) for the day-2 toggle workflow. |
-| 4. host config | `--host` | configure containerd mirror + nvidia runtime; restart k0s; wait Ready |
+| 4. host config | `--host` | configure nvidia runtime; restart k0s; wait Ready |
 | 5. seed pull secrets | `--seed-pull-secrets` | propagate `dockerhub-creds` Secret to `argus`, `dma-video`, `nimbus`, `phantom` |
 | 6. operator-ui-config | `--operator-ui-config` | render+apply `operator-ui-pairing` ConfigMap; roll operator-ui if value changed |
 | 7. locomotion-config | `--locomotion-config` | render+apply the `phantom-locomotion-config` ConfigMap from `phantomLocomotion:` (mode/policy/diagnostic); roll the `phantom-locomotion` DaemonSet if present |
 | 8. sonic-config | `--sonic-config` | render+apply the `phantom-sonic-config` ConfigMap from `phantomSonic:` (ROS domain, walking policy, encoder mode, ZMQ/web ports, ramp); roll the `phantom-sonic` DaemonSet if present |
 | 9. ecat-interface | `--ecat-interface` (default-on; `--skip-ecat-interface` to opt out) | resolve the EtherCAT NIC adapter and rename it to `cpuIsolation.nic.iface` via persistent udev rules. Driven by `cpuIsolation.nic.selector` (mac/pci/driver+index); falls back to the vendored interactive picker on a TTY. **Gates phase 10.** |
 | 10. cpu-isolation | `--cpu-isolation` (default-on; `--skip-cpu-isolation` to opt out) | render `/etc/cpusets.conf` from `cpuIsolation.partitions[]`, reconcile orphan partitions, activate cpuset partitions, install `cpusets.service` (boot persistence), render per-partition systemd slice units (`/etc/systemd/system/<name>.slice` with `AllowedCPUs=<cpus>`) so services needing isolated cores can join via `Slice=`, migrate kernel cmdline, write systemd `CPUAffinity` drop-in, pin EtherCAT NIC IRQs. The cmdline migration adds `rcu_nocb_poll`, `skew_tick=1`, `irqaffinity=<housekeeping>`, and `isolcpus=managed_irq,<rt-cpus>` (the only knob excluding isolated CPUs from driver-managed PCIe/MSI-X IRQ allocation). The EtherCAT RT boot service also disables `kernel.timer_migration`, restricts `kernel.watchdog_cpumask` to housekeeping (strictly better than `nosoftlockup`/`nowatchdog` — keeps the safety net), and on Thor / other Tegra hosts best-effort reaffines `nvgpu_*`/`nvhost-*`/`tegra*`/`nv-*` kthreads to housekeeping. **Gates phase 12.** No-op when `cpuIsolation.enabled` is unset/false in `host-config.yaml`. To pick up these behaviors on an existing deployment: `sudo bash scripts/bootstrap-robot.sh --cpu-isolation --yes` and reboot. The cmdline migration sets `/etc/phantomos/cpu-isolation.reboot-pending`. |
-| 11. log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.18](#718-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
+| 11. log-management | `--log-management` (default-on; `--skip-log-management` to opt out) | install drop-ins under `/etc/systemd/journald.conf.d/` and `/etc/logrotate.d/` capping journald and rsyslog disk use. Defaults applied when `logManagement:` is absent (opt out via `logManagement.enabled: false`). See [§7.17](#717-recovering-a-robot-with-a-full-varlogsyslog) for full-disk recovery. |
 | 12. install-dma-ethercat | `--install-dma-ethercat` | render the installer Job from the host-config tag, apply, dpkg the `.deb`, write `/etc/dma/dma-ethercat.env` (INTERFACE/DMA_RT_CPU/DMA_CPU_AFFINITY from `cpuIsolation`), render the `dma-ethercat.service` drop-in `Slice=<partition>.slice` + `CPUAffinity=` (so the service can actually run on the isolated cores under cgroup-v2), then enable + start. **Gates phase 13.** |
 | 13. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
 | 14. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
-| 14b. load-image-tars | `--load-image-tars` (with `--phantom-models-tar <path>` / `--phantom-policies-tar <path>`) | (optional) wait for the `k0s-registry` Deployment to become Available, then load + push the prebuilt `phantom-models` / `phantom-policies` tarballs into `localhost:5443` (via [`scripts/load-image-tars.sh`](../scripts/load-image-tars.sh)) and update the matching `images:` tag in `host-config.yaml`. On an interactive full bootstrap, prompts for any path not given by a flag. Runs **between gitops and image-overrides** so the unchanged image-overrides phase injects the new tag. Soft-skips if neither tarball is provided or the registry never comes up. See [§3.13](#313-copy-a-locally-built-image-to-other-robots-offline-tar-transfer). |
 | 15. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
 | 16. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
-| 17. setup-positronic | `--setup-positronic` | (optional) push positronic-control image, build phantom-models, redeploy |
-| 18. validate | `--validate` | `scripts/validate-local-registry.sh` |
 
 With **no** `--<phase>` flag, every phase runs (full bootstrap).
 With **one or more** `--<phase>` flags, only those phases run
@@ -1023,11 +625,6 @@ sudo bash scripts/bootstrap-robot.sh --operator-ui-config
 # bump image tags
 sudo bash scripts/bootstrap-robot.sh --image-overrides
 
-# load + push prebuilt model/policy tarballs and wire the tag into host-config (see §3.13)
-sudo bash scripts/bootstrap-robot.sh --load-image-tars \
-  --phantom-models-tar /root/phantom-models-2026-06-08.tar \
-  --phantom-policies-tar /root/phantom-policies-2026-06-09-sonic-onnx.tar
-
 # add/remove hostPath mounts
 sudo bash scripts/bootstrap-robot.sh --deployments
 
@@ -1040,10 +637,7 @@ sudo bash scripts/bootstrap-robot.sh --argocd-admin
 # re-seed dockerhub creds (fixes ImagePullBackOff)
 sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets
 
-# re-validate the registry
-sudo bash scripts/bootstrap-robot.sh --validate
-
-# wipe cluster (preserves /etc/phantomos/, /var/lib/k0s-data/, /var/lib/registry/)
+# wipe cluster (preserves /etc/phantomos/, /var/lib/k0s-data/)
 sudo bash scripts/bootstrap-robot.sh --reset
 sudo bash scripts/bootstrap-robot.sh           # rebuild
 
@@ -1051,7 +645,7 @@ sudo bash scripts/bootstrap-robot.sh           # rebuild
 sudo bash scripts/bootstrap-robot.sh --operator-ui-config --image-overrides
 
 # override flags (compose with both modes)
-sudo bash scripts/bootstrap-robot.sh --skip-nvidia --skip-validate
+sudo bash scripts/bootstrap-robot.sh --skip-nvidia
 sudo bash scripts/bootstrap-robot.sh --gitops --production
 sudo bash scripts/bootstrap-robot.sh --gitops --no-production
 ```
@@ -1216,31 +810,39 @@ new robot needs no installer-tree commit, just a host-config entry.
 
 ### 7.1 `Init:ImagePullBackOff` on positronic-control
 
-Image overrides didn't apply, or the requested tag doesn't exist in
-the local registry.
+Image overrides didn't apply, the requested tag doesn't exist on
+DockerHub, or the `dockerhub-creds` pull secret is missing in the
+`positronic` namespace. positronic-control, phantom-models, and
+phantom-policies all pull from `foundationbot/*` on DockerHub like
+every other private image.
 
 ```bash
 # Check what tag the live Application is trying to pull
 sudo k0s kubectl -n argocd get app phantomos-<robot>-core \
   -o jsonpath='{.spec.source.kustomize.images}' ; echo
 
-# Check what's actually in the registry
-curl -fs http://localhost:5443/v2/positronic-control/tags/list
+# Confirm the pull secret is present in the namespace
+sudo k0s kubectl -n positronic get secret dockerhub-creds
+# missing? re-seed it:
+sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets
 
 # If the override is missing, re-run the phase
 sudo bash scripts/bootstrap-robot.sh --image-overrides
 ```
 
-If the registry has the tag but the pod still won't pull, kick the
-pod to retry:
+If the credentials and tag are both good but the pod still won't pull,
+kick the pod to retry:
 
 ```bash
 sudo k0s kubectl -n positronic delete pod -l app=positronic-control
 ```
 
+See [§7.13](#713-pods-imagepullbackoff-for-foundationbot-images) for the
+full DockerHub pull-secret recovery path.
+
 ### 7.2 Image shows `:PLACEHOLDER`
 
-The base manifest's image is literal `localhost:5443/<name>:PLACEHOLDER`.
+The base manifest's image is literal `foundationbot/<name>:PLACEHOLDER`.
 Either `host-config.yaml` doesn't list that image under `images:` or
 `--image-overrides` hasn't run since the last edit.
 
@@ -1367,7 +969,6 @@ sudo bash scripts/bootstrap-robot.sh            # rebuild
 
 - `/etc/phantomos/` (host-config, robot id, pairing, app manifest)
 - `/var/lib/k0s-data/` (database hostPaths: mongodb, redis, postgres)
-- `/var/lib/registry/` (local Docker registry blobs)
 
 Cluster workload state and the kubeconfig are destroyed. After the
 rebuild, expect to re-seed dockerhub creds (`--seed-pull-secrets`)
@@ -1514,20 +1115,7 @@ sudo journalctl -u dma-ethercat -f
 sudo journalctl -u dma-ethercat -b --no-pager   # this boot
 ```
 
-### 7.17 Validate-registry failures
-
-```bash
-sudo bash scripts/validate-local-registry.sh
-# exit code = number of failed checks; output names each one
-```
-
-To skip the validation step during bootstrap on a known-good host:
-
-```bash
-sudo bash scripts/bootstrap-robot.sh --skip-validate
-```
-
-### 7.18 Recovering a robot with a full `/var/log/syslog`
+### 7.17 Recovering a robot with a full `/var/log/syslog`
 
 Symptom: `df -h /` reports the root partition at 100%, and
 `du -sh /var/log/*` shows `/var/log/syslog` (or `syslog.1`) at
@@ -1573,7 +1161,7 @@ To customise the caps per host, add a `logManagement:` block to
 template at `host-config-templates/_template/host-config.yaml` for
 the full schema and defaults.
 
-### 7.19 `phantom-sonic` walking/sonic CrashLoop on `shm_open`
+### 7.18 `phantom-sonic` walking/sonic CrashLoop on `shm_open`
 
 **Symptom:** the `phantom-sonic` pod is `Running` but the `walking`
 and/or `sonic` containers restart-loop. Their logs end with:
@@ -1619,126 +1207,6 @@ counter. The same missing-`/dev/shm` cause also CrashLoops `dma-bridge`.
 
 ---
 
-### 7.20 `k0scontroller` crash-loops: `unsupported configuration version: expected 3, got 2`
-
-**Symptom.** Cluster bringup "hangs" — `k0s kubectl` reports
-`connection to the server localhost:6443 was refused`, and
-`systemctl status k0scontroller` shows `activating` with a high restart
-counter. `journalctl -u k0scontroller` repeats:
-
-```
-Rejected: unsupported configuration version: expected 3, got 2
-  configuration contains a [plugins."io.containerd.grpc.v1.cri"] section
-  which is the containerd v1 CRI plugin format
-  pre-flight-check="containerd:configSnippets/file:10-registry-mirror.toml"
-```
-
-**Cause.** k0s **≥ 1.36** bundles **containerd 2.x**, whose config is
-`version = 3` with the split CRI plugins (`io.containerd.cri.v1.images`,
-`io.containerd.cri.v1.runtime`). The containerd drop-ins under
-`/etc/k0s/containerd.d/` were written in the old containerd-1.7.x format
-(`version = 2`, `io.containerd.grpc.v1.cri`) and k0s rejects them at
-pre-flight, so the controller never starts. This bites robots that
-installed k0s **before** the version pin landed (bootstrap now pins k0s —
-see [§4 phase 2](#4-bootstrap-phases-reference) — and the configure
-scripts now emit the format matching the bundled containerd).
-
-**Fix.** Re-run the host-config phase so the drop-ins are regenerated in
-the correct format, then restart:
-
-```bash
-sudo bash scripts/configure-k0s-containerd-mirror.sh
-sudo bash scripts/configure-k0s-nvidia-runtime.sh   # if the robot uses GPU
-sudo systemctl restart k0scontroller
-# watch it settle:
-sudo systemctl is-active k0scontroller        # -> active
-sudo k0s kubectl get nodes                     # -> Ready
-```
-
-Or convert the two files by hand: set `version = 3`, rename
-`[plugins."io.containerd.grpc.v1.cri".registry]` →
-`[plugins."io.containerd.cri.v1.images".registry]` and
-`[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]` →
-`[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia]`
-(and its `.options` table), then restart k0s.
-
----
-
-### 7.21 dma-video pods `Pending` — `/etc/phantom/head_camera.json` missing
-
-**Symptom.** `camera-params`, `producer`, and/or `rtsp-streamer` in the
-`dma-video` namespace stay `Pending`/`ContainerCreating`; a `describe`
-shows:
-
-```
-MountVolume.SetUp failed for volume "cameras-config" ...
-hostPath type check failed: /etc/phantom/head_camera.json is not a file
-```
-
-**Cause.** Those pods mount the **per-host** OAK camera config from
-`/etc/phantom/head_camera.json` via `hostPath` with `type: File`, so a
-missing (or directory-shaped) path makes the kubelet refuse to start the
-pod — deliberate loud failure, no silent fleet default. ArgoCD does
-**not** create or reconcile this file (it's per-robot hardware config).
-
-**Fix — create `/etc/phantom/head_camera.json` from the robot's OAK
-module ID (MXID).** Each OAK camera has a unique MXID (Luxonis device
-serial / "module ID"); the file maps boards (by MXID) to camera sockets
-+ intrinsics. Discover the attached OAK's MXID with DepthAI:
-
-```bash
-python3 -c 'import depthai; print([d.getMxId() for d in depthai.Device.getAllAvailableDevices()])'
-# e.g. ['19443010819F4F2E00']
-```
-
-Then write the file (the head has three cameras — see the layout note
-below; add intrinsics per camera from calibration, omitted here for
-brevity):
-
-```json
-{
-  "boards": { "0": { "mxid": "19443010819F4F2E00" } },
-  "cameras": {
-    "bottom": { "queue_id": 0, "board": 0, "socket": "B", "type": "color", "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } },
-    "left":   { "queue_id": 1, "board": 0, "socket": "C", "type": "mono",  "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } },
-    "right":  { "queue_id": 2, "board": 0, "socket": "A", "type": "mono",  "resolution": [1280, 800], "intrinsics": { "matrix": [...], "distortion": [...] } }
-  }
-}
-```
-
-```bash
-sudo install -D -m 0644 head_camera.json /etc/phantom/head_camera.json
-# the dma-video pods schedule on the next reconcile (or: kubectl -n dma-video rollout restart deploy)
-```
-
-**Get these right when authoring/editing the file:**
-- **Camera module ID (MXID)** — `boards.<n>.mxid` must match the actual
-  OAK on this robot (from the DepthAI probe above). A wrong MXID means
-  the producer can't open the device.
-- **Each port's position and type** — the head has three cameras and
-  every entry must map to the correct physical position and sensor type:
-  **`bottom` (cam0) is COLOR; `left` and `right` are MONO**. Mixing up
-  positions or marking a mono camera as color (or vice-versa) yields
-  garbled/empty streams even though the pods come up.
-- **`socket`** — the `A`/`B`/`C` value is the OAK-D's physical port the
-  camera is plugged into; it must match your unit's wiring. The letters
-  in the example above are illustrative — verify against the actual board
-  (only `bottom: "B"` is confirmed from an in-fleet config).
-
-> **Use the OAK-D proprietary USB cable.** Third-party USB cables are
-> unreliable for the OAK-D's data rate — they cause intermittent
-> DepthAI disconnects / firmware-boot failures that look like camera
-> faults. Use the cable that ships with the OAK-D module.
-
-The OAK USB-power udev rule that keeps the device from dropping during
-DepthAI firmware boot is installed by bootstrap automatically
-([scripts/configure-usb-power.sh](../scripts/configure-usb-power.sh)) —
-no action needed there. On a host with **no** OAK hardware, leave
-`foundation.bot/has-cameras: 'false'` in `host-config.yaml`'s
-`nodeLabels:` so the dma-video stack isn't scheduled at all.
-
----
-
 ## 8. Reference
 
 ### 8.1 Filesystem map
@@ -1750,7 +1218,6 @@ no action needed there. On a host with **no** OAK hardware, leave
 | `/etc/phantomos/operator-ui-pairing.yaml` | ConfigMap derived from `aiPcUrl`. Auto-written. |
 | `/etc/phantomos/phantomos-app-<stack>.yaml` | Rendered Application CR (one per enabled stack). Auto-written. |
 | `/var/lib/k0s-data/` | Database hostPath volumes. Survives `--reset`. |
-| `/var/lib/registry/` | Local Docker registry blobs. Survives `--reset`. |
 | `/var/lib/recordings/` | On-host recording storage. Survives `--reset`. |
 | `host-config-templates/_template/host-config.yaml` | Generic schema template. |
 | `host-config-templates/_template/phantomos-app.yaml.tpl` | Application CR template. |
@@ -1777,7 +1244,6 @@ no action needed there. On a host with **no** OAK hardware, leave
 | Rotate ArgoCD password | `sudo bash scripts/bootstrap-robot.sh --argocd-admin` |
 | Re-seed dockerhub creds | `sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets` |
 | Wipe cluster | `sudo bash scripts/bootstrap-robot.sh --reset` |
-| Validate registry | `sudo bash scripts/validate-local-registry.sh` |
 | Pod state / logs / exec | `bash scripts/positronic.sh status\|logs\|exec` |
 | phantom-sonic state / logs / exec | `bash scripts/positronic.sh sonic status\|logs\|exec\|restart\|web` |
 | Force-sync an Application | `sudo k0s kubectl -n argocd patch app phantomos-<robot>-core --type merge -p '{"operation":{"sync":{}}}'` |
@@ -1795,7 +1261,6 @@ mapping a tcpdump back to the workload that owns the socket.
 | Port | Proto | Owner | Bind | Source |
 |---|---|---|---|---|
 | 5000 | TCP | `phantomos-api-server` | all | `manifests/base/phantomos-api-server/phantomos-api-server.yaml` |
-| 5443 | TCP | `registry` | `127.0.0.1` | `manifests/base/registry/registry.yaml` |
 | 8008 | TCP | `yovariable-server` (variable) | all | `manifests/base/yovariable-server/yovariable-server.yaml` |
 | 8080 | TCP | `yovariable-server` (admin) | all | `manifests/base/yovariable-server/yovariable-server.yaml` |
 | 9788 | TCP | `rerun-streamer` | all | `manifests/base/dma-streams/rerun-streamer.yaml` |
@@ -1815,7 +1280,6 @@ land directly on the host):
 | 7865 | TCP | `phantom-sonic` / `motion-replay` web UI (`WEB_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
 | 5557 | TCP | `phantom-sonic` motion ZMQ stream (`MOTION_ZMQ_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
 | 5558 | TCP | `phantom-sonic` mode-control ZMQ (`CONTROL_ZMQ_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
-| 8090 | TCP | `wolverine-loco` teleop web UI (`--port 8090`) | `manifests/base/wolverine-loco/wolverine-loco.yaml` |
 | dynamic 7400+ | UDP | `positronic-control`, `phantom-sonic`, `cpp-robot-state-estimator` ROS 2 / DDS | respective deployment YAMLs |
 
 `producer` and `rtsp-streamer` use `hostNetwork: true` for USB / IPC
@@ -1850,7 +1314,6 @@ not bound on the host):
 | Flag | Effect |
 |---|---|
 | `--skip-nvidia` | Skip nvidia runtime config in the host phase |
-| `--skip-validate` | Skip the final validate-local-registry pass |
 | `--production` | Force `selfHeal: true` for this run |
 | `--no-production` | Force `selfHeal: false` for this run |
 | `--keep-going` | Continue after FAIL (default: bail) |

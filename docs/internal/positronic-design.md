@@ -7,6 +7,14 @@
 > `gitops/root-app.yaml`, app-of-apps) and are STALE — that machinery was
 > replaced by per-host rendered Application CRs. For the current design see
 > [`architecture.md`](./architecture.md).
+>
+> **The on-robot local container registry is GONE.** The `k0s-registry`
+> pod, its `/var/lib/registry` hostPath PV, the `localhost:5443` endpoint,
+> and the containerd→`localhost:5443` mirror have all been removed.
+> positronic-control, phantom-models, and phantom-policies now pull from
+> `foundationbot/*` on DockerHub like every other private image (via the
+> `dockerhub-creds` pull secret). Any text below describing the local
+> registry, the `:5443` mirror, or `/var/lib/registry` is historical only.
 
 
 How the positronic-control deployment fits together: the two repos, the
@@ -75,7 +83,7 @@ The positronic-control deployment spans two git repositories:
 | Repo | Role |
 |---|---|
 | `Phantom-OS-KubernetesOptions` (this one) | **Deployment manifests** — everything in `manifests/`, `gitops/`, `scripts/`, `terraform/`. ArgoCD watches this repo. |
-| `imu-policy/positronic_control` | **Image source** — Dockerfiles under `docker/`, ROS2 workspace under `workspace/`. This is where `docker build -t localhost:5443/positronic-control:<tag> .` runs from. |
+| `imu-policy/positronic_control` | **Image source** — Dockerfiles under `docker/`, ROS2 workspace under `workspace/`. This is where `docker build -t foundationbot/positronic-control:<tag> .` runs from. |
 
 Boundary: this repo never knows about the contents of the
 positronic-control image — only its tag in
@@ -92,7 +100,7 @@ push goes to the local registry on the same host, then the tag bump in
 
 ## 3. Three images and their roles
 
-### 3.1 `localhost:5443/positronic-control:<tag>` — the executing image
+### 3.1 `foundationbot/positronic-control:<tag>` — the executing image
 
 The image the pod actually runs. Currently a retag of
 `foundationbot/phantom-cuda:0.2.44-cu130` (a CUDA + ROS2 jazzy +
@@ -112,7 +120,7 @@ they iterate on the bind-mounted source tree at `/src` (host:
 `/root/foundation/DMA/positronic_control`). `colcon build` writes back
 into the host tree, so the build artefacts survive pod restarts.
 
-### 3.2 `localhost:5443/phantom-models:<tag>` — model bytes
+### 3.2 `foundationbot/phantom-models:<tag>` — model bytes
 
 A `FROM busybox:1.36.1` image whose only payload is the bundled model
 weights + configs at `/models`. Built by
@@ -264,7 +272,7 @@ out of scope for this stack today.)
 ```
 ┌─────────────────────────────────────────────────┐
 │ initContainer: load-models                      │
-│   image: localhost:5443/phantom-models:<tag>    │
+│   image: foundationbot/phantom-models:<tag>     │
 │   cmd:   cp -a /models/. /shared/               │
 │   mount: emptyDir "models" → /shared            │
 │   resources: 1 CPU / 1Gi requests==limits       │
@@ -273,7 +281,7 @@ out of scope for this stack today.)
           ▼
 ┌─────────────────────────────────────────────────┐
 │ container: positronic-control                   │
-│   image: localhost:5443/positronic-control:<t>  │
+│   image: foundationbot/positronic-control:<t>   │
 │   workingDir: /src/workspace                    │
 │   args: bash -c "<dispatch on $PHANTOM_CMD>"    │
 │   envFrom: ConfigMap positronic-config          │
@@ -400,17 +408,17 @@ manifests/
     └── argentum/
 ```
 
-The base manifests don't pin any registry-specific tags — they declare
-`localhost:5443/positronic-control:PLACEHOLDER` and
-`localhost:5443/phantom-models:PLACEHOLDER`. The per-robot overlay's
+The base manifests don't pin any per-robot tags — they declare
+`foundationbot/positronic-control:PLACEHOLDER` and
+`foundationbot/phantom-models:PLACEHOLDER`. The per-robot overlay's
 `images:` transformer rewrites the tag part:
 
 ```yaml
 # manifests/robots/mk09/kustomization.yaml
 images:
-  - name: localhost:5443/positronic-control
+  - name: foundationbot/positronic-control
     newTag: 0.2.44-cu130
-  - name: localhost:5443/phantom-models
+  - name: foundationbot/phantom-models
     newTag: 2026-04-26
 ```
 

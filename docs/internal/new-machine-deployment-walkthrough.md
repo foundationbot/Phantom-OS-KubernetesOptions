@@ -1,5 +1,26 @@
 # New machine deployment walkthrough
 
+> **PARTIALLY HISTORICAL — local registry removed.** The on-robot local
+> container registry (`k0s-registry` pod, `localhost:5443`, the
+> `/var/lib/registry` PV, and the containerd→`localhost:5443` mirror) has
+> been deleted. positronic-control, phantom-models, and phantom-policies
+> now use `foundationbot/*` manifest refs and pull from DockerHub via the
+> `dockerhub-creds` pull secret — `docker push foundationbot/<image>:<tag>`
+> instead of pushing to `localhost:5443`. The following are **obsolete**
+> and no longer exist:
+> - §3.3 "Retag for the local registry" — tag/push to `foundationbot/*` on
+>   DockerHub directly; no `localhost:5443` retag.
+> - §5 "Prime the secondary registry" — there is no secondary registry to
+>   prime; `prime-registry-cache.sh` and `validate-local-registry.sh` are
+>   deleted, and the §7 `setup-positronic` / `validate` phases and the
+>   containerd-mirror step are gone.
+> - Any `curl http://localhost:5443/...`, `--setup-positronic`,
+>   `--positronic-image`, `--skip-validate`, `configure-k0s-containerd-mirror.sh`,
+>   or `/var/lib/registry/` reference below.
+>
+> Read everything else (DMA.ethercat install, cpuset/CPU isolation,
+> per-robot overlay, ArgoCD wiring, policy launch) as still valid.
+
 End-to-end recipe for bringing up a fresh robot from a clean OS to a
 running policy. The `ak-007/positronic-off` branch in this repo is the
 worked example — it is what an operator's per-robot branch looks like
@@ -551,9 +572,9 @@ Edit `manifests/robots/<robot>/kustomization.yaml`:
 
 ```yaml
 images:
-  - name: localhost:5443/positronic-control
+  - name: foundationbot/positronic-control
     newTag: 0.2.44-production-cu130-flat
-  - name: localhost:5443/phantom-models
+  - name: foundationbot/phantom-models
     newTag: 2026-04-29
 ```
 

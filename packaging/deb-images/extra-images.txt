@@ -28,9 +28,16 @@
 # Job pulls from local containerd (already imported by k0s) instead
 # of DockerHub — works on robots without dockerhub-creds.
 #
-# Per-arch lines because arm64 publishes as `-aarch64` (uname-m form)
-# but amd64 publishes as `-amd64` (debian-arch form), and CI may
-# publish them under entirely different tags. Edit the amd64 line
-# below if your fleet's CI uses a different tag for x86 robots.
-foundationbot/dma-ethercat:main-latest-aarch64    # arch:arm64
-foundationbot/dma-ethercat:main-latest            # arch:amd64
+# Beta pin: SOF-1167. The two arch-filtered lines bundle the same
+# SOF-1167 tag for both arm64 and amd64 robots. If DMA.ethercat's CI
+# publishes arch-suffixed SOF-1167 builds (e.g. SOF-1167-aarch64 /
+# SOF-1167-amd64) rather than a single multi-arch tag, adjust the
+# tags below (and images.dma-ethercat in the host-config template).
+foundationbot/dma-ethercat:SOF-1167    # arch:arm64
+foundationbot/dma-ethercat:SOF-1167    # arch:amd64
+
+# dma.streams beta pin (SOF-1167). The dma-recorder / rerun-streamer
+# manifests still carry foundationbot/dma-streams:main-latest, so the
+# manifest scan would otherwise bundle main-latest; this line ensures
+# the SOF-1167 build the host-config override deploys is in the bundle.
+foundationbot/dma-streams:SOF-1167

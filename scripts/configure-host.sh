@@ -170,24 +170,6 @@ ask() {
   local prompt="$1"; local default="${2:-}"; local help="${3:-}"; local validator="${4:-}"
   local input value
 
-  # Prompt only for fields we can't already fill. If the seed/template (or a
-  # built-in default) gives a non-empty value that passes its validator, use
-  # it silently — so seeding from a template or an existing host-config only
-  # asks for the genuinely-missing per-host fields (robot id, AI PC URL, NIC
-  # MAC, dma config, ...). A placeholder left in a template (e.g. a bogus MAC)
-  # fails its validator and is treated as missing -> prompted.
-  if [ -n "$default" ] && { [ -z "$validator" ] || "$validator" "$default" 2>/dev/null; }; then
-    printf '  %s%s%s: %s%s%s\n' "$C_CYAN" "$prompt" "$C_RESET" "$C_DIM" "$default" "$C_RESET" >&2
-    printf '%s' "$default"
-    return 0
-  fi
-
-  # Value missing or invalid. --yes can't ask, so abort with a clear message.
-  if [ "$YES" = 1 ]; then
-    err "--yes: '$prompt' has no usable value (default: '${default:-<empty>}'); aborting"
-    exit 1
-  fi
-
   while :; do
     if [ -n "$default" ]; then
       printf '  %s%s%s [%s]: ' "$C_CYAN" "$prompt" "$C_RESET" "$default" >&2
@@ -195,7 +177,12 @@ ask() {
       printf '  %s%s%s: ' "$C_CYAN" "$prompt" "$C_RESET" >&2
     fi
 
-    IFS= read -r input || input=""
+    if [ "$YES" = 1 ]; then
+      input=""
+      printf '%s\n' "$default" >&2
+    else
+      IFS= read -r input || input=""
+    fi
 
     if [ "$input" = "?" ] && [ -n "$help" ]; then
       printf '%s%s%s\n' "$C_DIM" "$help" "$C_RESET" >&2
@@ -204,8 +191,16 @@ ask() {
 
     value="${input:-$default}"
 
-    if [ -n "$validator" ] && ! "$validator" "$value"; then
-      continue
+    if [ -n "$validator" ]; then
+      if ! "$validator" "$value"; then
+        # In --yes mode there's no way to recover from a bad default,
+        # so exit instead of looping forever on the same invalid value.
+        if [ "$YES" = 1 ]; then
+          err "--yes: default $value failed validation; aborting"
+          exit 1
+        fi
+        continue
+      fi
     fi
 
     printf '%s' "$value"
@@ -755,7 +750,7 @@ ok "production = $production"
 # --- stacks ---
 heading "stack toggles"
 hint "Each stack is a group of related Applications:"
-hint "  core      registry, dma-video, positronic, phantomos-api-server,"
+hint "  core      dma-video, positronic, phantomos-api-server,"
 hint "            yovariable-server. ALWAYS ON — robot won't function without it."
 hint "  operator  argus + nimbus (operator-ui, eg-server, mongodb, redis,"
 hint "            postgres). Toggle off to remove the operator-facing surface."
@@ -998,9 +993,9 @@ if [ "$inject_images" = 1 ]; then
 
   # Auto-clear seed entries that carry a REPLACE-WITH-* placeholder
   # tag. These were previously written by configure-host.sh itself (a
-  # bug — see docs/image-flow-and-registry-bootstrap.md), but they
-  # would never resolve at pull time. Treat them as if the seed had
-  # no entry, so the bundle / section-A defaults can fill the gap.
+  # bug), but they would never resolve at pull time. Treat them as if
+  # the seed had no entry, so the bundle / section-A defaults can fill
+  # the gap.
   #
   # MUST run before bundle resolution: clearing turns the seed entry
   # back into an empty row, letting the bundle-fill step below give
@@ -1044,19 +1039,6 @@ if [ "$inject_images" = 1 ]; then
         continue
       fi
       [ -z "$bref" ] && continue
-      # Defensive: a container key never contains '/'. A '/'-bearing name
-      # is a repo / manifest find-key that an older bundle builder recorded
-      # by mistake (e.g. 'foundationbot/phantom-psi0-loco' for the
-      # 'phantom-loco' container). Writing it as an images: key fails
-      # host-config validation and wedges the wizard's validate→re-run
-      # loop, so skip it. (Fixed bundles record the real container key;
-      # rebuild the image bundle to pick up the correct entry.)
-      case "$bcname" in
-        */*)
-          printf 'warning: bundle entry container %s looks like a repo, not a container key — skipping (rebuild the image bundle to fix)\n' \
-            "$bcname" >&2
-          continue ;;
-      esac
       bundle_seen_count=$((bundle_seen_count + 1))
       # Find existing row, or append.
       found_idx=-1
@@ -1106,11 +1088,10 @@ if [ "$inject_images" = 1 ]; then
   #
   # Empty default tag = the prompt is offered with no preloaded value,
   # press-Enter skips the override entirely, and the base manifest's
-  # in-tree image:tag wins. This is the right default for containers
-  # the operator must build locally (positronic-control,
+  # in-tree image:tag wins. This is the right default for the
+  # foundationbot/* images the operator pins per build (positronic-control,
   # phantom-models): an unfilled placeholder used to be silently
-  # injected into Argo as a non-resolving tag. See
-  # docs/image-flow-and-registry-bootstrap.md for the post-mortem.
+  # injected into Argo as a non-resolving tag.
   declare -a canonical_containers=(
     "positronic-control"
     "phantom-models"
@@ -1118,14 +1099,14 @@ if [ "$inject_images" = 1 ]; then
     "dma-ethercat"
   )
   declare -a canonical_default_repos=(
-    "localhost:5443/positronic-control"
-    "localhost:5443/phantom-models"
+    "foundationbot/positronic-control"
+    "foundationbot/phantom-models"
     "foundationbot/argus.operator-ui"
     "foundationbot/dma-ethercat"
   )
   declare -a canonical_default_tags=(
-    ""                              # positronic-control: must be local build
-    ""                              # phantom-models:     must be local build
+    ""                              # positronic-control: pin per build
+    ""                              # phantom-models:     pin per build
     "$operator_ui_default_tag"      # operator-ui:        from .deb if installed
     "$dma_ethercat_default_tag"     # dma-ethercat:       arch-derived
   )
@@ -1244,9 +1225,9 @@ if [ "$inject_images" = 1 ]; then
     hint "Press enter to keep the shown default; an empty default means"
     hint "no override (the manifest's in-tree image:tag will apply)."
     hint "Swapping repos is fine — bootstrap renames+retags in one step."
-    example "localhost:5443/positronic-control:0.2.44-production-cu130"
+    example "foundationbot/positronic-control:0.2.44-production-cu130"
     example "foundationbot/phantom-cuda:0.2.46-dev.1-production-cu130 (swap repo)"
-    example "localhost:5443/phantom-models:2026-04-30                  (date-stamped)"
+    example "foundationbot/phantom-models:2026-04-30                  (date-stamped)"
     example "foundationbot/argus.operator-ui:<git-sha>"
     example "foundationbot/dma-ethercat:main-latest-aarch64            (arm64)"
     example "foundationbot/dma-ethercat:main-latest-amd64              (x86)"
@@ -1532,43 +1513,6 @@ tmp="$(mktemp)"
     printf '  # %s\n' "$nl_desc"
     printf "  %s: '%s'\n" "$nl_key" "$nl_value"
   done < <(python3 "$HELPER" /dev/null get-node-label-defaults)
-
-  # cpuIsolation: carry the seed/template block through verbatim so the
-  # per-host CPU layout (partitions/cpus, dmaRtCpu, irqCore) survives a
-  # re-config from a template — bootstrap then sees the block present and
-  # does NOT re-prompt for the cores. The NIC selector is carried too;
-  # bootstrap's ecat-interface phase re-resolves the NIC and its picker
-  # fires when the carried MAC doesn't match this robot. dmaEthercat and
-  # phantomPsi are intentionally NOT carried (dma config is prompted by
-  # bootstrap's phase-12 picker). Emits nothing when the seed has no
-  # cpuIsolation block (e.g. a fresh run off _template) — bootstrap then
-  # prompts to create it, as before.
-  if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
-    python3 - "$seed_path" <<'PY'
-import sys, re, yaml
-try:
-    cfg = yaml.safe_load(open(sys.argv[1])) or {}
-except Exception:
-    cfg = {}
-ci = cfg.get("cpuIsolation") if isinstance(cfg, dict) else None
-if isinstance(ci, dict) and ci:
-    # Drop a NIC selector whose MAC is a placeholder (not a real MAC) and
-    # has no pci/driver: it would fail validation, and we WANT bootstrap's
-    # ecat-interface picker to prompt for this robot's NIC. A real selector
-    # (valid MAC, or pci/driver) is kept and carried over (same-robot re-run).
-    nic = ci.get("nic")
-    if isinstance(nic, dict) and isinstance(nic.get("selector"), dict):
-        sel = nic["selector"]
-        mac = sel.get("mac")
-        mac_ok = isinstance(mac, str) and re.match(
-            r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", mac or "")
-        if not (mac_ok or sel.get("pci") or sel.get("driver")):
-            nic.pop("selector", None)
-    sys.stdout.write(
-        yaml.safe_dump({"cpuIsolation": ci}, default_flow_style=False, sort_keys=False)
-    )
-PY
-  fi
 } > "$tmp"
 
 heading "review"
@@ -1601,12 +1545,6 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 install -m 0644 "$tmp" "$OUTPUT_FILE"
 ok "wrote $OUTPUT_FILE"
 
-# Chain into bootstrap. Under --yes, run it unattended too (pass --yes);
-# otherwise confirm (defaulting to yes — bootstrapping is the expected next
-# step) and run it interactively so bootstrap prompts for its own gaps.
-if [ "$YES" = 1 ]; then
-  ok "running bootstrap-robot.sh --yes ..."
-  exec bash "$SCRIPT_DIR/bootstrap-robot.sh" --yes
-elif confirm "Run bootstrap-robot.sh now?" "y"; then
+if confirm "Run bootstrap-robot.sh now?" "n"; then
   exec bash "$SCRIPT_DIR/bootstrap-robot.sh"
 fi

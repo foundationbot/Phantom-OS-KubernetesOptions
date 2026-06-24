@@ -55,10 +55,6 @@
 #   --sonic-config       render+apply the phantom-sonic-config ConfigMap
 #                        (ROS domain, walking policy, encoder mode, ZMQ/web
 #                        ports, ramp; sourced from host-config phantomSonic).
-#   --psi-config         render+apply the phantom-psi-config ConfigMap
-#                        (Ψ₀ run dir/ckpt/camera/queues/instruction, ROS
-#                        domain, bridge rate, loco enable flags, walking
-#                        ONNX; sourced from host-config phantomPsi).
 #   --ecat-interface     resolve the EtherCAT NIC adapter and rename it
 #                        to cpuIsolation.nic.iface via persistent udev
 #                        rules. Driven by cpuIsolation.nic.selector
@@ -81,32 +77,18 @@
 #                        the per-host phantomos-<robot> Application
 #   --argocd-admin       install argocd CLI; prompt and set admin
 #                        password (default '1984' on empty input)
-#   --load-image-tars    load + push prebuilt phantom-models /
-#                        phantom-policies image tarballs into the
-#                        in-cluster localhost:5443 registry, then wire
-#                        the loaded tag into host-config.yaml's images:
-#                        block. Provide the tarball paths via
-#                        --phantom-models-tar / --phantom-policies-tar
-#                        (on an interactive full bootstrap, prompts for
-#                        any path not given). Runs between gitops and
-#                        image-overrides so the unchanged image-overrides
-#                        phase injects the new tag. See operations.md §3.13.
 #   --image-overrides    inject host-config.yaml's images list into
 #                        the live Application
 #   --deployments        inject host-config.yaml's deployments: patches
 #                        per stack (or clear them when absent). The
 #                        deprecated alias --dev-mounts behaves the same
 #                        way for back-compat.
-#   --validate           run scripts/validate-local-registry.sh
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
-#   --skip-operator-ui-config skip the phase 6 operator-ui-config setup
-#                        (operator-ui-pairing CM + vr-web TLS cert)
 #   --skip-ecat-interface skip the phase 9 ecat-interface setup
 #   --skip-cpu-isolation skip the phase 10 cpu-isolation setup
 #   --skip-log-management skip the phase 11 log-management setup
-#   --skip-validate      skip the final validate-local-registry.sh run
 #   --no-tailscale       ignore Tailscale when resolving the cluster API
 #                        address; bind spec.api.address to the
 #                        default-gateway IPv4 even if tailscaled is up
@@ -130,9 +112,9 @@
 #                      cluster. Splitting the two passes lets the
 #                      operator inspect/pull/edit between purge and
 #                      rebuild. Cluster workload state is destroyed;
-#                      on-disk hostPath data under /var/lib/k0s-data/,
-#                      /var/lib/registry/, and /var/lib/recordings/ is
-#                      preserved (k0s reset does not touch those paths).
+#                      on-disk hostPath data under /var/lib/k0s-data/
+#                      and /var/lib/recordings/ is preserved (k0s reset
+#                      does not touch those paths).
 #   --ai-pc-url <url>  AI PC URL for the operator-ui pairing (e.g.
 #                      http://100.124.202.97:5000). Required on FIRST
 #                      bringup; on re-runs the value is read from
@@ -151,23 +133,6 @@
 #                      doesn't exist either, the script falls back to
 #                      individual flags (--robot, --ai-pc-url) and
 #                      skips image overrides.
-#   --setup-positronic after the cluster is up, push a positronic-control
-#                      image and build phantom-models so the pod can start.
-#                      Requires --positronic-image <image> (e.g.
-#                      foundationbot/phantom-cuda:0.2.44-cu130).
-#   --positronic-image <image>
-#                      local docker image to push as positronic-control
-#                      (used with --setup-positronic).
-#   --phantom-models-tar <path>
-#                      path to a prebuilt phantom-models image tarball
-#                      (docker save output: .tar / .tar.gz / .tgz /
-#                      .tar.zst). Consumed by the load-image-tars phase:
-#                      loaded, pushed to localhost:5443, and wired into
-#                      host-config.yaml's images: block.
-#   --phantom-policies-tar <path>
-#                      path to a prebuilt phantom-policies image tarball
-#                      (same formats as --phantom-models-tar). Consumed
-#                      by the load-image-tars phase.
 #   --dockerhub-secret-file <path>
 #                      path to a file containing the raw `.dockerconfigjson`
 #                      payload (the JSON object with `auths`) for the
@@ -216,7 +181,7 @@
 #                    Runs BEFORE host config because the host-config scripts
 #                    edit /etc/k0s/containerd.toml, which only exists after
 #                    k0s has started at least once.
-#    4. host config  configure-k0s-containerd-mirror.sh +
+#    4. host config  configure-usb-power.sh +
 #                    configure-k0s-nvidia-runtime.sh (if a GPU is detected
 #                    via lspci or /dev/nvidia0). Restarts k0s; waits for
 #                    node Ready before returning so later phases don't race.
@@ -251,11 +216,6 @@
 #                    host-config's phantomSonic block (ROS domain, walking
 #                    policy, encoder mode, ZMQ/web ports, ramp). Rolls the
 #                    phantom-sonic DaemonSet if present.
-#    8b. psi-config   render+apply the phantom-psi-config ConfigMap from
-#                    host-config's phantomPsi block (Ψ₀ run dir/ckpt/camera/
-#                    queues/instruction, ROS domain, bridge rate, loco enable
-#                    flags, walking ONNX). Rolls the phantom-psi DaemonSet if
-#                    present.
 #    9. ecat-interface (gates phase 10)
 #                    resolve the EtherCAT NIC adapter and rename it to
 #                    cpuIsolation.nic.iface via a persistent udev rule
@@ -303,17 +263,6 @@
 #                    hash. Idempotent (always rewrites the hash). Also
 #                    removes argocd-initial-admin-secret since it is no
 #                    longer authoritative.
-#   14b. load-image-tars (optional; runs between gitops and image-overrides)
-#                    wait for the k0s-registry Deployment to become
-#                    Available, then for each provided tarball
-#                    (--phantom-models-tar / --phantom-policies-tar, or,
-#                    on an interactive full bootstrap, prompted) call
-#                    scripts/load-image-tars.sh to load + push the
-#                    localhost:5443/* tag and host-config.py set-image to
-#                    wire that tag into host-config.yaml's images: block.
-#                    Soft-skips if neither tarball is provided or the
-#                    registry never becomes Available. The following
-#                    image-overrides phase injects the new tag live.
 #   15. image overrides
 #                    inject host-config.yaml's images: list into the live
 #                    per-stack Argo Applications via
@@ -326,10 +275,6 @@
 #                    Applications via spec.source.kustomize.patches.
 #                    Currently routes positronic-control + phantomos-api-server
 #                    mounts onto the core stack. Alias: --dev-mounts.
-#   17. setup-positronic (optional, --setup-positronic)
-#                    push positronic-control image to local registry,
-#                    build phantom-models, and redeploy the pod.
-#   18. validate     bash scripts/validate-local-registry.sh
 #
 # Exit code = number of FAILures.
 
@@ -350,10 +295,6 @@ SKIP_ETHERCAT_INSTALL=0
 RESET=0
 AI_PC_URL=""
 HOST_CONFIG_INPUT=""
-SETUP_POSITRONIC=0
-POSITRONIC_IMAGE=""
-PHANTOM_MODELS_TAR=""
-PHANTOM_POLICIES_TAR=""
 DOCKERHUB_SECRET_FILE=""
 # Empty = "no flag passed; fall back to host-config.yaml's production
 # field (default false)". Flag values: 0 or 1.
@@ -371,13 +312,10 @@ SKIP_SEED_PULL_SECRETS=0
 SKIP_OPERATOR_UI_CONFIG=0
 SKIP_LOCOMOTION_CONFIG=0
 SKIP_SONIC_CONFIG=0
-SKIP_PSI_CONFIG=0
 SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
-SKIP_LOAD_IMAGE_TARS=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
-SKIP_VALIDATE=0
 SKIP_NVIDIA=0
 NO_TAILSCALE=0
 
@@ -402,12 +340,12 @@ SELECTED_PHASES=()
 # These are the namespaces the bootstrap script itself creates / seeds.
 # Kept in sync with PULL_SECRET_NAMESPACES + the argocd namespace owned
 # by the gitops phase's terraform/helm install.
-WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic psi)
+WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic)
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
 # `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic psi)
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic)
 PULL_SECRET_NAME="dockerhub-creds"
 
 # Host-systemd services to stop + disable before bringing up the cluster.
@@ -432,23 +370,19 @@ while [ $# -gt 0 ]; do
     --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
     --locomotion-config) SELECTED_PHASES+=(locomotion-config); shift ;;
     --sonic-config)      SELECTED_PHASES+=(sonic-config); shift ;;
-    --psi-config)        SELECTED_PHASES+=(psi-config); shift ;;
     --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
-    --load-image-tars)   SELECTED_PHASES+=(load-image-tars); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
     --deployments|--dev-mounts)
                          SELECTED_PHASES+=(dev-mounts); shift ;;
     --install-dma-ethercat)
                          SELECTED_PHASES+=(install-dma-ethercat); shift ;;
-    --validate)          SELECTED_PHASES+=(validate); shift ;;
 
     # Targeted overrides that compose with both modes.
     --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
-    --skip-validate)     SKIP_VALIDATE=1; shift ;;
     --no-tailscale)      NO_TAILSCALE=1; shift ;;
     --skip-purge-pods)   SKIP_PURGE_PODS=1; shift ;;
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
@@ -467,8 +401,6 @@ while [ $# -gt 0 ]; do
                          SKIP_CPU_ISOLATION=1; shift ;;
     --skip-log-management)
                          SKIP_LOG_MANAGEMENT=1; shift ;;
-    --skip-operator-ui-config)
-                         SKIP_OPERATOR_UI_CONFIG=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
     --with-ethercat-install|--enable-ethercat-install)
@@ -484,12 +416,6 @@ while [ $# -gt 0 ]; do
     --host-config)       HOST_CONFIG_INPUT="${2:-}"; shift 2 ;;
     --dockerhub-secret-file)
                          DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
-    --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
-    --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
-    --phantom-models-tar)
-                         PHANTOM_MODELS_TAR="${2:-}"; shift 2 ;;
-    --phantom-policies-tar)
-                         PHANTOM_POLICIES_TAR="${2:-}"; shift 2 ;;
 
     # Behavior modifiers.
     -y|--yes)            YES=1; shift ;;
@@ -663,16 +589,13 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_OPERATOR_UI_CONFIG=1
   SKIP_LOCOMOTION_CONFIG=1
   SKIP_SONIC_CONFIG=1
-  SKIP_PSI_CONFIG=1
   SKIP_ECAT_INTERFACE=1
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
-  SKIP_LOAD_IMAGE_TARS=1
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
-  SKIP_VALIDATE=1
   SKIP_INSTALL_DMA_ETHERCAT=1
   # Pre-phases are off by default in selected-phases mode: the
   # operator asked for ONE thing and shouldn't get a fleet-wide pod
@@ -691,17 +614,14 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
       locomotion-config) SKIP_LOCOMOTION_CONFIG=0 ;;
       sonic-config)      SKIP_SONIC_CONFIG=0 ;;
-      psi-config)        SKIP_PSI_CONFIG=0 ;;
       ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
-      load-image-tars)   SKIP_LOAD_IMAGE_TARS=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
-      validate)          SKIP_VALIDATE=0 ;;
     esac
   done
   unset _p
@@ -716,7 +636,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface|load-image-tars) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -992,7 +912,6 @@ WARNING: --reset will destroy the running k0s cluster and all workload state:
 
 Preserved (k0s reset does NOT touch these):
   - /var/lib/k0s-data/{mongodb,redis,postgres}/  StatefulSet hostPath PVs
-  - /var/lib/registry/                            registry hostPath PV
   - /var/lib/recordings/                          dma-video hostPath PV (if used)
 
 EOF
@@ -1207,12 +1126,12 @@ preflight() {
     fail "disk: ${free_gb}G free on / (recommend ≥50G for k0s + images)"
   fi
 
-  # Port checks: if a non-cluster process holds 6443/9443/5443, fail.
-  for port in 6443 9443 5443; do
+  # Port checks: if a non-cluster process holds 6443/9443, fail.
+  for port in 6443 9443; do
     proc=$(ss -tlnp 2>/dev/null | awk -v port=":$port" '$4 ~ port"$" { print $NF; exit }')
     if [ -z "$proc" ]; then
       pass "port $port: free"
-    elif printf '%s' "$proc" | grep -qE 'k0s|kube|registry|containerd|kubelet|registry:2'; then
+    elif printf '%s' "$proc" | grep -qE 'k0s|kube|containerd|kubelet'; then
       skip "port $port: held by $proc (expected on a bootstrapped host)"
     else
       fail "port $port: held by $proc"
@@ -1231,9 +1150,10 @@ deps() {
   # docker.io vs docker-ce: Ubuntu's `docker.io` and Docker Inc.'s
   # `docker-ce` (which pulls `containerd.io`) are mutually exclusive —
   # apt refuses to coinstall them because their containerd packages
-  # conflict. The bootstrap only needs the `docker` binary (for
-  # prime-registry-cache.sh's pull/tag/push), and either provider
-  # gives us that. So: detect docker by binary, not package name.
+  # conflict. The bootstrap only needs the `docker` binary (for dev
+  # helpers like positronic.sh push-image / phantom-models build that
+  # push to DockerHub), and either provider gives us that. So: detect
+  # docker by binary, not package name.
   if command -v docker >/dev/null 2>&1; then
     skip "docker already installed ($(command -v docker)) — not adding docker.io"
   else
@@ -1294,27 +1214,14 @@ deps() {
     fi
   fi
 
-  # k0s — PINNED for deterministic bringup. get.k0s.sh installs the
-  # LATEST release by default, which silently jumped fresh robots from
-  # containerd 1.7.x (k0s 1.35.x) to containerd 2.x (k0s 1.36+). The two
-  # use different containerd config formats, so the unpinned jump broke
-  # the containerd drop-ins (configure-k0s-*). Pin so every fresh robot
-  # lands on the same validated version; bump deliberately with
-  # K0S_VERSION=v1.x.y+k0s.0 (and re-test the containerd config format).
-  K0S_VERSION="${K0S_VERSION:-v1.35.4+k0s.0}"
   if command -v k0s >/dev/null 2>&1; then
-    installed_k0s="$(k0s version 2>/dev/null | head -1)"
-    if [ "$installed_k0s" = "$K0S_VERSION" ]; then
-      skip "k0s already in PATH ($installed_k0s, matches pin)"
-    else
-      skip "k0s already in PATH ($installed_k0s) — differs from pin $K0S_VERSION; not reinstalling ('k0s reset' then re-run to change)"
-    fi
+    skip "k0s already in PATH ($(k0s version 2>/dev/null | head -1))"
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  curl -sSLf https://get.k0s.sh | K0S_VERSION=$K0S_VERSION sh"
-  elif curl -sSLf https://get.k0s.sh | K0S_VERSION="$K0S_VERSION" sh >/dev/null 2>&1; then
-    pass "k0s installed ($K0S_VERSION)"
+    info "DRY-RUN  curl -sSLf https://get.k0s.sh | sh"
+  elif curl -sSLf https://get.k0s.sh | sh >/dev/null 2>&1; then
+    pass "k0s installed"
   else
-    fail "k0s install failed (curl https://get.k0s.sh | K0S_VERSION=$K0S_VERSION sh)"
+    fail "k0s install failed (curl https://get.k0s.sh | sh)"
   fi
 
   # terraform — fixed minor version, matched binary by host arch. The
@@ -1346,13 +1253,6 @@ deps() {
 
 # ---- phase 4: host config -----------------------------------------------
 
-containerd_mirror_already_configured() {
-  local f=/etc/k0s/containerd.d/hosts/docker.io/hosts.toml
-  [ -r "$f" ] \
-    && grep -q 'host."http://localhost:5443"' "$f" \
-    && grep -q 'host."https://registry-1.docker.io"' "$f"
-}
-
 nvidia_runtime_already_configured() {
   # configure-k0s-nvidia-runtime.sh writes a runtime drop-in. Detect by
   # looking for any nvidia handler entry in containerd's resolved config.
@@ -1364,19 +1264,6 @@ nvidia_runtime_already_configured() {
 host_config() {
   if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
   phase "phase 4: host config"
-
-  # Always run — the script is internally idempotent (hosts.toml insert
-  # is no-op when already present, daemon.json merge is no-op when the
-  # entry exists). A previous skip-on-hosts.toml-only check could leave
-  # /etc/docker/daemon.json without the insecure-registries entry on
-  # hosts where containerd was set up but docker wasn't.
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $REPO_ROOT/scripts/configure-k0s-containerd-mirror.sh"
-  elif bash "$REPO_ROOT/scripts/configure-k0s-containerd-mirror.sh"; then
-    pass "containerd mirror configured (idempotent re-run)"
-  else
-    fail "configure-k0s-containerd-mirror.sh"
-  fi
 
   # OAK USB power — install udev rule disabling autosuspend for VID
   # 03e7 so libusb's claim+rebind during DepthAI firmware boot doesn't
@@ -2672,124 +2559,6 @@ MOTION_RAMP_SECS=1.0"
   fi
 }
 
-# ---- phase 8b: psi-config (phantom-psi-config ConfigMap) ----------
-
-# Per-host phantom-psi options file. Holds a ConfigMap manifest the four
-# phantom-psi containers (psi0-vla, bridge, walking, psi0-state) read via envFrom. Same
-# host-resident, ArgoCD-unmanaged, --reset-preserved lifecycle as the sonic CM.
-PSI_FILE="${PSI_FILE:-/etc/phantomos/phantom-psi-config.yaml}"
-PSI_NS="psi"
-PSI_CM_NAME="phantom-psi-config"
-
-_write_psi_file() {
-  # Render a single multi-line KEY=VALUE blob (as produced by the host-config
-  # helper's `get-phantom-psi-config-kv` subcommand) into one YAML-quoted
-  # `KEY: "VALUE"` entry per non-empty line under the ConfigMap's data: section.
-  local kv_text="${1?_write_psi_file: kv_text required}"
-  mkdir -p "$(dirname "$PSI_FILE")"
-  {
-    cat <<EOF
-# Generated by scripts/bootstrap-robot.sh — do not hand-edit.
-# Re-run bootstrap with --psi-config to change these values.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: $PSI_CM_NAME
-  namespace: $PSI_NS
-data:
-EOF
-    local line key value
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      key="${line%%=*}"
-      value="${line#*=}"
-      printf '  %s: "%s"\n' "$key" "$value"
-    done <<<"$kv_text"
-  } > "$PSI_FILE"
-  chmod 0644 "$PSI_FILE"
-}
-
-psi_config() {
-  if [ "${SKIP_PSI_CONFIG:-0}" = 1 ]; then
-    phase "phase 8b: psi-config  (skipped)"
-    return
-  fi
-  phase "phase 8b: psi-config (phantom-psi-config ConfigMap)"
-
-  local hc="$HOST_CONFIG_FILE"
-  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
-    hc="$HOST_CONFIG_INPUT"
-  fi
-
-  local kv_text=""
-  if [ -r "$hc" ]; then
-    kv_text=$(python3 "$HOST_CONFIG_HELPER" "$hc" get-phantom-psi-config-kv 2>/dev/null || true)
-  fi
-  if [ -z "$kv_text" ]; then
-    # Helper failed (no host-config, validation error, etc.) — fall back to the
-    # documented defaults so the pod still starts. Keep in sync with DEFAULT_PSI
-    # in scripts/lib/host-config.py and the manifest's shell-defaults.
-    kv_text="PSI0_RUN_DIR=/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333
-PSI0_CKPT_STEP=120000
-PSI0_CAMERA_ID=0
-PSI0_STATE_QUEUE=psi0_state_j24
-PSI0_ACTION_QUEUE=psi0_actions_j24
-PSI0_INSTRUCTION=Grasp and lift part.
-ROS_DOMAIN_ID=43
-PSI0_BRIDGE_RATE_HZ=50
-PSI0_ENABLE_GAIT=0
-PSI0_ENABLE_HEIGHT=0
-PSI0_ENABLE_YAW=0
-POLICY_ONNX_PATH=/models/walking/policy.onnx
-PSI0_LOCO_HEALTH_PATH=/dev/shm/psi0_loco.health
-PSI0_LOCO_MIRROR_HZ=5"
-  fi
-
-  local run_line run_dir
-  run_line=$(printf '%s\n' "$kv_text" | grep -m1 '^PSI0_RUN_DIR=' || true)
-  run_dir="${run_line#PSI0_RUN_DIR=}"
-
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  write $PSI_FILE  PSI0_RUN_DIR=$run_dir"
-    info "DRY-RUN  kubectl apply -f $PSI_FILE"
-    return
-  fi
-
-  if [ ${#KUBECTL[@]} -eq 0 ]; then
-    fail "no kubectl/k0s available — cannot apply psi ConfigMap"
-    return
-  fi
-
-  if ! "${KUBECTL[@]}" get ns "$PSI_NS" >/dev/null 2>&1; then
-    if ! "${KUBECTL[@]}" create ns "$PSI_NS" >/dev/null; then
-      fail "could not create ns/$PSI_NS"
-      return
-    fi
-    info "created ns/$PSI_NS"
-  fi
-
-  _write_psi_file "$kv_text"
-  pass "wrote $PSI_FILE  PSI0_RUN_DIR=$run_dir"
-
-  if ! "${KUBECTL[@]}" apply -f "$PSI_FILE" >/dev/null; then
-    fail "kubectl apply -f $PSI_FILE"
-    return
-  fi
-  pass "$PSI_CM_NAME applied to $PSI_NS"
-
-  # If the DaemonSet is already running, restart it so the new options take
-  # effect. envFrom does NOT auto-roll on CM updates.
-  if "${KUBECTL[@]}" -n "$PSI_NS" get ds phantom-psi >/dev/null 2>&1; then
-    if "${KUBECTL[@]}" -n "$PSI_NS" rollout restart ds/phantom-psi >/dev/null; then
-      pass "rolled out phantom-psi DaemonSet to pick up new options"
-    else
-      fail "rollout restart ds/phantom-psi"
-    fi
-  else
-    info "ds/phantom-psi not present yet — gitops phase will create it with the new CM in scope"
-  fi
-}
-
 # ---- pre-phase: cpu-isolation first-bringup prompt -------------------
 
 # On first bringup the cpuIsolation: block doesn't exist in
@@ -3731,11 +3500,9 @@ install_dma_ethercat() {
     info "DRY-RUN  render $DMA_ETHERCAT_TEMPLATE -> $DMA_ETHERCAT_RENDERED  (image=$image_ref)"
     info "DRY-RUN  kubectl create ns phantom (if missing)"
     info "DRY-RUN  kubectl -n phantom delete job dma-ethercat-installer --ignore-not-found"
-    info "DRY-RUN  wait node Ready + coredns rollout (CNI gate before applying the Job)"
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
-    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer (10min budget, transient-tolerant)"
+    info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
-    info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb  (if baked in; non-fatal)"
     info "DRY-RUN  resolve+write DMA_CONFIG, INTERFACE, DMA_CPU_AFFINITY, DMA_RT_CPU into $DMA_ETHERCAT_ENV_FILE"
     info "DRY-RUN  systemctl enable --now dma-ethercat.service"
     return
@@ -3776,23 +3543,6 @@ install_dma_ethercat() {
     skip "no prior installer Job to remove"
   fi
 
-  # Gate on cluster networking before applying the Job. On a fresh bootstrap
-  # the node/CNI IPAM can briefly lag; the installer pod's first sandbox then
-  # fails with "no IP ranges specified" and the Job is delayed past the wait
-  # below. Waiting for the node Ready + coredns rollout (which proves pods can
-  # get IPs) lets the pod schedule cleanly on its first try.
-  note "waiting for node + CNI networking to be Ready..."
-  if "${KUBECTL[@]}" wait --for=condition=Ready node --all --timeout=180s >/dev/null 2>&1; then
-    pass "node Ready"
-  else
-    info "node not Ready within 180s — proceeding; the Job wait below tolerates transient CNI"
-  fi
-  if "${KUBECTL[@]}" -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null 2>&1; then
-    pass "CNI networking Ready (coredns rolled out)"
-  else
-    info "coredns not Available within 120s — proceeding; transient CNI is tolerated below"
-  fi
-
   note "applying installer manifest..."
   if "${KUBECTL[@]}" apply -f "$DMA_ETHERCAT_RENDERED" >/dev/null; then
     pass "installer Job applied"
@@ -3801,42 +3551,16 @@ install_dma_ethercat() {
     ethercat_die "could not apply installer Job — check rendered manifest at $DMA_ETHERCAT_RENDERED"
   fi
 
-  # Wait for the installer Job to complete. A `kubectl wait` timeout is NOT a
-  # failure — the Job may still be retrying a transient (e.g. an early CNI
-  # "no IP ranges" sandbox error that clears on the pod's next attempt). So
-  # poll in 60s slices up to a 10min budget: succeed on the `complete`
-  # condition, bail early ONLY on a real `failed` condition (backoffLimit
-  # exhausted), otherwise keep waiting.
-  note "waiting up to 10min for installer Job to reach Complete..."
-  local _job_done=0 _job_failed=0 _waited=0
-  while [ "$_waited" -lt 600 ]; do
-    if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=60s \
-         job/dma-ethercat-installer >/dev/null 2>&1; then
-      _job_done=1; break
-    fi
-    if "${KUBECTL[@]}" -n phantom wait --for=condition=failed --timeout=1s \
-         job/dma-ethercat-installer >/dev/null 2>&1; then
-      _job_failed=1; break
-    fi
-    _waited=$((_waited + 60))
-    info "installer Job still running (${_waited}s elapsed of 600s budget)..."
-  done
-  if [ "$_job_done" = 1 ]; then
+  note "waiting up to 5min for installer Job to reach Complete..."
+  if "${KUBECTL[@]}" -n phantom wait --for=condition=complete --timeout=300s job/dma-ethercat-installer >/dev/null 2>&1; then
     pass "installer Job Complete"
   else
     local jstat
     jstat=$("${KUBECTL[@]}" -n phantom get job dma-ethercat-installer -o jsonpath='{.status.conditions[*].type}={.status.conditions[*].status}' 2>/dev/null || true)
-    if [ "$_job_failed" = 1 ]; then
-      fail "installer Job FAILED (status: ${jstat:-unknown})"
-    else
-      fail "installer Job did not Complete within 10min (status: ${jstat:-unknown})"
-    fi
-    info "Job events:"
-    "${KUBECTL[@]}" -n phantom describe job dma-ethercat-installer 2>&1 \
-      | sed -n '/Events:/,$p' | sed 's/^/      /' || true
+    fail "installer Job did not Complete in 5min (status: ${jstat:-unknown})"
     info "pod logs:"
     "${KUBECTL[@]}" -n phantom logs -l app=dma-ethercat-installer --tail=50 2>&1 | sed 's/^/      /' || true
-    ethercat_die "installer Job did not complete — check the events/logs above (CNI sandbox, image pull, or the Job's cp step)"
+    ethercat_die "installer Job never reached Complete — likely image pull (check dockerhub-creds in phantom ns) or wrong arch tag in host-config images"
   fi
 
   # dpkg -i. Glob match: image bakes one .deb per arch — exactly one
@@ -3854,24 +3578,6 @@ install_dma_ethercat() {
   else
     fail "dpkg -i $deb"
     ethercat_die "dpkg -i failed — check above output for missing dependencies or conflicting packages"
-  fi
-
-  # mk2-debug-tui: optional debug TUI baked into the same image (arm64
-  # only — see the dma-ethercat image's ci/fetch_mk2_debug_tui.sh and the
-  # installer Job's best-effort copy). NON-FATAL by design: it's a debug
-  # tool, not part of the realtime control path, so a missing/failed
-  # install must never ethercat_die and wedge the fleet bringup.
-  local tui_deb
-  tui_deb=$(ls -1t /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb 2>/dev/null | head -1 || true)
-  if [ -z "$tui_deb" ]; then
-    info "no mk2-debug-tui .deb baked into image — skipping (expected on amd64)"
-  else
-    note "installing mk2-debug-tui: $(basename "$tui_deb")"
-    if dpkg -i "$tui_deb"; then
-      pass "dpkg -i $(basename "$tui_deb")"
-    else
-      warn "dpkg -i $(basename "$tui_deb") failed — continuing (debug tool, non-fatal)"
-    fi
   fi
 
   # Resolve DMA_CONFIG and pin it in /etc/dma/dma-ethercat.env. The .deb
@@ -4943,125 +4649,6 @@ PY
   # place. The validate phase confirms Healthy.
 }
 
-# ---- phase 14b: load-image-tars (optional, between gitops + overrides) -
-#
-# Load + push prebuilt phantom-models / phantom-policies image tarballs
-# into the in-cluster localhost:5443 registry, then wire the loaded tag
-# into host-config.yaml's images: block. The registry op itself lives in
-# scripts/load-image-tars.sh (pure, off-robot-usable); this phase adds
-# the registry-readiness wait, the host-config edit, and the interactive
-# prompt. It runs BEFORE image_overrides so the unchanged image_overrides
-# phase injects the new tag into the live Application — no duplicated
-# injection logic here.
-#
-# Trigger: act only on --phantom-models-tar / --phantom-policies-tar in a
-# non-interactive run (-y, selected-phases mode, or no TTY). On an
-# interactive full bootstrap, prompt for any path not pre-filled by a
-# flag. If neither resolves to a path, this is a no-op.
-load_image_tars() {
-  if [ "$SKIP_LOAD_IMAGE_TARS" = 1 ]; then phase "phase 14b: load-image-tars  (skipped)"; return; fi
-  phase "phase 14b: load-image-tars (load + push prebuilt model/policy tarballs)"
-
-  # Resolve the two tar paths. Flags win; on an interactive TTY (not -y,
-  # stdin is a terminal) prompt for any path a flag did not provide.
-  local models_tar="$PHANTOM_MODELS_TAR"
-  local policies_tar="$PHANTOM_POLICIES_TAR"
-  if [ "$YES" = 0 ] && [ -t 0 ]; then
-    local reply
-    if [ -z "$models_tar" ]; then
-      printf 'phantom-models tarball path? [Enter to skip] '
-      read -r reply || true
-      models_tar="$reply"
-    fi
-    if [ -z "$policies_tar" ]; then
-      printf 'phantom-policies tarball path? [Enter to skip] '
-      read -r reply || true
-      policies_tar="$reply"
-    fi
-  fi
-
-  # Optional no-op: nothing to load.
-  if [ -z "$models_tar" ] && [ -z "$policies_tar" ]; then
-    info "no tarballs provided — skipping"
-    return
-  fi
-
-  # Wait for the in-cluster registry Deployment to become Available before
-  # pushing. Soft: kubectl absent or the Deployment never coming up is a
-  # skip-with-guidance, NOT a bootstrap failure (mirrors
-  # validate-local-registry.sh's wait_for_registry).
-  local reg_ns="registry" reg_deploy="k0s-registry" reg_wait="120"
-  if [ "${#KUBECTL[@]}" -eq 0 ]; then
-    skip "kubectl unavailable — cannot confirm registry is up; re-run --load-image-tars once the cluster is reachable"
-    return
-  fi
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  ${KUBECTL[*]} -n $reg_ns wait --for=condition=Available deploy/$reg_deploy --timeout=${reg_wait}s"
-  else
-    info "waiting up to ${reg_wait}s for deploy/$reg_deploy in $reg_ns to become Available..."
-    if ! "${KUBECTL[@]}" -n "$reg_ns" wait \
-         --for=condition=Available "deploy/$reg_deploy" \
-         "--timeout=${reg_wait}s" >/dev/null 2>&1; then
-      skip "deploy/$reg_deploy not Available within ${reg_wait}s — registry down; re-run --load-image-tars once it is up"
-      return
-    fi
-    info "deploy/$reg_deploy Available"
-  fi
-
-  local loader="$REPO_ROOT/scripts/load-image-tars.sh"
-  if [ ! -f "$loader" ]; then
-    fail "scripts/load-image-tars.sh not found"; return
-  fi
-
-  local edited=0
-  # (container, tarball-path) pairs. The container name doubles as the
-  # localhost:5443/<container> repo the loader pushes, so we match the
-  # pushed ref by that prefix.
-  local pair container path out ref
-  for pair in "phantom-models|$models_tar" "phantom-policies|$policies_tar"; do
-    container="${pair%%|*}"
-    path="${pair#*|}"
-    [ -z "$path" ] && continue
-
-    if [ "$DRY_RUN" = 1 ]; then
-      info "DRY-RUN  bash $loader $path"
-      info "DRY-RUN  python3 $HOST_CONFIG_HELPER $HOST_CONFIG_FILE set-image $container <localhost:5443/$container:TAG-from-tar> (ref unknown in dry-run)"
-      continue
-    fi
-
-    info "loading + pushing $container from $path"
-    # load-image-tars.sh prints `PUSHED localhost:5443/<name>:<tag>` lines
-    # to stdout (human logs go to stderr); exit code = failure count.
-    if ! out="$(bash "$loader" "$path")"; then
-      fail "$container tarball load/push failed"
-      continue
-    fi
-    ref="$(printf '%s\n' "$out" \
-            | grep '^PUSHED ' \
-            | awk '{print $2}' \
-            | grep "^localhost:5443/$container:" \
-            | head -1)"
-    if [ -z "$ref" ]; then
-      fail "$container tarball load/push failed"
-      continue
-    fi
-    if python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" set-image "$container" "$ref"; then
-      edited=1
-      pass "$container -> $ref (host-config updated)"
-    else
-      fail "$container pushed as $ref but host-config set-image failed"
-    fi
-  done
-
-  # In a selected-phase run (--load-image-tars alone, implies -y) the
-  # image-overrides phase won't run, so the host-config edit isn't live
-  # yet. Tell the operator how to apply it. In a full bootstrap
-  # image-overrides runs next and picks it up automatically.
-  if [ "$edited" = 1 ] && [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then
-    info "host-config updated; run --image-overrides to apply (automatic in a full bootstrap)"
-  fi
-}
-
 # ---- phase 15: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
@@ -5160,7 +4747,7 @@ for n in sorted(seen):
 
 # Echo the stack name that owns the given image reference, or empty
 # if no enabled stack contains it. Image refs match by full registry/path
-# (e.g. "localhost:5443/positronic-control" or
+# (e.g. "foundationbot/positronic-control" or
 # "foundationbot/argus.operator-ui").
 _stack_for_image() {
   local needle="${1:?image required}"
@@ -5818,86 +5405,6 @@ argocd_admin() {
   fi
 }
 
-# ---- phase 17: setup-positronic (optional) --------------------------------
-
-setup_positronic() {
-  if [ "$SETUP_POSITRONIC" = 0 ]; then return; fi
-  phase "phase 17: setup-positronic"
-
-  if [ -z "$POSITRONIC_IMAGE" ]; then
-    fail "--setup-positronic requires --positronic-image <image>"
-    return
-  fi
-
-  local script="$REPO_ROOT/scripts/positronic.sh"
-  if [ ! -f "$script" ]; then
-    fail "scripts/positronic.sh not found"; return
-  fi
-
-  # Push the positronic-control image to the local registry.
-  info "pushing $POSITRONIC_IMAGE via positronic.sh"
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $script --robot $ROBOT push-image $POSITRONIC_IMAGE --no-redeploy"
-  else
-    if bash "$script" --robot "$ROBOT" push-image "$POSITRONIC_IMAGE" --no-redeploy; then
-      pass "positronic-control image pushed"
-    else
-      fail "positronic-control image push failed"
-    fi
-  fi
-
-  # Build phantom-models (interactive by default; --all for non-interactive).
-  local build_script="$REPO_ROOT/scripts/phantom-models/build.py"
-  if [ ! -f "$build_script" ]; then
-    fail "scripts/phantom-models/build.py not found"; return
-  fi
-
-  info "building phantom-models image"
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  python3 $build_script --all"
-  else
-    if python3 "$build_script" --all; then
-      pass "phantom-models image built and pushed"
-    else
-      fail "phantom-models build failed"
-    fi
-  fi
-
-  # Redeploy now that both images are in the registry.
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $script --robot $ROBOT redeploy"
-  else
-    if bash "$script" --robot "$ROBOT" redeploy; then
-      pass "positronic-control redeployed"
-    else
-      fail "positronic-control redeploy failed"
-    fi
-  fi
-}
-
-# ---- phase 18: validate --------------------------------------------------
-
-validate() {
-  if [ "$SKIP_VALIDATE" = 1 ]; then phase "phase 18: validate  (skipped)"; return; fi
-  phase "phase 18: validate"
-
-  if [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  bash $REPO_ROOT/scripts/validate-local-registry.sh"
-    return
-  fi
-
-  if [ ! -x "$REPO_ROOT/scripts/validate-local-registry.sh" ]; then
-    skip "scripts/validate-local-registry.sh not found/executable"
-    return
-  fi
-
-  if bash "$REPO_ROOT/scripts/validate-local-registry.sh"; then
-    pass "validate-local-registry: 0 failures"
-  else
-    fail "validate-local-registry: $? failures"
-  fi
-}
-
 # ---- main ---------------------------------------------------------------
 
 print_plan() {
@@ -5946,18 +5453,14 @@ print_plan() {
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
   _step $([ "$SKIP_LOCOMOTION_CONFIG"    = 0 ] && echo 1 || echo 0) "phase  7  locomotion-config"               "--locomotion-config not selected"
   _step $([ "$SKIP_SONIC_CONFIG"         = 0 ] && echo 1 || echo 0) "phase  8  sonic-config"                    "--sonic-config not selected"
-  _step $([ "$SKIP_PSI_CONFIG"           = 0 ] && echo 1 || echo 0) "phase  8b psi-config"                      "--psi-config not selected"
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  9  ecat-interface (gates 10)"       "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
-  _step $([ "$SKIP_LOAD_IMAGE_TARS"      = 0 ] && echo 1 || echo 0) "phase 14b load-image-tars"                 "--load-image-tars not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 15  image-overrides"                 "--image-overrides not selected"
   _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 16  deployments"                     "--deployments not selected"
-  _step "$SETUP_POSITRONIC"                                         "phase 17  setup-positronic"             "--setup-positronic not set"
-  _step $([ "$SKIP_VALIDATE"             = 0 ] && echo 1 || echo 0) "phase 18  validate"                        "--validate not selected"
   printf '\n'
 }
 
@@ -6015,7 +5518,6 @@ seed_pull_secrets  ; guard
 operator_ui_config ; guard
 locomotion_config  ; guard
 sonic_config       ; guard
-psi_config         ; guard
 ensure_cpu_isolation_block ; guard
 ecat_interface     ; guard
 cpu_isolation      ; guard
@@ -6023,11 +5525,8 @@ log_management     ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
 argocd_admin       ; guard
-load_image_tars    ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
-setup_positronic   ; guard
-validate
 
 summary
 exit "$FAIL"

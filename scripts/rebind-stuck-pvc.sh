@@ -46,7 +46,7 @@
 #   -h, --help       this help
 #
 # Companion of:
-#   - scripts/resize-registry-pvc.sh — recreate-dance for the registry PVC
+#   - scripts/reset-deployment.sh — full PV/PVC rebuild (larger scope)
 #   - scripts/diagnose-positronic.sh — pod-level diagnostic
 
 set -u -o pipefail

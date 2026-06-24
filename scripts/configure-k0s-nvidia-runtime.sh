@@ -23,8 +23,6 @@
 #   - /usr/bin/nvidia-container-runtime exists and runs
 #
 # Companion of:
-#   - scripts/configure-k0s-containerd-mirror.sh — registers the
-#     local-registry mirror in containerd.
 #   - manifests/base/runtime-classes/nvidia.yaml — Kubernetes
 #     RuntimeClass that names this handler.
 
@@ -73,41 +71,9 @@ backup() {
   fi
 }
 
-# Determine the containerd config version to emit. containerd 2.x (shipped
-# by k0s >= 1.36) requires config `version = 3` and renamed the CRI plugin
-# (runtimes live under io.containerd.cri.v1.runtime); containerd 1.7.x
-# (k0s 1.35.x) uses `version = 2` and io.containerd.grpc.v1.cri. Emitting
-# the wrong one makes k0s reject the drop-in at pre-flight and crash-loop.
-# Prefer the version k0s already declared in its generated main config
-# (authoritative); fall back to the bundled containerd binary's major.
-containerd_config_version() {
-  local v ctr major
-  if [ -r "${CONTAINERD_CONFIG}" ]; then
-    v="$(grep -oE '^[[:space:]]*version[[:space:]]*=[[:space:]]*[0-9]+' "${CONTAINERD_CONFIG}" 2>/dev/null \
-          | grep -oE '[0-9]+' | head -1)"
-    if [ -n "$v" ]; then printf '%s' "$v"; return; fi
-  fi
-  for ctr in /var/lib/k0s/bin/containerd "$(command -v containerd 2>/dev/null || true)"; do
-    if [ -z "$ctr" ] || [ ! -x "$ctr" ]; then continue; fi
-    major="$("$ctr" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
-              | sed -E 's/^v//; s/\..*//')"
-    if [ -n "$major" ]; then [ "$major" -ge 2 ] && printf '3' || printf '2'; return; fi
-  done
-  printf '2'
-}
-
 # --- 1. Drop-in TOML registering the runtime --------------------------------
 
-CFG_VERSION="$(containerd_config_version)"
-if [ "$CFG_VERSION" = 3 ]; then
-  RUNTIMES_TABLE='[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia]'
-  RUNTIMES_OPTIONS_TABLE='  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia.options]'
-else
-  RUNTIMES_TABLE='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]'
-  RUNTIMES_OPTIONS_TABLE='  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]'
-fi
-
-echo "==> writing ${CONTAINERD_IMPORT} (containerd config version ${CFG_VERSION})"
+echo "==> writing ${CONTAINERD_IMPORT}"
 mkdir -p "$(dirname "${CONTAINERD_IMPORT}")"
 backup "${CONTAINERD_IMPORT}"
 cat > "${CONTAINERD_IMPORT}" <<EOF
@@ -116,14 +82,10 @@ cat > "${CONTAINERD_IMPORT}" <<EOF
 # "nvidia". Pods that set runtimeClassName: nvidia will be started via
 # this runtime, which bind-mounts host driver libraries + Tegra device
 # bits into the container.
-#
-# Format tracks the bundled containerd: version 3 +
-# io.containerd.cri.v1.runtime for containerd 2.x (k0s >= 1.36), or
-# version 2 + io.containerd.grpc.v1.cri for containerd 1.7.x (k0s 1.35.x).
 
-version = ${CFG_VERSION}
+version = 2
 
-${RUNTIMES_TABLE}
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
   runtime_type = "io.containerd.runc.v2"
   privileged_without_host_devices = false
   # Don't set SystemdCgroup here. k0s's default runc runtime uses
@@ -131,14 +93,15 @@ ${RUNTIMES_TABLE}
   # mismatch with the kubelet (which provides cgroupfs paths) and
   # the pod fails sandbox creation with "expected cgroupsPath to be
   # of format slice:prefix:name". Inherit the cluster default.
-${RUNTIMES_OPTIONS_TABLE}
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
     BinaryName = "${NVIDIA_RUNTIME}"
 EOF
 
 # --- 2. Confirm imports line is present in the main containerd config -----
-# configure-k0s-containerd-mirror.sh already adds this; re-adding is a no-op
-# if it's there. The Python edit below does nothing if the imports line
-# already exists and references our directory.
+# This script owns the imports line into /etc/k0s/containerd.toml so the
+# drop-ins under /etc/k0s/containerd.d/ are picked up. The Python edit
+# below is idempotent: it does nothing if the imports line already exists
+# and references our directory.
 
 if [ ! -e "${CONTAINERD_CONFIG}" ]; then
   echo "  ${CONTAINERD_CONFIG} not found — k0s may not have written it yet." >&2

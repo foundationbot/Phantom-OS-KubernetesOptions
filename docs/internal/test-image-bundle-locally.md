@@ -1,7 +1,17 @@
 # Test plan — bundle local images and re-bringup mk09
 
-End-to-end smoke test for the
-`docs/image-flow-and-registry-bootstrap.md` fix path on the current
+> **HISTORICAL.** This test plan predates the removal of the on-robot
+> local container registry. The `localhost:5443` manifest refs, the
+> `k0s-registry` pod, and the containerd→`localhost:5443` mirror it
+> exercises no longer exist — positronic-control and phantom-models now
+> use `foundationbot/positronic-control` / `foundationbot/phantom-models`
+> manifest refs and pull from DockerHub (or the bundled local image
+> store) like every other image. The `image-flow-and-registry-bootstrap.md`
+> doc it references has also been deleted. Read the `k0s ctr ... images
+> import` mechanics as still-valid; treat every `localhost:5443` /
+> registry-pod mention as obsolete.
+
+End-to-end smoke test for the bundled-image import path on the current
 host (mk09, amd64). Two images are already in the local docker
 daemon and we'll route them into containerd's local store, then
 re-run the wizard + bootstrap with real tags so the cluster comes
@@ -102,8 +112,7 @@ host-config:
 | `operator-ui image` | **press Enter** — default is the bundled `:qa` (auto-detected from `/var/lib/k0s/images/foundationbot-argus.operator-ui_qa.tar`) |
 | `dma-ethercat image` | accept default `foundationbot/dma-ethercat:main-latest` |
 
-Note: with the section A/B fix from
-`docs/image-flow-and-registry-bootstrap.md` in place, the wizard
+Note: with the section A/B wizard fix in place, the wizard
 now (a) auto-clears any seed entries that still carry a
 `REPLACE-WITH-*` placeholder tag — you'll see a `warning ... clearing
 — re-prompt with canonical default` line on stderr — and (b) the
