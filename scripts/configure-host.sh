@@ -170,6 +170,24 @@ ask() {
   local prompt="$1"; local default="${2:-}"; local help="${3:-}"; local validator="${4:-}"
   local input value
 
+  # Prompt only for fields we can't already fill. If the seed/template (or a
+  # built-in default) gives a non-empty value that passes its validator, use
+  # it silently — so seeding from a template or an existing host-config only
+  # asks for the genuinely-missing per-host fields (robot id, AI PC URL, NIC
+  # MAC, dma config, ...). A placeholder left in a template (e.g. a bogus MAC)
+  # fails its validator and is treated as missing -> prompted.
+  if [ -n "$default" ] && { [ -z "$validator" ] || "$validator" "$default" 2>/dev/null; }; then
+    printf '  %s%s%s: %s%s%s\n' "$C_CYAN" "$prompt" "$C_RESET" "$C_DIM" "$default" "$C_RESET" >&2
+    printf '%s' "$default"
+    return 0
+  fi
+
+  # Value missing or invalid. --yes can't ask, so abort with a clear message.
+  if [ "$YES" = 1 ]; then
+    err "--yes: '$prompt' has no usable value (default: '${default:-<empty>}'); aborting"
+    exit 1
+  fi
+
   while :; do
     if [ -n "$default" ]; then
       printf '  %s%s%s [%s]: ' "$C_CYAN" "$prompt" "$C_RESET" "$default" >&2
@@ -177,12 +195,7 @@ ask() {
       printf '  %s%s%s: ' "$C_CYAN" "$prompt" "$C_RESET" >&2
     fi
 
-    if [ "$YES" = 1 ]; then
-      input=""
-      printf '%s\n' "$default" >&2
-    else
-      IFS= read -r input || input=""
-    fi
+    IFS= read -r input || input=""
 
     if [ "$input" = "?" ] && [ -n "$help" ]; then
       printf '%s%s%s\n' "$C_DIM" "$help" "$C_RESET" >&2
@@ -191,16 +204,8 @@ ask() {
 
     value="${input:-$default}"
 
-    if [ -n "$validator" ]; then
-      if ! "$validator" "$value"; then
-        # In --yes mode there's no way to recover from a bad default,
-        # so exit instead of looping forever on the same invalid value.
-        if [ "$YES" = 1 ]; then
-          err "--yes: default $value failed validation; aborting"
-          exit 1
-        fi
-        continue
-      fi
+    if [ -n "$validator" ] && ! "$validator" "$value"; then
+      continue
     fi
 
     printf '%s' "$value"
@@ -1527,6 +1532,43 @@ tmp="$(mktemp)"
     printf '  # %s\n' "$nl_desc"
     printf "  %s: '%s'\n" "$nl_key" "$nl_value"
   done < <(python3 "$HELPER" /dev/null get-node-label-defaults)
+
+  # cpuIsolation: carry the seed/template block through verbatim so the
+  # per-host CPU layout (partitions/cpus, dmaRtCpu, irqCore) survives a
+  # re-config from a template — bootstrap then sees the block present and
+  # does NOT re-prompt for the cores. The NIC selector is carried too;
+  # bootstrap's ecat-interface phase re-resolves the NIC and its picker
+  # fires when the carried MAC doesn't match this robot. dmaEthercat and
+  # phantomPsi are intentionally NOT carried (dma config is prompted by
+  # bootstrap's phase-12 picker). Emits nothing when the seed has no
+  # cpuIsolation block (e.g. a fresh run off _template) — bootstrap then
+  # prompts to create it, as before.
+  if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
+    python3 - "$seed_path" <<'PY'
+import sys, re, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    cfg = {}
+ci = cfg.get("cpuIsolation") if isinstance(cfg, dict) else None
+if isinstance(ci, dict) and ci:
+    # Drop a NIC selector whose MAC is a placeholder (not a real MAC) and
+    # has no pci/driver: it would fail validation, and we WANT bootstrap's
+    # ecat-interface picker to prompt for this robot's NIC. A real selector
+    # (valid MAC, or pci/driver) is kept and carried over (same-robot re-run).
+    nic = ci.get("nic")
+    if isinstance(nic, dict) and isinstance(nic.get("selector"), dict):
+        sel = nic["selector"]
+        mac = sel.get("mac")
+        mac_ok = isinstance(mac, str) and re.match(
+            r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", mac or "")
+        if not (mac_ok or sel.get("pci") or sel.get("driver")):
+            nic.pop("selector", None)
+    sys.stdout.write(
+        yaml.safe_dump({"cpuIsolation": ci}, default_flow_style=False, sort_keys=False)
+    )
+PY
+  fi
 } > "$tmp"
 
 heading "review"
@@ -1559,6 +1601,12 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 install -m 0644 "$tmp" "$OUTPUT_FILE"
 ok "wrote $OUTPUT_FILE"
 
-if confirm "Run bootstrap-robot.sh now?" "n"; then
+# Chain into bootstrap. Under --yes, run it unattended too (pass --yes);
+# otherwise confirm (defaulting to yes — bootstrapping is the expected next
+# step) and run it interactively so bootstrap prompts for its own gaps.
+if [ "$YES" = 1 ]; then
+  ok "running bootstrap-robot.sh --yes ..."
+  exec bash "$SCRIPT_DIR/bootstrap-robot.sh" --yes
+elif confirm "Run bootstrap-robot.sh now?" "y"; then
   exec bash "$SCRIPT_DIR/bootstrap-robot.sh"
 fi
