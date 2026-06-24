@@ -21,6 +21,7 @@ Usage:
   host-config.py <path> get-phantom-locomotion-policy
   host-config.py <path> get-phantom-locomotion-config-kv
   host-config.py <path> get-phantom-sonic-config-kv
+  host-config.py <path> get-phantom-psi-config-kv
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -138,6 +139,15 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-positronic",
      "true",
      "positronic-control Deployment"),
+    ("foundation.bot/has-psi",
+     "false",
+     "phantom-psi DaemonSet (Ψ₀ VLA + loco bridge; mutually exclusive with "
+     "has-sonic, has-locomotion and has-positronic)"),
+    ("foundation.bot/has-psi-dma-walking",
+     "false",
+     "psi0-dma-walking DaemonSet (Ψ₀ Early-fan whole-body policy over the DMA "
+     "plane, spec 013; mutually exclusive with has-sonic, has-locomotion and "
+     "has-positronic — it drives /desired)"),
     ("foundation.bot/has-recorder",
      "true",
      "dma-recorder DaemonSet (dma-streams)"),
@@ -967,6 +977,104 @@ def cmd_get_phantom_sonic_config_kv(cfg: dict) -> int:
     return 0
 
 
+# ── phantom-psi (Ψ₀ VLA → locomotion) ──────────────────────────────────────
+# Per-host knobs for the phantom-psi DaemonSet, rendered into the
+# phantom-psi-config ConfigMap (envFrom'd by all three containers). Keys map
+# host-config camelCase -> the env-var name each container consumes:
+#   - PSI0_RUN_DIR / PSI0_CKPT_STEP / PSI0_CAMERA_ID / PSI0_STATE_QUEUE /
+#     PSI0_ACTION_QUEUE / PSI0_INSTRUCTION thread into the psi0-vla container's
+#     psi0_dma_runner args via the manifest command's "${VAR:-default}" shell-
+#     defaults.
+#   - ROS_DOMAIN_ID / PSI0_ACTION_QUEUE / PSI0_BRIDGE_RATE_HZ /
+#     PSI0_ENABLE_{GAIT,HEIGHT,YAW} are read by the bridge container.
+#   - ROS_DOMAIN_ID / POLICY_ONNX_PATH are read by the walking container.
+#   - ROS_DOMAIN_ID / PSI0_LOCO_HEALTH_PATH / PSI0_LOCO_MIRROR_HZ are read by
+#     the loco-state-mirror container (mirrors the walking FSM + Ψ₀ engage state
+#     to /dev/shm for the host-side deploy dashboard).
+# The loco passthrough flags default OFF (spec-004 AC-7 gating). Defaults
+# mirror the manifest shell-defaults exactly so a bare (or absent) phantomPsi
+# block renders a working ConfigMap.
+DEFAULT_PSI: dict[str, str] = {
+    "runDir":         "/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333",
+    "ckptStep":       "120000",
+    "cameraId":       "0",
+    "stateQueue":     "psi0_state_j24",
+    "actionQueue":    "psi0_actions_j24",
+    "instruction":    "Grasp and lift part.",
+    "rosDomainId":    "43",
+    "bridgeRateHz":   "50",
+    "enableGait":     "0",
+    "enableHeight":   "0",
+    "enableYaw":      "0",
+    "walkingOnnx":    "/models/walking/policy.onnx",
+    "locoHealthPath": "/dev/shm/psi0_loco.health",
+    "locoMirrorHz":   "5",
+    # spec 017 AC-1: "1" lets the DMA walking node own the ENABLE_MOTORS /
+    # DISABLE_MOTORS handshake to DMA.ethercat (REQUIRED on real hardware — else
+    # /desired is pushed into un-enabled motors). "0" = no handshake (sim, or an
+    # external mode-manager owns enable). Default off; a robot opts in.
+    "autoEnableMotors": "0",
+}
+
+PSI_FIELD_TO_ENV: dict[str, str] = {
+    "runDir":         "PSI0_RUN_DIR",
+    "ckptStep":       "PSI0_CKPT_STEP",
+    "cameraId":       "PSI0_CAMERA_ID",
+    "stateQueue":     "PSI0_STATE_QUEUE",
+    "actionQueue":    "PSI0_ACTION_QUEUE",
+    "instruction":    "PSI0_INSTRUCTION",
+    "rosDomainId":    "ROS_DOMAIN_ID",
+    "bridgeRateHz":   "PSI0_BRIDGE_RATE_HZ",
+    "enableGait":     "PSI0_ENABLE_GAIT",
+    "enableHeight":   "PSI0_ENABLE_HEIGHT",
+    "enableYaw":      "PSI0_ENABLE_YAW",
+    "walkingOnnx":    "POLICY_ONNX_PATH",
+    "locoHealthPath": "PSI0_LOCO_HEALTH_PATH",
+    "locoMirrorHz":   "PSI0_LOCO_MIRROR_HZ",
+    "autoEnableMotors": "PSI0_AUTO_ENABLE_MOTORS",
+}
+
+
+def cmd_get_phantom_psi_config_kv(cfg: dict) -> int:
+    """Emit KEY=VALUE lines for the phantom-psi-config ConfigMap.
+
+    Operator overrides from the phantomPsi block are layered on top of
+    DEFAULT_PSI so the pod always has a complete set of knobs. Emitted in the
+    stable order of DEFAULT_PSI so the rendered ConfigMap diffs cleanly when
+    one field changes. ASCII, no shell quoting — bootstrap's psi-config phase
+    drops each line into a YAML-quoted KEY: "VALUE".
+    """
+    block = cfg.get("phantomPsi") or {}
+    if not isinstance(block, dict):
+        print("error: 'phantomPsi' must be a mapping", file=sys.stderr)
+        return 2
+
+    merged: dict[str, object] = dict(DEFAULT_PSI)
+    for k, v in block.items():
+        if k not in DEFAULT_PSI:
+            print(
+                f"error: phantomPsi: unknown field {k!r} (permitted: "
+                f"{sorted(DEFAULT_PSI.keys())})",
+                file=sys.stderr,
+            )
+            return 2
+        if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+            print(
+                f"error: phantomPsi.{k}: must be a scalar (str/int/float), "
+                f"got {type(v).__name__}",
+                file=sys.stderr,
+            )
+            return 2
+        merged[k] = v
+
+    lines = [
+        f"{PSI_FIELD_TO_ENV[field]}={merged[field]}"
+        for field in DEFAULT_PSI.keys()
+    ]
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_get_phantom_locomotion_policy(cfg: dict) -> int:
     """Print phantomLocomotion.policy or the documented default.
     Bootstrap's locomotion-config phase consumes this to render the
@@ -1404,6 +1512,24 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # e.g. ...:teleop-v0.1.0-aarch64
         "stack": "core",
         "manifest_image": "localhost:5443/dma-ghost-wbc-teleop",
+    },
+    "psi0-policy": {
+        # psi0-vla container of the phantom-psi DaemonSet (foundation.bot/has-psi
+        # gated): the Ψ₀ VLA GPU policy. Built on-device from
+        # Psi0-VLA/infra/docker/Dockerfile.policy (MUST be a CUDA-13/sm_110 torch
+        # base for Thor — the Orin igpu base does not run there). Currently a
+        # LOCAL image (k0s containerd, not the fleet registry), so the in-repo
+        # tag is the working default; kustomize rewrites it from
+        # images.psi0-policy. TODO: publish to the registry for multi-robot.
+        "stack": "core",
+        "manifest_image": "psi0-policy",
+    },
+    "phantom-loco": {
+        # bridge + walking containers of the phantom-psi DaemonSet. Local image
+        # (bridge.psi0_loco_bridge + inference.policy_node). Rewritten from
+        # images.phantom-loco. TODO: publish to the registry for multi-robot.
+        "stack": "core",
+        "manifest_image": "phantom-loco",
     },
 }
 
@@ -3100,6 +3226,10 @@ def cmd_validate(cfg: dict) -> int:
             effective_loc = nl.get("foundation.bot/has-locomotion", "false")
             effective_sonic = nl.get("foundation.bot/has-sonic", "false")
             effective_wloco = nl.get("foundation.bot/has-wolverine-loco", "false")
+            effective_psi = nl.get("foundation.bot/has-psi", "false")
+            effective_psi_dma = nl.get(
+                "foundation.bot/has-psi-dma-walking", "false"
+            )
             enabled_drivers = [
                 label
                 for label, eff in (
@@ -3107,6 +3237,8 @@ def cmd_validate(cfg: dict) -> int:
                     ("foundation.bot/has-locomotion", effective_loc),
                     ("foundation.bot/has-sonic", effective_sonic),
                     ("foundation.bot/has-wolverine-loco", effective_wloco),
+                    ("foundation.bot/has-psi", effective_psi),
+                    ("foundation.bot/has-psi-dma-walking", effective_psi_dma),
                 )
                 if eff == "true"
             ]
@@ -3132,9 +3264,10 @@ def cmd_validate(cfg: dict) -> int:
                         "nodeLabels: the robot-driving workloads "
                         "foundation.bot/has-positronic, "
                         "foundation.bot/has-locomotion, "
-                        "foundation.bot/has-sonic and "
-                        "foundation.bot/has-wolverine-loco are mutually "
-                        "exclusive — only one may be \"true\" (got: "
+                        "foundation.bot/has-sonic, "
+                        "foundation.bot/has-wolverine-loco and "
+                        "foundation.bot/has-psi are mutually exclusive — "
+                        "only one may be \"true\" (got: "
                         f"{', '.join(enabled_drivers)})"
                     )
 
@@ -3249,6 +3382,8 @@ def main() -> int:
         return cmd_get_phantom_locomotion_config_kv(cfg)
     if cmd == "get-phantom-sonic-config-kv":
         return cmd_get_phantom_sonic_config_kv(cfg)
+    if cmd == "get-phantom-psi-config-kv":
+        return cmd_get_phantom_psi_config_kv(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":

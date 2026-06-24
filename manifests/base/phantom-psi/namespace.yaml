@@ -1,0 +1,10 @@
+# The psi namespace holds the Ψ₀ VLA workload (phantom-psi). Kept separate
+# from `positronic` (where the body controllers live) because the Ψ₀ stack has
+# its own image/checkpoint lifecycle. Idempotent — safe if the ns was already
+# hand-created during the ch4 bring-up.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: psi
+  labels:
+    app.kubernetes.io/part-of: phantomos

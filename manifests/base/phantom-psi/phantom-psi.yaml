@@ -1,0 +1,319 @@
+# phantom-psi — DaemonSet running the Ψ₀ VLA → locomotion colocation stack.
+# Mirrors phantom-sonic's shape (one pod, gated on a foundation.bot/has-* node
+# label, per-host knobs from an envFrom ConfigMap with manifest shell-defaults).
+# This is the GitOps-managed form of the hand-applied `psi0-loco` Deployment
+# that was brought up on ch4 (see Psi0-VLA/k0sdeployment.md + loco-vla-worklog.md).
+#
+# ── Topology ───────────────────────────────────────────────────────────────
+# Six containers share the host's /dev/shm (the DMA ring buffers) via
+# hostIPC + a /dev/shm hostPath, so the VLA, the bridge, the walking policy,
+# the proprio producer, the operator gamepad, and the loco-state mirror all
+# read/write the same POSIX-shm tensor/video queues (the operator also reads
+# /dev/input):
+#   psi0-vla   — Ψ₀ policy (psi.deploy.psi0_dma_runner) on the GPU. Reads the
+#               egocentric camera ring (/dev/shm/video_*_cam{N}, written by the
+#               dma-video producer) + the proprio state ring, runs the flow
+#               policy, and writes the (Ta,Da) action ring (psi0_actions_j24).
+#   bridge     — bridge.psi0_loco_bridge: reads the action ring and drives the
+#               locomotion command stream at a fixed rate (gait/height/yaw
+#               passthrough gated by the PSI0_ENABLE_* flags — OFF by default,
+#               see spec-004 AC-7).
+#   walking    — inference.policy_node: the lower-body walking ONNX policy.
+#   psi0-state — phantom_sonic.actuals_state_source: bridges the robot DMA
+#               daemon's /actuals + /config into the (1,72) proprio state ring
+#               psi0-vla reads (CPU-only; full notes on the container below).
+#   operator   — bridge.psi0_operator_node: reads the handheld gamepad at
+#               /dev/input/js0 and publishes the walking start/stop +
+#               /phantom/psi0/engage topics (A=stand, X+Y=kill, Y+B/Y/B=Ψ₀).
+#   loco-state-mirror — bridge.psi0_loco_state_mirror: subscribes to
+#               /phantom/policy_state + /phantom/psi0/engage and writes
+#               /dev/shm/psi0_loco.health so the ROS-free host deploy dashboard
+#               can render walking FSM + Ψ₀ engage state.
+# hostNetwork (ROS/DDS + DMA), single GPU on psi0-vla via the nvidia device
+# plugin (nvidia.com/gpu: 1) + runtimeClassName nvidia.
+#
+# ── Images ───────────────────────────────────────────────────────────────
+# psi0-vla runs `psi0-policy` (Psi0-VLA/infra/docker/Dockerfile.policy, built
+# on-device for the Thor — MUST be a CUDA-13 / sm_110 torch base; the Orin
+# 25.08-py3-igpu base does NOT run on Thor, see k0sdeployment.md §0). bridge +
+# walking run `phantom-loco`. Both are currently LOCAL images (built on the
+# robot, imported into k0s containerd) — the in-repo tags below are the
+# working ch4 defaults; per-robot tags are rewritten by Kustomize from
+# host-config.yaml's images.{psi0-policy,phantom-loco} entries (see
+# scripts/lib/host-config.py:CONTAINER_TARGETS). TODO: publish both to the
+# fleet registry so non-ch4 robots can pull them.
+#
+# ── Mutual exclusion ───────────────────────────────────────────────────────
+# foundation.bot/has-psi gates this DaemonSet. psi (via the bridge), SONIC,
+# locomotion, and positronic-control all drive the body, so the host-config
+# validator rejects has-psi together with has-sonic, has-locomotion, or
+# default-on has-positronic. Migrating a robot to psi MUST set
+# has-positronic: "false" (and has-sonic/has-locomotion "false") in nodeLabels.
+# has-psi defaults to "false", so adding this stack to the core kustomization
+# schedules ZERO pods until a robot opts in — no conflict with the hand-applied
+# psi0-loco Deployment, which should be deleted when migrating to has-psi.
+#
+# ── Options ────────────────────────────────────────────────────────────────
+# Per-host knobs (run dir, ckpt step, camera, queue names, instruction, ROS
+# domain, bridge rate, loco enable flags, walking ONNX, loco-state-mirror
+# health path + rate) come from the
+# phantom-psi-config ConfigMap, rendered by bootstrap's psi-config phase from
+# host-config.yaml's phantomPsi block. Each container envFrom's it
+# (optional: true) and psi0-vla's command carries "${VAR:-default}" shell-
+# defaults so the pod still starts before the CM is applied. Same lifecycle as
+# phantom-sonic-config / phantom-locomotion-config.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: phantom-psi
+  namespace: psi
+  labels:
+    app.kubernetes.io/name: phantom-psi
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: phantom-psi
+  # Single GPU: roll the old pod down before the new one comes up so two
+  # psi0-vla containers never contend for the device.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: phantom-psi
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-psi: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostNetwork: true
+      # hostIPC: the bridge/walking dma_ipc channels (/actuals, /desired) use
+      # named POSIX semaphores under /dev/shm; share the host IPC namespace so
+      # they sync with dma_main / DMA.ethercat (same rationale as ik-mk2). The
+      # Ψ₀ video/tensor rings themselves are head-counter polled (no semaphore),
+      # so psi0-vla alone would not need it — but the bridge does.
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: dockerhub-creds
+      # psi0-vla traps SIGTERM and unlinks its action ring on the way down.
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        # ── psi0-vla — Ψ₀ flow policy on the GPU ───────────────────────────
+        - name: psi0-vla
+          image: psi0-policy:thor-cu130
+          imagePullPolicy: IfNotPresent
+          # The image entrypoint sources setup_env.sh (TORCH_CUDA_ARCH_LIST
+          # autodetect, HF/torch caches) then exec's args. We override command
+          # to source it ourselves and exec the DMA runner with shell-defaults
+          # so every knob is env-overridable from the phantom-psi-config CM
+          # (mirrors phantom-sonic's "${VAR:-default}" command pattern).
+          command:
+            - /bin/bash
+            - -lc
+            - >-
+              source /usr/local/bin/setup_env.sh && exec
+              python -m psi.deploy.psi0_dma_runner
+              --run-dir "${PSI0_RUN_DIR:-/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333}"
+              --ckpt-step "${PSI0_CKPT_STEP:-120000}"
+              --camera-id "${PSI0_CAMERA_ID:-0}"
+              --state-queue "${PSI0_STATE_QUEUE:-psi0_state_j24}"
+              --action-queue "${PSI0_ACTION_QUEUE:-psi0_actions_j24}"
+              --instruction "${PSI0_INSTRUCTION:-Grasp and lift part.}"
+          # stdin/tty so an operator can `kubectl exec -it` (or `positronic.sh
+          # psi exec psi0-vla`) to watch the inference cadence.
+          stdin: true
+          tty: true
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          env:
+            # Image contract (not per-host) — kept explicit for clarity.
+            - { name: PSI_ATTN_IMPL, value: "sdpa" }
+            - { name: PSI_HOME,      value: "/models" }
+            - { name: HF_HOME,       value: "/cache/huggingface" }
+          resources:
+            # GPU via the NVIDIA k8s device plugin (no privileged needed).
+            limits:
+              nvidia.com/gpu: 1
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+            - { name: cache,  mountPath: /cache }
+            - { name: dshm,   mountPath: /dev/shm }
+
+        # ── bridge — action ring → locomotion command stream ──────────────
+        - name: bridge
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "bridge.psi0_loco_bridge"]
+          # ROS_DOMAIN_ID / PSI0_ACTION_QUEUE / PSI0_BRIDGE_RATE_HZ /
+          # PSI0_ENABLE_{GAIT,HEIGHT,YAW} come from the CM (envFrom). Do NOT add
+          # them as explicit `env` — that would shadow per-host overrides. The
+          # bootstrap psi-config phase always renders the CM (defaults merged),
+          # so the keys are present even with no phantomPsi block; the enable
+          # flags default OFF (spec-004 AC-7 gating).
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "2", memory: "2Gi" }
+
+        # ── walking — lower-body walking ONNX policy ──────────────────────
+        - name: walking
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "inference.policy_node"]
+          # ROS_DOMAIN_ID + POLICY_ONNX_PATH come from the CM (envFrom).
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+            - { name: dshm,   mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "2", memory: "2Gi" }
+            limits:   { cpu: "4", memory: "4Gi" }
+
+        # ── psi0-state — robot /actuals → Ψ₀ proprio state ring ────────────
+        # Bridges the robot DMA daemon's /actuals + /config (dma_common IPC —
+        # uses named POSIX semaphores under /dev/shm, hence the pod's hostIPC:
+        # true above) into the (1,72) Ψ₀ proprio state ring that psi0-vla reads
+        # (--state-queue). WITHOUT this container psi0-vla runs on a ZERO state
+        # vector and, with require_proprio (the runner's default), safe-stops
+        # after ~5 s and emits no actions. See Psi0-VLA/DEPLOYMENT.md "Proprio".
+        #
+        # Image: the SONIC deploy image (psi0-sonic) — a SUPERSET of psi0-policy
+        # that adds phantom_sonic + phantom_bridge + the Phantom MJCF + mujoco
+        # (HeadPoseFK builds state slots [0:7]) + the dma_common IPC wheel. The
+        # lean psi0-policy image does NOT carry phantom_sonic, so it cannot run
+        # this producer. CPU-only (no nvidia.com/gpu) — it just reads /actuals.
+        #
+        # PREREQS (Psi0-VLA/infra/docker/build-sonic.sh): build psi0-sonic ON THE
+        # THOR *and* drop the dma_common aarch64/cp312 wheel into
+        # infra/docker/wheels/ BEFORE building, then import into k0s containerd —
+        # else actuals_state_source ImportErrors (dma_common) at runtime.
+        - name: psi0-state
+          image: psi0-sonic:thor-cu130
+          imagePullPolicy: IfNotPresent
+          # Same source-env-then-exec + "${VAR:-default}" pattern as psi0-vla so
+          # the run dir + state-queue stay byte-for-byte in lockstep with the
+          # runner and are overridable from the phantom-psi-config CM. --run-dir
+          # MUST match psi0-vla's (the taskspace-mean state fill is read from that
+          # run's meta/stats_psi0.json); --state-queue MUST match psi0-vla's.
+          command:
+            - /bin/bash
+            - -lc
+            - >-
+              source /usr/local/bin/setup_env.sh && exec
+              python -m phantom_sonic.actuals_state_source
+              --state-queue "${PSI0_STATE_QUEUE:-psi0_state_j24}"
+              --run-dir "${PSI0_RUN_DIR:-/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333}"
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+            - { name: dshm,   mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "2", memory: "2Gi" }
+
+        # ── operator — handheld gamepad → walking + Ψ₀ engage ─────────────
+        # Reads the controller at /dev/input/js0 (ASUS ROG Raikiri Pro, xpad
+        # "Generic X-Box pad"; A=0 B=1 X=2 Y=3) and publishes the ROS topics the
+        # rest of the pod already consumes:
+        #   A          → /phantom/start_startup  (STAND: walking OFF→STARTUP→CONTROL)
+        #   X+Y (both) → /phantom/stop_policy     (KILL ALL: CONTROL→SHUTDOWN→OFF, limp)
+        #   Y+B (both) → /phantom/psi0/engage=true  (START Ψ₀ arm tracking)
+        #   Y / B      → /phantom/psi0/engage=false / toggle (DISABLE / PAUSE Ψ₀)
+        # Same phantom-loco image as bridge/walking. privileged: the joystick char
+        # device is otherwise blocked by the device cgroup; hostNetwork already
+        # puts the node on the robot's DDS domain. PSI0_START_ENGAGED (CM) sets the
+        # boot engage default — leave unset/0 so Ψ₀ stays held until START (Y+B).
+        - name: operator
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "bridge.psi0_operator_node"]
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: devinput, mountPath: /dev/input }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
+        # ── loco-state-mirror — walking FSM + Ψ₀ engage → /dev/shm ─────────
+        # The host-side deploy dashboard (Psi0-VLA/scripts/viz/psi0_deploy_
+        # dashboard.py) is ROS-free — it reads /dev/shm only — so it cannot see
+        # the walking control-state or the operator engage latch, which live on
+        # ROS topics inside this pod's DDS domain. This container subscribes to
+        # /phantom/policy_state (Float32 ControlState) + /phantom/psi0/engage
+        # (Bool) and atomically rewrites /dev/shm/psi0_loco.health, which the
+        # dashboard reads (the shared dshm hostPath is how psi0_vla.health + the
+        # rings already cross pod→host). Same phantom-loco image as bridge/
+        # walking/operator; CPU-only; no /dev/input, no GPU, not privileged.
+        #
+        # Like psi0-vla/psi0-state it exposes its CLI options with "${VAR:-…}"
+        # shell-defaults so PSI0_LOCO_HEALTH_PATH / PSI0_LOCO_MIRROR_HZ from the
+        # phantom-psi-config CM (envFrom) override them per host; the image
+        # entrypoint sources the ROS env before exec'ing these args, so a plain
+        # `bash -c` wrapper keeps rclpy importable.
+        - name: loco-state-mirror
+          image: phantom-loco:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - bash
+            - -c
+            - >-
+              exec python -m bridge.psi0_loco_state_mirror
+              --health-path "${PSI0_LOCO_HEALTH_PATH:-/dev/shm/psi0_loco.health}"
+              --write-hz "${PSI0_LOCO_MIRROR_HZ:-5}"
+          envFrom:
+            - configMapRef:
+                name: phantom-psi-config
+                optional: true
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
+      volumes:
+        # Checkpoint run dir(s) + the walking ONNX live on the host (staged at
+        # /var/lib/psi0/models — the same tree the hand-applied psi0-models PV
+        # pointed at). hostPath (not a PVC) matches the DaemonSet posture of the
+        # other robot workloads (phantom-sonic / phantom-locomotion).
+        - name: models
+          hostPath: { path: /var/lib/psi0/models, type: Directory }
+        # Writable HF/torch cache (the image filesystem is read-only at runtime).
+        - name: cache
+          hostPath: { path: /var/lib/psi0/cache, type: DirectoryOrCreate }
+        - name: dshm
+          hostPath: { path: /dev/shm, type: Directory }
+        # Operator gamepad char device(s) for the `operator` container.
+        - name: devinput
+          hostPath: { path: /dev/input, type: Directory }

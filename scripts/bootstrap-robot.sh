@@ -55,6 +55,10 @@
 #   --sonic-config       render+apply the phantom-sonic-config ConfigMap
 #                        (ROS domain, walking policy, encoder mode, ZMQ/web
 #                        ports, ramp; sourced from host-config phantomSonic).
+#   --psi-config         render+apply the phantom-psi-config ConfigMap
+#                        (Ψ₀ run dir/ckpt/camera/queues/instruction, ROS
+#                        domain, bridge rate, loco enable flags, walking
+#                        ONNX; sourced from host-config phantomPsi).
 #   --ecat-interface     resolve the EtherCAT NIC adapter and rename it
 #                        to cpuIsolation.nic.iface via persistent udev
 #                        rules. Driven by cpuIsolation.nic.selector
@@ -97,6 +101,8 @@
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
+#   --skip-operator-ui-config skip the phase 6 operator-ui-config setup
+#                        (operator-ui-pairing CM + vr-web TLS cert)
 #   --skip-ecat-interface skip the phase 9 ecat-interface setup
 #   --skip-cpu-isolation skip the phase 10 cpu-isolation setup
 #   --skip-log-management skip the phase 11 log-management setup
@@ -245,6 +251,11 @@
 #                    host-config's phantomSonic block (ROS domain, walking
 #                    policy, encoder mode, ZMQ/web ports, ramp). Rolls the
 #                    phantom-sonic DaemonSet if present.
+#    8b. psi-config   render+apply the phantom-psi-config ConfigMap from
+#                    host-config's phantomPsi block (Ψ₀ run dir/ckpt/camera/
+#                    queues/instruction, ROS domain, bridge rate, loco enable
+#                    flags, walking ONNX). Rolls the phantom-psi DaemonSet if
+#                    present.
 #    9. ecat-interface (gates phase 10)
 #                    resolve the EtherCAT NIC adapter and rename it to
 #                    cpuIsolation.nic.iface via a persistent udev rule
@@ -360,6 +371,7 @@ SKIP_SEED_PULL_SECRETS=0
 SKIP_OPERATOR_UI_CONFIG=0
 SKIP_LOCOMOTION_CONFIG=0
 SKIP_SONIC_CONFIG=0
+SKIP_PSI_CONFIG=0
 SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_LOAD_IMAGE_TARS=0
@@ -390,12 +402,12 @@ SELECTED_PHASES=()
 # These are the namespaces the bootstrap script itself creates / seeds.
 # Kept in sync with PULL_SECRET_NAMESPACES + the argocd namespace owned
 # by the gitops phase's terraform/helm install.
-WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic)
+WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic psi)
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
 # `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic)
+PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic psi)
 PULL_SECRET_NAME="dockerhub-creds"
 
 # Host-systemd services to stop + disable before bringing up the cluster.
@@ -420,6 +432,7 @@ while [ $# -gt 0 ]; do
     --operator-ui-config) SELECTED_PHASES+=(operator-ui-config); shift ;;
     --locomotion-config) SELECTED_PHASES+=(locomotion-config); shift ;;
     --sonic-config)      SELECTED_PHASES+=(sonic-config); shift ;;
+    --psi-config)        SELECTED_PHASES+=(psi-config); shift ;;
     --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
@@ -454,6 +467,8 @@ while [ $# -gt 0 ]; do
                          SKIP_CPU_ISOLATION=1; shift ;;
     --skip-log-management)
                          SKIP_LOG_MANAGEMENT=1; shift ;;
+    --skip-operator-ui-config)
+                         SKIP_OPERATOR_UI_CONFIG=1; shift ;;
     --skip-ethercat-install)
                          SKIP_INSTALL_DMA_ETHERCAT=1; shift ;;
     --with-ethercat-install|--enable-ethercat-install)
@@ -648,6 +663,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_OPERATOR_UI_CONFIG=1
   SKIP_LOCOMOTION_CONFIG=1
   SKIP_SONIC_CONFIG=1
+  SKIP_PSI_CONFIG=1
   SKIP_ECAT_INTERFACE=1
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
@@ -675,6 +691,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       operator-ui-config) SKIP_OPERATOR_UI_CONFIG=0 ;;
       locomotion-config) SKIP_LOCOMOTION_CONFIG=0 ;;
       sonic-config)      SKIP_SONIC_CONFIG=0 ;;
+      psi-config)        SKIP_PSI_CONFIG=0 ;;
       ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
@@ -2652,6 +2669,124 @@ MOTION_RAMP_SECS=1.0"
     fi
   else
     info "ds/phantom-sonic not present yet — gitops phase will create it with the new CM in scope"
+  fi
+}
+
+# ---- phase 8b: psi-config (phantom-psi-config ConfigMap) ----------
+
+# Per-host phantom-psi options file. Holds a ConfigMap manifest the four
+# phantom-psi containers (psi0-vla, bridge, walking, psi0-state) read via envFrom. Same
+# host-resident, ArgoCD-unmanaged, --reset-preserved lifecycle as the sonic CM.
+PSI_FILE="${PSI_FILE:-/etc/phantomos/phantom-psi-config.yaml}"
+PSI_NS="psi"
+PSI_CM_NAME="phantom-psi-config"
+
+_write_psi_file() {
+  # Render a single multi-line KEY=VALUE blob (as produced by the host-config
+  # helper's `get-phantom-psi-config-kv` subcommand) into one YAML-quoted
+  # `KEY: "VALUE"` entry per non-empty line under the ConfigMap's data: section.
+  local kv_text="${1?_write_psi_file: kv_text required}"
+  mkdir -p "$(dirname "$PSI_FILE")"
+  {
+    cat <<EOF
+# Generated by scripts/bootstrap-robot.sh — do not hand-edit.
+# Re-run bootstrap with --psi-config to change these values.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $PSI_CM_NAME
+  namespace: $PSI_NS
+data:
+EOF
+    local line key value
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      key="${line%%=*}"
+      value="${line#*=}"
+      printf '  %s: "%s"\n' "$key" "$value"
+    done <<<"$kv_text"
+  } > "$PSI_FILE"
+  chmod 0644 "$PSI_FILE"
+}
+
+psi_config() {
+  if [ "${SKIP_PSI_CONFIG:-0}" = 1 ]; then
+    phase "phase 8b: psi-config  (skipped)"
+    return
+  fi
+  phase "phase 8b: psi-config (phantom-psi-config ConfigMap)"
+
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+
+  local kv_text=""
+  if [ -r "$hc" ]; then
+    kv_text=$(python3 "$HOST_CONFIG_HELPER" "$hc" get-phantom-psi-config-kv 2>/dev/null || true)
+  fi
+  if [ -z "$kv_text" ]; then
+    # Helper failed (no host-config, validation error, etc.) — fall back to the
+    # documented defaults so the pod still starts. Keep in sync with DEFAULT_PSI
+    # in scripts/lib/host-config.py and the manifest's shell-defaults.
+    kv_text="PSI0_RUN_DIR=/models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333
+PSI0_CKPT_STEP=120000
+PSI0_CAMERA_ID=0
+PSI0_STATE_QUEUE=psi0_state_j24
+PSI0_ACTION_QUEUE=psi0_actions_j24
+PSI0_INSTRUCTION=Grasp and lift part.
+ROS_DOMAIN_ID=43
+PSI0_BRIDGE_RATE_HZ=50
+PSI0_ENABLE_GAIT=0
+PSI0_ENABLE_HEIGHT=0
+PSI0_ENABLE_YAW=0
+POLICY_ONNX_PATH=/models/walking/policy.onnx
+PSI0_LOCO_HEALTH_PATH=/dev/shm/psi0_loco.health
+PSI0_LOCO_MIRROR_HZ=5"
+  fi
+
+  local run_line run_dir
+  run_line=$(printf '%s\n' "$kv_text" | grep -m1 '^PSI0_RUN_DIR=' || true)
+  run_dir="${run_line#PSI0_RUN_DIR=}"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  write $PSI_FILE  PSI0_RUN_DIR=$run_dir"
+    info "DRY-RUN  kubectl apply -f $PSI_FILE"
+    return
+  fi
+
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot apply psi ConfigMap"
+    return
+  fi
+
+  if ! "${KUBECTL[@]}" get ns "$PSI_NS" >/dev/null 2>&1; then
+    if ! "${KUBECTL[@]}" create ns "$PSI_NS" >/dev/null; then
+      fail "could not create ns/$PSI_NS"
+      return
+    fi
+    info "created ns/$PSI_NS"
+  fi
+
+  _write_psi_file "$kv_text"
+  pass "wrote $PSI_FILE  PSI0_RUN_DIR=$run_dir"
+
+  if ! "${KUBECTL[@]}" apply -f "$PSI_FILE" >/dev/null; then
+    fail "kubectl apply -f $PSI_FILE"
+    return
+  fi
+  pass "$PSI_CM_NAME applied to $PSI_NS"
+
+  # If the DaemonSet is already running, restart it so the new options take
+  # effect. envFrom does NOT auto-roll on CM updates.
+  if "${KUBECTL[@]}" -n "$PSI_NS" get ds phantom-psi >/dev/null 2>&1; then
+    if "${KUBECTL[@]}" -n "$PSI_NS" rollout restart ds/phantom-psi >/dev/null; then
+      pass "rolled out phantom-psi DaemonSet to pick up new options"
+    else
+      fail "rollout restart ds/phantom-psi"
+    fi
+  else
+    info "ds/phantom-psi not present yet — gitops phase will create it with the new CM in scope"
   fi
 }
 
@@ -5811,6 +5946,7 @@ print_plan() {
   _step $([ "$SKIP_OPERATOR_UI_CONFIG"   = 0 ] && echo 1 || echo 0) "phase  6  operator-ui-config"           "--operator-ui-config not selected"
   _step $([ "$SKIP_LOCOMOTION_CONFIG"    = 0 ] && echo 1 || echo 0) "phase  7  locomotion-config"               "--locomotion-config not selected"
   _step $([ "$SKIP_SONIC_CONFIG"         = 0 ] && echo 1 || echo 0) "phase  8  sonic-config"                    "--sonic-config not selected"
+  _step $([ "$SKIP_PSI_CONFIG"           = 0 ] && echo 1 || echo 0) "phase  8b psi-config"                      "--psi-config not selected"
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  9  ecat-interface (gates 10)"       "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
@@ -5879,6 +6015,7 @@ seed_pull_secrets  ; guard
 operator_ui_config ; guard
 locomotion_config  ; guard
 sonic_config       ; guard
+psi_config         ; guard
 ensure_cpu_isolation_block ; guard
 ecat_interface     ; guard
 cpu_isolation      ; guard

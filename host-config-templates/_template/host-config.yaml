@@ -634,6 +634,40 @@ images:
 #   rosDomainId: "44"
 #   webPort: "8080"
 
+# Per-host phantom-psi config (the Ψ₀ VLA → locomotion stack, gated on
+# foundation.bot/has-psi). Bootstrap phase psi-config renders
+# /etc/phantomos/phantom-psi-config.yaml from this block — a ConfigMap the
+# four phantom-psi containers (psi0-vla, bridge, walking, psi0-state) consume via envFrom.
+# Same host-resident, ArgoCD-unmanaged, --reset-preserved lifecycle as
+# phantomSonic.
+#
+# Every field is optional; omitted fields fall back to the defaults below
+# (which match the manifest's shell-defaults), so an absent phantomPsi block
+# still renders a working ConfigMap.
+#
+# Defaults:
+#   runDir:       /models/full_task.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606120333
+#                                          # PSI0_RUN_DIR (psi0_dma_runner --run-dir)
+#   ckptStep:     "120000"                 # PSI0_CKPT_STEP (--ckpt-step)
+#   cameraId:     "0"                      # PSI0_CAMERA_ID (--camera-id; 0=bottom)
+#   stateQueue:   psi0_state_j24           # PSI0_STATE_QUEUE (--state-queue)
+#   actionQueue:  psi0_actions_j24         # PSI0_ACTION_QUEUE (--action-queue + bridge)
+#   instruction:  "Grasp and lift part."   # PSI0_INSTRUCTION (--instruction)
+#   rosDomainId:  "43"                     # ROS_DOMAIN_ID (bridge + walking)
+#   bridgeRateHz: "50"                     # PSI0_BRIDGE_RATE_HZ (bridge)
+#   enableGait:   "0"                      # PSI0_ENABLE_GAIT  (bridge; spec-004 AC-7, OFF)
+#   enableHeight: "0"                      # PSI0_ENABLE_HEIGHT(bridge; spec-004 AC-7, OFF)
+#   enableYaw:    "0"                      # PSI0_ENABLE_YAW   (bridge; spec-004 AC-7, OFF)
+#   walkingOnnx:  /models/walking/policy.onnx   # POLICY_ONNX_PATH (walking)
+#   locoHealthPath: /dev/shm/psi0_loco.health   # PSI0_LOCO_HEALTH_PATH (loco-state-mirror)
+#   locoMirrorHz: "5"                      # PSI0_LOCO_MIRROR_HZ (loco-state-mirror rewrite rate)
+#
+# Example — point at a different checkpoint and enable yaw passthrough:
+# phantomPsi:
+#   runDir: "/models/full_task_yawfix.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606110450"
+#   ckptStep: "76000"
+#   enableYaw: "1"
+
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
 # /var/log/journal and /var/log/syslog from filling the root partition.
@@ -704,6 +738,13 @@ nodeLabels:
   foundation.bot/has-okvis: 'false'
   # positronic-control Deployment
   foundation.bot/has-positronic: 'true'
+  # phantom-psi DaemonSet (Ψ₀ VLA + loco bridge; mutually exclusive with
+  # has-sonic, has-locomotion and has-positronic)
+  foundation.bot/has-psi: 'false'
+  # psi0-dma-walking DaemonSet (Ψ₀ Early-fan whole-body policy over the DMA
+  # plane, spec 013; drives /desired — mutually exclusive with has-sonic,
+  # has-locomotion and has-positronic)
+  foundation.bot/has-psi-dma-walking: 'false'
   # phantom-sonic DaemonSet (Walking+SONIC; mutually exclusive with
   # has-locomotion and has-positronic)
   foundation.bot/has-sonic: 'false'
