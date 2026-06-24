@@ -80,3 +80,5 @@ configMapGenerator:
       - config/grafana/dashboards/json/jetson.json
       - config/grafana/dashboards/json/processes.json
       - config/grafana/dashboards/json/shm_queues.json
+      - config/grafana/dashboards/json/shm_fabric_graph.json
+      - config/grafana/dashboards/json/teleop_command_trace.json
