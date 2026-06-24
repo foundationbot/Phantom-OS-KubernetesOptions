@@ -176,11 +176,13 @@ stacks:
 #                          pins localhost:5443/as-inference-models. busybox
 #                          bundle: Thor-built dinov2 + per-task AS engines + PCA
 #                          + norm-stats + state-machine + text-embeds + registry.
-#   (wolverine-loco's 3 images all share ONE repo
-#    foundationbot/dma-ghost-wbc-inference, tag-prefixed v / policies- / teleop-.
-#    Kustomize can't retag same-named images independently, so they are PINNED
-#    in manifests/base/wolverine-loco/ and NOT host-configurable here — bump by
-#    editing that manifest.)
+#   dma-ghost-wbc-node / -policies / -teleop
+#                          core stack — wolverine-loco's 3 containers (node /
+#                          load-policies init / teleop sidecar). All publish to
+#                          ONE shared repo foundationbot/dma-ghost-wbc-inference,
+#                          tag-prefixed (v / policies- / teleop-, +/-aarch64).
+#                          Base pins localhost:5443/dma-ghost-wbc-* find-keys;
+#                          override each to the shared repo + its prefixed tag.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -208,9 +210,17 @@ images:
   #   image: localhost:5443/as-inference:REPLACE-WITH-AS-BUILD-TAG
   # as-inference-models:
   #   image: localhost:5443/as-inference-models:REPLACE-WITH-AS-MODELS-TAG
-  # wolverine-loco's images are PINNED in manifests/base/wolverine-loco/ (one
-  # shared repo, tag-prefixed) — nothing to set here. Opting in is just the
-  # nodeLabels gate below (has-wolverine-loco: 'true' + has-positronic: 'false').
+  # wolverine-loco is default-off (nodeLabels has-wolverine-loco: 'false') and
+  # is in the /desired exclusion group — opting in REQUIRES
+  # foundation.bot/has-positronic: 'false'. Uncomment all three on hosts that
+  # opt in; they all point at the one shared repo with a per-container tag
+  # prefix (pin the -aarch64 tags on Jetson/Thor).
+  # dma-ghost-wbc-node:
+  #   image: foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64
+  # dma-ghost-wbc-policies:
+  #   image: foundationbot/dma-ghost-wbc-inference:policies-v0.1.0-aarch64
+  # dma-ghost-wbc-teleop:
+  #   image: foundationbot/dma-ghost-wbc-inference:teleop-v0.1.0-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

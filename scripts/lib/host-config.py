@@ -1379,14 +1379,32 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "localhost:5443/wm-inference-models",
     },
-    # NOTE: wolverine-loco's three images (node / policies / teleop) all live in
-    # ONE shared DockerHub repo foundationbot/dma-ghost-wbc-inference,
-    # distinguished only by tag prefix (v / policies- / teleop-). Kustomize's
-    # image override matches by image NAME, so it cannot retag three same-named
-    # images independently — they are PINNED in manifests/base/wolverine-loco/
-    # and bumped by editing the manifest. Hence NO CONTAINER_TARGETS entries
-    # (they would all collide on the shared name). The has-wolverine-loco gate +
-    # /desired mutual-exclusion are still registered above / enforced below.
+    # wolverine-loco's three images all publish to ONE shared DockerHub repo
+    # foundationbot/dma-ghost-wbc-inference, distinguished by tag prefix
+    # (v / policies- / teleop-, +/-aarch64). To keep them independently
+    # host-configurable despite the shared name, each container has a DISTINCT
+    # localhost:5443/* find-key in manifests/base/wolverine-loco/ (pinned at
+    # :PLACEHOLDER); a host overrides each via images: to the real shared repo +
+    # its prefixed tag, and Kustomize find=replaces them independently (same
+    # localhost-find-key -> foundationbot-override pattern as as-inference).
+    "dma-ghost-wbc-node": {
+        # wolverine-loco's 1 kHz pure-C++ inference node container.
+        # e.g. images.dma-ghost-wbc-node.image: foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64
+        "stack": "core",
+        "manifest_image": "localhost:5443/dma-ghost-wbc-node",
+    },
+    "dma-ghost-wbc-policies": {
+        # load-policies initContainer (ONNX carrier).
+        # e.g. ...:policies-v0.1.0-aarch64
+        "stack": "core",
+        "manifest_image": "localhost:5443/dma-ghost-wbc-policies",
+    },
+    "dma-ghost-wbc-teleop": {
+        # teleop web-UI sidecar (:8080).
+        # e.g. ...:teleop-v0.1.0-aarch64
+        "stack": "core",
+        "manifest_image": "localhost:5443/dma-ghost-wbc-teleop",
+    },
 }
 
 
