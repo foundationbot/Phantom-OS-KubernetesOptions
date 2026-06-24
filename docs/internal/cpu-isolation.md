@@ -380,6 +380,7 @@ cpuIsolation:
   dmaRtCpu: 11                  # SOEM cyclic loop (DMA_RT_CPU)
   installAffinityDefaults: true # default: true. Writes /etc/systemd/system.conf.d/cpuaffinity.conf.
   migrateCmdline: false         # default: false. DESTRUCTIVE on Jetson.
+  kubepodsCpus: "0-9"           # optional. Pin the k0s pod cgroup to these cores (off RT). See below.
 ```
 
 `cpuIsolation.nic.selector` is consumed by **phase 9 (ecat-interface)**,
@@ -441,6 +442,9 @@ fields.
 5. `manage_cpusets.sh install-service` (boot persistence — `cpusets.service`
    re-runs `apply` on every boot before `docker.service` and
    `k0scontroller.service`).
+5b. **If `cpuIsolation.kubepodsCpus` is set:** `pin-kubepods.sh install <cpus>`
+   installs `kubepods-cpuset.service` and applies the pin live. See
+   [Pinning the k0s pod cgroup](#pinning-the-k0s-pod-cgroup-kubepods) below.
 6. `manage_cpusets.sh migrate-cmdline --add-rt-flags --yes` — strips
    legacy `isolcpus=<cpus>` and writes `isolcpus=managed_irq,<cpus>` +
    `rcu_nocb_poll skew_tick=1 irqaffinity=<housekeeping>` etc. Drops
@@ -462,6 +466,59 @@ fields.
    (empty, overrides the manager-wide drop-in from step 7). This is the
    final piece that lets `dma-ethercat.service` actually run on the
    isolated cores under cgroup-v2.
+
+### Pinning the k0s pod cgroup (kubepods)
+
+The partition machinery above shrinks **systemd slices** (`system.slice`,
+`user.slice`, …) off the isolated cores via the `cpuset.cpus.exclusive`
+cascade. It does **not** reliably constrain the **k0s pod cgroup**, for two
+reasons:
+
+1. `kubepods` is a *cgroupfs* cgroup (k0s runs the cgroupfs driver), created
+   by the kubelet **after** boot. `cpusets.service` is ordered
+   `Before=k0scontroller.service`, so when it runs the cgroup does not yet
+   exist — the shrink is a no-op for it. The kubelet then creates `kubepods`
+   spanning **all** online CPUs, and a later `systemctl restart
+   k0scontroller` re-creates it the same way. That both (a) lets pods run on
+   the RT cores and (b) flips the RT partition to `isolated invalid`,
+   because `kubepods` is now a sibling claiming the partition's CPUs.
+2. Even when we want pods on a *strict subset* of housekeeping (e.g. system
+   on `0-10`, pods on `0-9`), the uniform slice shrink writes one
+   housekeeping set to every managed slice and can't express that split.
+
+The native kubelet lever (`reservedSystemCPUs` + `cpuManagerPolicy=static`)
+that would normally solve this is **unusable on Jetson Thor**: the kernel
+reports every logical CPU as `CoreID=0`, so the static CPU manager's
+full-pcpus-only rule treats reserving any core as reserving all 14. Full
+investigation in
+[RFC 0003](rfcs/0003-kubelet-cpu-reservation.md#implementation-findings-2026-05-05).
+
+So pinning `kubepods` is a **targeted, separate mechanism**:
+[`scripts/cpusets/pin-kubepods.sh`](../../scripts/cpusets/pin-kubepods.sh)
+writes the pod cgroup's `cpuset.cpus` directly and re-asserts the isolated
+partitions afterwards (so the RT cores recover from any `isolated invalid`
+state `kubepods` caused). `pin-kubepods.sh install <cpus>` installs
+`kubepods-cpuset.service`, ordered/bound to k0s so the pin re-applies on
+every k0s (re)start, not just at boot:
+
+```ini
+[Unit]
+After=k0scontroller.service
+PartOf=k0scontroller.service     # k0s restart/stop propagates to this unit
+[Install]
+WantedBy=k0scontroller.service   # k0s start pulls this unit in
+```
+
+Driven from host-config by `cpuIsolation.kubepodsCpus` (phase 10 step 5b).
+The value must be **disjoint from the partitions** (the validator rejects
+overlap) and is typically a strict subset of housekeeping. Verify:
+
+```bash
+# pod cgroup confined; RT partition valid again
+sudo cat /sys/fs/cgroup/kubepods/cpuset.cpus.effective   # e.g. 0-9
+sudo cat /sys/fs/cgroup/ecat.slice/cpuset.cpus.partition  # isolated (not 'isolated invalid')
+sudo /usr/local/lib/manage_cpusets/pin-kubepods.sh status
+```
 
 ### Services on isolated cores
 

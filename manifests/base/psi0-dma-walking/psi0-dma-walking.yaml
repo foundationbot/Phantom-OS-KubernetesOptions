@@ -110,9 +110,18 @@ spec:
             - configMapRef:
                 name: phantom-psi-config
                 optional: false
+          # privileged + /dev/input: when PSI0_OPERATOR=gamepad the node's embedded
+          # bridge.operator.GamepadOperator opens the joystick char device in-process
+          # (this node is ROS-free, so engage can't arrive over a topic from a
+          # separate operator container — cf. phantom-psi's `operator`). The char
+          # device is otherwise blocked by the device cgroup, hence privileged. Inert
+          # for PSI0_OPERATOR=auto (the device is simply never opened).
+          securityContext:
+            privileged: true
           volumeMounts:
-            - { name: models, mountPath: /models, readOnly: true }
-            - { name: dshm,   mountPath: /dev/shm }
+            - { name: models,   mountPath: /models, readOnly: true }
+            - { name: dshm,     mountPath: /dev/shm }
+            - { name: devinput, mountPath: /dev/input }
           resources:
             requests: { cpu: "2", memory: "2Gi" }
             limits:   { cpu: "4", memory: "4Gi" }
@@ -151,3 +160,8 @@ spec:
           hostPath: { path: /var/lib/psi0/models, type: Directory }
         - name: dshm
           hostPath: { path: /dev/shm, type: Directory }
+        # Operator gamepad (PSI0_OPERATOR=gamepad). Host /dev/input → walking-dma so
+        # the embedded GamepadOperator can read /dev/input/js0 (mirrors phantom-psi's
+        # operator container). Harmless when PSI0_OPERATOR=auto.
+        - name: devinput
+          hostPath: { path: /dev/input, type: Directory }

@@ -264,6 +264,18 @@ images:
 #                              so systemd-spawned services stay off both
 #                              the isolated cores and cpu 0 (which is
 #                              dedicated to kernel housekeeping).
+#   kubepodsCpus             optional cpu-list. Pins the k0s pod cgroup
+#                              (kubepods) to exactly these cores via a
+#                              k0s-bound systemd unit (kubepods-cpuset.
+#                              service, installed by scripts/cpusets/
+#                              pin-kubepods.sh). Must NOT overlap the
+#                              partitions. Use this to keep ALL pods off
+#                              the RT cores AND on a strict subset of
+#                              housekeeping (the uniform slice shrink can't
+#                              express that, and kubelet's native
+#                              reservedSystemCPUs is unusable on Jetson
+#                              Thor — see RFC 0003). Unset → pod cgroup
+#                              left at the default. e.g. "0-9".
 #
 # Bootstrap phase 8 (under RFC 0004) renders kernel cmdline tokens
 # directly: isolcpus=<partitions>, nohz_full=<dmaRtCpu>,
@@ -283,6 +295,7 @@ images:
 #                              # OR {driver: igc, index: 0}
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
+#   kubepodsCpus: "0-9"        # pin the k0s pod cgroup off cores 10-13
 
 # Per-host phantom-locomotion config. Bootstrap phase locomotion-config
 # renders /etc/phantomos/phantom-locomotion-config.yaml from this
@@ -634,12 +647,22 @@ images:
 #   walkingOnnx:  /models/walking/policy.onnx   # POLICY_ONNX_PATH (walking)
 #   locoHealthPath: /dev/shm/psi0_loco.health   # PSI0_LOCO_HEALTH_PATH (loco-state-mirror)
 #   locoMirrorHz: "5"                      # PSI0_LOCO_MIRROR_HZ (loco-state-mirror rewrite rate)
+#   autoEnableMotors: "0"                  # PSI0_AUTO_ENABLE_MOTORS (DMA walking; "1" on real HW)
+#   operator:     "auto"                   # PSI0_OPERATOR (DMA walking engage source: auto|gamepad)
+#   gamepadDevice: /dev/input/js0          # PSI0_GAMEPAD_DEVICE (operator=gamepad joystick node)
+#   startEngaged: "0"                      # PSI0_START_ENGAGED (gamepad initial latch; OFF=safe)
 #
 # Example — point at a different checkpoint and enable yaw passthrough:
 # phantomPsi:
 #   runDir: "/models/full_task_yawfix.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606110450"
 #   ckptStep: "76000"
 #   enableYaw: "1"
+#
+# Example — drive the DMA walking node by handheld controller (START = Square +
+# Triangle; STOP = Triangle; HOLD = Circle) and let it own motor-enable on HW:
+# phantomPsi:
+#   operator: "gamepad"
+#   autoEnableMotors: "1"
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep
