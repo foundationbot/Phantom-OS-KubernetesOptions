@@ -15,7 +15,9 @@ case "$1" in
 
 phantomos-k0s installed at /opt/Phantom-OS-KubernetesOptions
 
-Next steps on a fresh robot:
+Next steps on a fresh robot (run from the directory holding the image
+bundle, i.e. the .deb + .tar.zst pair):
+  sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh ./
   sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/configure-host.sh
   sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh
 
