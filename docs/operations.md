@@ -443,6 +443,28 @@ particular, setting only `has-locomotion: "true"` or `has-sonic: "true"`
 is rejected because positronic is still on by default; you must also set
 `has-positronic: "false"` in the same edit.
 
+### Recorders (dma-streams) — arming behavior
+
+`dma-streams` ships three distinct workloads with **different** record
+triggers — there is no single "dma.streams recording" switch:
+
+| Workload | Records | Arming |
+|---|---|---|
+| `dma-recorder` (`has-recorder`) | EtherCAT IPC queues (`/actuals`, `/desired`, …) → `.rrd` | gates on the bus being **OPERATIONAL**; `--manual-arm` (in args) additionally requires an explicit `RECORDING_START` opcode on `/commands`. **Remove `--manual-arm` → always-armed**: auto-records as soon as the bus is operational, no operator trigger. |
+| `dma-video-recorder` (`has-video-recorder`) | camera streams → `.rrd` | **Automatic, no arm flag** — reads `/motor_diagnostics` and records while ≥1 EtherCAT slave is operational; it follows the bus (no `RECORDING_START`/`STOP`). |
+| `rerun-streamer` (`has-streamer`) | live Rerun stream (not a recorder) | n/a |
+
+So "auto-record" only ever concerned **`dma-recorder`** — `dma-video-recorder`
+was already automatic. Both write to `/root/recordings`; each has a `janitor`
+sidecar that bounds disk (retention days + folder-size cap), so always-armed
+recording is disk-safe. Trigger/stop a `--manual-arm` `dma-recorder` from any
+host with kubectl:
+
+```
+POD=$(kubectl -n phantom get pod -l app.kubernetes.io/name=dma-recorder -o name | head -1)
+kubectl -n phantom exec -c recorder $POD -- dma-cmd record start   # ... stop
+```
+
 Enable a default-off workload on `<robot>`:
 
 1. Edit `/etc/phantomos/host-config.yaml`, add to `nodeLabels:`:

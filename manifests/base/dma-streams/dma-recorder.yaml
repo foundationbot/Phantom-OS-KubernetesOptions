@@ -124,12 +124,11 @@ spec:
             - "100"                   # MB per .rrd file
             - --decimate
             - "1"                     # 1 = full 500Hz, 5 = 100Hz
-            # Recorder waits idle until a third party (operator-UI, test
-            # harness, AI app, dma-cmd CLI) writes a CommandMessage with
-            # opcode=RECORDING_START to /commands. RECORDING_STOP flushes
-            # and closes the current .rrd. Remove this flag to revert to
-            # always-armed (start recording as soon as queues appear).
-            - --manual-arm
+            # ALWAYS-ARMED: records automatically as soon as the queues appear /
+            # the EtherCAT bus is OPERATIONAL (no operator trigger needed). The
+            # janitor sidecar bounds disk (retention + folder budget). To require
+            # an explicit RECORDING_START opcode on /commands instead, re-add:
+            #   - --manual-arm
 
           securityContext:
             # /dev/shm segments produced by host dma_main are root-owned;
