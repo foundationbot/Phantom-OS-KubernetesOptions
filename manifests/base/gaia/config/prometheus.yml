@@ -43,7 +43,10 @@ scrape_configs:
   # Per-process metrics, grouped by process-exporter.yml (ROS2/camera/etc.).
   - job_name: 'process-exporter'
     scrape_interval: 5s
-    scrape_timeout: 500ms
+    # process-exporter serves a large payload (~700KB / thousands of grouped
+    # series) that takes ~0.8s on a loaded Jetson; the old 500ms timeout made
+    # every scrape "context deadline exceeded" → no process data. 4s < 5s interval.
+    scrape_timeout: 4s
     static_configs:
       - targets: ['localhost:9256']
 
