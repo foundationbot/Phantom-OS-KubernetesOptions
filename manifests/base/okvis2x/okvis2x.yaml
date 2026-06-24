@@ -1,0 +1,132 @@
+# okvis2x — OKVIS2-X live dense-stereo SLAM (okvis2x_app_dma_live), run as a
+# one-shot Pod with restartPolicy: Never. kubelet does NOT relaunch the
+# container on exit/crash — it goes Completed/Error and stays, which is what we
+# want for hand-driven dev on the bench. To run again: delete the pod, re-apply.
+#
+# Reads camera frames + IMU from the host /dev/shm (hostIPC); GPU via the nvidia
+# runtimeclass. Schedules only on nodes labeled foundation.bot/has-okvis=true.
+#
+# Deploy directly (no ArgoCD / bootstrap needed):
+#   sudo k0s kubectl -n positronic apply -f okvis2x.yaml
+#   sudo k0s kubectl -n positronic logs -f pod/okvis2x -c okvis2x
+#   # rerun after it exits:
+#   sudo k0s kubectl -n positronic delete pod okvis2x --ignore-not-found && \
+#     sudo k0s kubectl -n positronic apply -f okvis2x.yaml
+#
+# Two init containers:
+#   load-models  — stages the SLAM models from foundationbot/okvis2x-models into
+#                  a persistent host dir (/etc/phantomos/okvis-models), re-copying
+#                  the ~3.6GB only when the bundle's content signature changes.
+#   seed-config  — seeds /etc/phantomos/okvis with the image's baked
+#                  foundation_rig YAMLs (no-clobber, so per-robot calibration
+#                  edits on the node survive redeploys).
+#
+# jetson_clocks skipped (OKVIS_SKIP_JETSON_CLOCKS=1); output is an emptyDir
+# (ephemeral) — point it at a hostPath to keep trajectories/meshes.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: okvis2x
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: okvis2x
+    app.kubernetes.io/part-of: phantomos
+spec:
+  restartPolicy: Never            # ← run once; kubelet does NOT relaunch on exit/crash
+  nodeSelector:
+    foundation.bot/robot: "true"
+    foundation.bot/has-okvis: "true"
+  tolerations:
+    - { operator: Exists, effect: NoSchedule }
+  hostNetwork: true
+  hostIPC: true
+  dnsPolicy: ClusterFirstWithHostNet
+  imagePullSecrets:
+    - name: dockerhub-creds
+  runtimeClassName: nvidia
+  initContainers:
+    - name: load-models
+      image: foundationbot/okvis2x-models:latest
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          SRC=/models; DST=/shared; MARKER="$DST/.bundle-manifest"
+          NEW="$(du -a "$SRC" | sha256sum | cut -d' ' -f1)"
+          OLD="$(cat "$MARKER" 2>/dev/null || echo none)"
+          if [ "$NEW" = "$OLD" ]; then
+            echo "==> models unchanged ($NEW) — skipping copy"
+          else
+            echo "==> models changed — refreshing $DST"
+            rm -rf "${DST:?}/"* || true
+            cp -a "$SRC"/. "$DST"/
+            printf '%s\n' "$NEW" > "$MARKER"
+          fi
+      volumeMounts:
+        - { name: models, mountPath: /shared }
+      resources:
+        requests: { cpu: "1", memory: "1Gi" }
+        limits:   { cpu: "1", memory: "1Gi" }
+    - name: seed-config
+      image: foundationbot/okvis2x:bharat-feat-custom-dma-indicies-260624.2.0
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          cp -n /home/OKVIS2-X/config/foundation_rig/*.yaml /etc/okvis/ 2>/dev/null || true
+          ls -la /etc/okvis | head
+      volumeMounts:
+        - { name: okvis-config, mountPath: /etc/okvis }
+      resources:
+        requests: { cpu: "1", memory: "256Mi" }
+        limits:   { cpu: "1", memory: "256Mi" }
+  containers:
+    - name: okvis2x
+      image: foundationbot/okvis2x:bharat-feat-custom-dma-indicies-260624.2.0      
+      imagePullPolicy: IfNotPresent
+      # ENTRYPOINT is docker/entrypoint.sh (app dispatcher); args[0]=dma_live.
+      # taskset -c 0-9 pins okvis + its OMP/worker threads to cores 0-9 (the k8s
+      # stand-in for the bench `cpuset`). Needs taskset in the image and a cpuset
+      # cgroup that permits 0-9 (true under cpuManagerPolicy=none; drop this
+      # command if the static policy is on and taskset fails).
+      command: ["taskset", "-c", "0-9", "/usr/local/bin/entrypoint.sh"]
+      args:
+        - dma_live
+        - /etc/okvis/mk12_stereo.yaml
+        - /etc/okvis/se2.yaml
+        - /output
+      env:
+        - { name: OMP_NUM_THREADS,            value: "4" }
+        - { name: OKVIS_DMA_IMU_SHM,          value: /raw_imu_actuals }
+        - { name: OKVIS_DMA_IMU_INDEX,        value: "2" }
+        - { name: OKVIS_DMA_CAMERAS,          value: "2,1" }
+        - { name: GLOG_v,                     value: "1" }
+        - { name: OKVIS_SKIP_JETSON_CLOCKS,   value: "1" }
+        - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+        - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+      volumeMounts:
+        - { name: shm,          mountPath: /dev/shm }
+        - { name: models,       mountPath: /okvis-models, readOnly: true }
+        - { name: okvis-config, mountPath: /etc/okvis,    readOnly: true }
+        - { name: output,       mountPath: /output }
+      resources:
+        requests: { cpu: "3", memory: "16Gi" }
+        limits:   { cpu: "3", memory: "16Gi" }
+      securityContext:
+        capabilities:
+          add:
+            - SYS_NICE   # OKVIS sets RT thread priorities / niceness
+            - IPC_LOCK   # mlock for the POSIX /dev/shm queues it mmaps
+  volumes:
+    - name: shm
+      hostPath: { path: /dev/shm, type: Directory }
+    - name: models
+      hostPath: { path: /etc/phantomos/okvis-models, type: DirectoryOrCreate }
+    - name: okvis-config
+      hostPath: { path: /etc/phantomos/okvis, type: DirectoryOrCreate }
+    - name: output
+      emptyDir: {}
