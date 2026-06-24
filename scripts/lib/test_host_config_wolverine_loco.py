@@ -109,23 +109,35 @@ def test_wolverine_loco_alone_validates_clean(capsys):
     assert not any("mutually exclusive" in e for e in errors), errors
 
 
-def test_wolverine_images_not_host_configurable(capsys):
-    """The three wolverine-loco images share ONE DockerHub repo
-    (foundationbot/dma-ghost-wbc-inference, tag-prefixed), so Kustomize's
-    by-name override can't retag them independently — they are PINNED in the
-    base manifest and intentionally NOT registered in CONTAINER_TARGETS. A host
-    listing one under images: must fail loud as an unknown container."""
-    assert "wolverine-dma-inference-cpp" not in hc.CONTAINER_TARGETS
-    assert "wolverine-policies" not in hc.CONTAINER_TARGETS
-    assert "wolverine-teleop" not in hc.CONTAINER_TARGETS
-    assert "dma-ghost-wbc-inference" not in hc.CONTAINER_TARGETS
+def test_wolverine_images_host_configurable(capsys):
+    """The three wolverine-loco images all publish to ONE shared DockerHub repo
+    (foundationbot/dma-ghost-wbc-inference, tag-prefixed). Each container has a
+    DISTINCT localhost:5443/* find-key in the base manifest, so a host can set
+    the container<->image pair under images: and Kustomize swaps each find-key
+    to the shared repo + its prefixed tag independently (the same find=replace
+    pattern as as-inference / wm-inference)."""
+    for key in ("dma-ghost-wbc-node", "dma-ghost-wbc-policies", "dma-ghost-wbc-teleop"):
+        assert key in hc.CONTAINER_TARGETS, key
+        assert hc.CONTAINER_TARGETS[key]["stack"] == "core"
 
     cfg = {
         "robot": "ch4",
         "stacks": {"core": {}, "operator": {}},
-        "images": {"dma-ghost-wbc-inference": {"image": "foundationbot/dma-ghost-wbc-inference:v0.1.0"}},
+        "images": {
+            "dma-ghost-wbc-node": {
+                "image": "foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64"},
+            "dma-ghost-wbc-policies": {
+                "image": "foundationbot/dma-ghost-wbc-inference:policies-v0.1.0-aarch64"},
+            "dma-ghost-wbc-teleop": {
+                "image": "foundationbot/dma-ghost-wbc-inference:teleop-v0.1.0-aarch64"},
+        },
     }
-    rc = hc.cmd_get_images_json(cfg)
-    captured = capsys.readouterr()
-    assert rc == 2
-    assert "unknown container" in captured.err
+    out = _images_json(cfg)
+    # each find-key (localhost placeholder) is swapped to the real shared repo
+    # + the per-container prefixed tag.
+    assert ("localhost:5443/dma-ghost-wbc-node="
+            "foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64") in out
+    assert ("localhost:5443/dma-ghost-wbc-policies="
+            "foundationbot/dma-ghost-wbc-inference:policies-v0.1.0-aarch64") in out
+    assert ("localhost:5443/dma-ghost-wbc-teleop="
+            "foundationbot/dma-ghost-wbc-inference:teleop-v0.1.0-aarch64") in out
