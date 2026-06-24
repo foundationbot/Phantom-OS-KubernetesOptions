@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|purge)
+    # Tear down the first-install bringup oneshot. Leave /etc/phantomos
+    # (host-config, robot id, .bootstrap-done) alone on `remove`; only purge
+    # wipes per-host state. Never touches the k0s cluster itself.
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable phantomos-firstboot.service >/dev/null 2>&1 || true
+      systemctl stop phantomos-firstboot.service >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/systemd/system/phantomos-firstboot.service
+    # GPU/NVMAP host collectors installed by postinst (SOF-1167 #6).
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now gaia-gpu-metrics.service gaia-nvmap-metrics.service >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/systemd/system/gaia-gpu-metrics.service \
+          /etc/systemd/system/gaia-nvmap-metrics.service \
+          /usr/local/bin/gaia-gpu-metrics.sh \
+          /usr/local/bin/jetson-nvmap-mem-textfile.sh
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    if [ "$1" = "purge" ]; then
+      rm -f /etc/phantomos/.bootstrap-done
+    fi
+    ;;
+  upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    ;;
+  *)
+    echo "postrm called with unknown argument \`$1'" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

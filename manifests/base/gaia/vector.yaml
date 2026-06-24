@@ -1,0 +1,75 @@
+# vector — ships the host systemd journal to the collector (OTLP). Image carries
+# journalctl (CI-built foundationbot/gaia-vector). Translated from compose `vector`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vector
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vector
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vector
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      # root to read the root:systemd-journal 0640 journal files.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: vector
+          image: foundationbot/gaia-vector:SOF-1167
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/vector/vector.yaml"]
+          # Probes hit Vector's api (config: api.enabled, :8686). host:127.0.0.1
+          # because the api binds loopback (not exposed off-box) and this pod is
+          # hostNetwork — without it the kubelet probes the node IP and gets
+          # connection-refused. Lenient so journal backlog on boot can't flap it;
+          # failure → "Unhealthy" Event.
+          livenessProbe:
+            httpGet: { path: /health, port: 8686, host: 127.0.0.1 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /health, port: 8686, host: 127.0.0.1 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: vector-config, mountPath: /etc/vector }
+            - { name: journal,    mountPath: /var/log/journal, readOnly: true }
+            - { name: machine-id, mountPath: /etc/machine-id, readOnly: true }
+            - { name: data,       mountPath: /var/lib/vector }
+          resources:
+            requests: { cpu: "50m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+      volumes:
+        - name: vector-config
+          configMap:
+            name: gaia-vector-config
+        - name: journal
+          hostPath:
+            path: /var/log/journal
+            type: DirectoryOrCreate
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        - name: data
+          hostPath:
+            path: /data/gaia/vector
+            type: DirectoryOrCreate

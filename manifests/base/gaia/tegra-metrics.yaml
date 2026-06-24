@@ -1,0 +1,53 @@
+# tegra-metrics — lightweight Jetson sensor reader -> node-exporter textfile dir.
+# Reads only fast sysfs files (gpu-thermal behind a timeout). Writes .prom to the
+# shared textfile hostPath node-exporter serves. Translated from compose `tegra-metrics`.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tegra-metrics
+  namespace: gaia
+spec:
+  selector:
+    matchLabels:
+      app: tegra-metrics
+  template:
+    metadata:
+      labels:
+        app: tegra-metrics
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      containers:
+        - name: tegra-metrics
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/scripts/tegra-metrics.sh"]
+          env:
+            - { name: INTERVAL, value: "5" }
+          # No HTTP server: liveness = the .prom is being refreshed (atomic
+          # rename every INTERVAL=5s). Stale >2min ⇒ the writer hung ⇒ restart +
+          # "Unhealthy" Event. Lenient threshold so a transient sysfs stall is ok.
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "find /textfile/tegra.prom -mmin -2 | grep -q ."]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: script,   mountPath: /scripts }
+            - { name: sys,      mountPath: /host/sys, readOnly: true }
+            - { name: textfile, mountPath: /textfile }
+          resources:
+            requests: { cpu: "20m", memory: "32Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+      volumes:
+        - name: script
+          configMap:
+            name: gaia-tegra-script
+        - name: sys
+          hostPath: { path: /sys, type: Directory }
+        - name: textfile
+          hostPath: { path: /var/lib/gaia/node-textfile, type: DirectoryOrCreate }

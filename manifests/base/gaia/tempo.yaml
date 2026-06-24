@@ -1,0 +1,60 @@
+# tempo — trace store (Grafana Tempo monolithic) + HTTP/TraceQL API on host :10386
+# (the port Jaeger's UI used). Keeps OTLP receivers on 4317/4318 (the gaia
+# collector forwards traces there via otlp/tempo → localhost:4317). Replaces
+# jaeger.yaml. Config in the gaia-tempo-config ConfigMap (config/tempo.yaml);
+# local-blocks storage on the hostPath /data/gaia/tempo. Grafana Explore is the UI.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      # root so Tempo can own the hostPath block store.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.7.0
+          imagePullPolicy: IfNotPresent
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports:
+            - { name: http,      containerPort: 10386 }
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+          livenessProbe:
+            httpGet: { path: /ready, port: 10386 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: config, mountPath: /etc/tempo }
+            - { name: data,   mountPath: /var/tempo }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+      volumes:
+        - name: config
+          configMap:
+            name: gaia-tempo-config
+        - name: data
+          hostPath:
+            path: /data/gaia/tempo
+            type: DirectoryOrCreate

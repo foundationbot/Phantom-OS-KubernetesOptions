@@ -1,0 +1,16 @@
+# =============================================================================
+# Grafana dashboard provisioning for gaia. Auto-loads the JSON dashboards in
+# ./json/ at startup into a "gaia" folder.
+# =============================================================================
+apiVersion: 1
+
+providers:
+  - name: gaia
+    orgId: 1
+    folder: gaia
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    options:
+      path: /gaia-dashboards-json
+      foldersFromFilesStructure: false

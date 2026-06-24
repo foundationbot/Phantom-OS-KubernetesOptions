@@ -1,0 +1,68 @@
+# =============================================================================
+# Loki single-binary config for the gaia all-in-one stack.
+# Explicit (not the image default) so OTLP log ingestion is reliable:
+#  - allow_structured_metadata: true  — OTLP logs carry their attributes as
+#    structured metadata; without this Loki rejects the OTLP-sourced writes
+#    (e.g. phantom_runtime) while plain filelog lines still get in.
+#  - instance_addr pinned to 127.0.0.1 + inmemory ring (RF 1) — avoids the
+#    "zone not set" / ring-discovery noise in single-binary mode.
+#  - service.name → service_name label is Loki's built-in OTLP default.
+# =============================================================================
+auth_enabled: false
+
+server:
+  http_listen_port: 10310
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-04-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  filesystem:
+    directory: /loki/chunks
+
+limits_config:
+  allow_structured_metadata: true
+  reject_old_samples: false
+  volume_enabled: true
+  retention_period: 168h          # 7d, matches the file-archive horizon-ish
+
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: filesystem
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+
+querier:
+  max_concurrent: 4
+
+analytics:
+  reporting_enabled: false

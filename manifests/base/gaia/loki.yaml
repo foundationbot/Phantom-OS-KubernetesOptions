@@ -1,0 +1,56 @@
+# loki — log store + query API (host :10310, internal-only; grafana + collector
+# reach it on localhost). Translated from compose `loki`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      # root so the boltdb-shipper/filesystem store can own the hostPath dir.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: loki
+          image: grafana/loki:3.1.1
+          imagePullPolicy: IfNotPresent
+          args: ["-config.file=/etc/loki/loki-config.yaml"]
+          ports:
+            - { name: http, containerPort: 10310 }
+            - { name: grpc, containerPort: 9096 }
+          livenessProbe:
+            httpGet: { path: /ready, port: 10310 }
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: loki-config, mountPath: /etc/loki }
+            - { name: data, mountPath: /loki }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+      volumes:
+        - name: loki-config
+          configMap:
+            name: gaia-loki-config
+        - name: data
+          hostPath:
+            path: /data/gaia/loki
+            type: DirectoryOrCreate
