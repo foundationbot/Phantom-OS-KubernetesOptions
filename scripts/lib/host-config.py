@@ -156,6 +156,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
      "wm-inference DaemonSet (world-model z_ref service; feeds "
      "positronic-control — co-schedules with the control brain, NOT "
      "in the has-positronic/locomotion/sonic exclusion group)"),
+    ("foundation.bot/has-wolverine-loco",
+     "false",
+     "wolverine-loco DaemonSet (MK2 whole-body velocity-locomotion, pure-C++ "
+     "1 kHz node + teleop web-UI sidecar; mutually exclusive with "
+     "has-positronic/locomotion/sonic — all drive /desired)"),
     ("foundation.bot/has-yovariable",
      "true",
      "yovariable-server DaemonSet"),
@@ -1374,6 +1379,14 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "localhost:5443/wm-inference-models",
     },
+    # NOTE: wolverine-loco's three images (node / policies / teleop) all live in
+    # ONE shared DockerHub repo foundationbot/dma-ghost-wbc-inference,
+    # distinguished only by tag prefix (v / policies- / teleop-). Kustomize's
+    # image override matches by image NAME, so it cannot retag three same-named
+    # images independently — they are PINNED in manifests/base/wolverine-loco/
+    # and bumped by editing the manifest. Hence NO CONTAINER_TARGETS entries
+    # (they would all collide on the shared name). The has-wolverine-loco gate +
+    # /desired mutual-exclusion are still registered above / enforced below.
 }
 
 
@@ -3057,23 +3070,25 @@ def cmd_validate(cfg: dict) -> int:
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
                     )
 
-            # Mutual exclusion: positronic-control, phantom-locomotion, and
-            # phantom-sonic are competing workloads — each drives /desired,
-            # so at most ONE may be enabled per robot. has-positronic
-            # defaults to "true" (the cluster phase reconciler injects it on
-            # every robot unless explicitly set false), so operators
-            # enabling locomotion or sonic MUST also explicitly disable
-            # positronic — otherwise both would render and fight for the
-            # robot.
+            # Mutual exclusion: positronic-control, phantom-locomotion,
+            # phantom-sonic, and wolverine-loco are competing workloads —
+            # each drives /desired, so at most ONE may be enabled per robot.
+            # has-positronic defaults to "true" (the cluster phase
+            # reconciler injects it on every robot unless explicitly set
+            # false), so operators enabling locomotion / sonic / wolverine-loco
+            # MUST also explicitly disable positronic — otherwise both would
+            # render and fight for the robot.
             effective_pos = nl.get("foundation.bot/has-positronic", "true")
             effective_loc = nl.get("foundation.bot/has-locomotion", "false")
             effective_sonic = nl.get("foundation.bot/has-sonic", "false")
+            effective_wloco = nl.get("foundation.bot/has-wolverine-loco", "false")
             enabled_drivers = [
                 label
                 for label, eff in (
                     ("foundation.bot/has-positronic", effective_pos),
                     ("foundation.bot/has-locomotion", effective_loc),
                     ("foundation.bot/has-sonic", effective_sonic),
+                    ("foundation.bot/has-wolverine-loco", effective_wloco),
                 )
                 if eff == "true"
             ]
@@ -3098,9 +3113,10 @@ def cmd_validate(cfg: dict) -> int:
                     errors.append(
                         "nodeLabels: the robot-driving workloads "
                         "foundation.bot/has-positronic, "
-                        "foundation.bot/has-locomotion and "
-                        "foundation.bot/has-sonic are mutually exclusive — "
-                        f"only one may be \"true\" (got: "
+                        "foundation.bot/has-locomotion, "
+                        "foundation.bot/has-sonic and "
+                        "foundation.bot/has-wolverine-loco are mutually "
+                        "exclusive — only one may be \"true\" (got: "
                         f"{', '.join(enabled_drivers)})"
                     )
 

@@ -176,6 +176,11 @@ stacks:
 #                          pins localhost:5443/as-inference-models. busybox
 #                          bundle: Thor-built dinov2 + per-task AS engines + PCA
 #                          + norm-stats + state-machine + text-embeds + registry.
+#   (wolverine-loco's 3 images all share ONE repo
+#    foundationbot/dma-ghost-wbc-inference, tag-prefixed v / policies- / teleop-.
+#    Kustomize can't retag same-named images independently, so they are PINNED
+#    in manifests/base/wolverine-loco/ and NOT host-configurable here — bump by
+#    editing that manifest.)
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -203,6 +208,9 @@ images:
   #   image: localhost:5443/as-inference:REPLACE-WITH-AS-BUILD-TAG
   # as-inference-models:
   #   image: localhost:5443/as-inference-models:REPLACE-WITH-AS-MODELS-TAG
+  # wolverine-loco's images are PINNED in manifests/base/wolverine-loco/ (one
+  # shared repo, tag-prefixed) — nothing to set here. Opting in is just the
+  # nodeLabels gate below (has-wolverine-loco: 'true' + has-positronic: 'false').
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -660,10 +668,10 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
-# Mutual exclusion: positronic-control, phantom-locomotion, and
-# phantom-sonic each drive /desired, so at most ONE may be 'true' per
-# robot. positronic defaults to on, so enabling has-locomotion OR
-# has-sonic requires foundation.bot/has-positronic: 'false' (the
+# Mutual exclusion: positronic-control, phantom-locomotion, phantom-sonic,
+# and wolverine-loco each drive /desired, so at most ONE may be 'true' per
+# robot. positronic defaults to on, so enabling has-locomotion, has-sonic OR
+# has-wolverine-loco requires foundation.bot/has-positronic: 'false' (the
 # validator rejects the conflict with a pointed error).
 #
 # Values must be strings — quote 'true' / 'false' or the YAML parser
@@ -702,6 +710,10 @@ nodeLabels:
   # /as_action for the WBC — co-schedules with wm-inference, NOT in the
   # exclusion group)
   foundation.bot/has-as-inference: 'false'
+  # wolverine-loco DaemonSet (MK2 whole-body velocity-locomotion, pure-C++
+  # 1 kHz node + teleop web-UI sidecar; mutually exclusive with
+  # has-positronic/locomotion/sonic — all drive /desired)
+  foundation.bot/has-wolverine-loco: 'false'
   # yovariable-server DaemonSet
   foundation.bot/has-yovariable: 'true'
 
