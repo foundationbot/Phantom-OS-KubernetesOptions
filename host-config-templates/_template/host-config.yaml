@@ -163,6 +163,42 @@ stacks:
 #                          phantom-locomotion repo CI (carries bridge.psi0_* +
 #                          inference.policy_node). One find-key serves both
 #                          workloads. aarch64.
+#   okvis2x                core stack — OKVIS2-X live dense-stereo SLAM
+#                          DaemonSet (has-okvis gated, default-off). manifest
+#                          uses foundationbot/okvis2x. Multi-arch manifest —
+#                          the aarch64 image is the Jetson Thor build; OKVIS2-X
+#                          CircleCI publishes :<branch> / :latest (and immutable
+#                          :<arch>-<version> on release tags).
+#   okvis2x-models         core stack — okvis2x's load-models init. manifest
+#                          uses foundationbot/okvis2x-models. busybox bundle of
+#                          the SLAM model weights (~3.6 GB). Content-addressed +
+#                          published by CircleCI's build-models job.
+#   wm-inference           core stack — world-model z_ref service DaemonSet
+#                          (has-wm-inference gated, default-off). manifest pins
+#                          localhost:5443/wm-inference; override to a real tag,
+#                          either a local-registry retag or a DockerHub
+#                          repo-swap (foundationbot/wm-inference). MUST be
+#                          arm64/Thor (x86 engines fail CUDA init).
+#   wm-inference-models    core stack — wm-inference's load-models init. manifest
+#                          pins localhost:5443/wm-inference-models. busybox
+#                          bundle carrying the Thor-built TensorRT engines + PCA
+#                          + tokenizer + registry (arch-specific).
+#   as-inference           core stack — action-solver service DaemonSet
+#                          (has-as-inference gated, default-off). manifest pins
+#                          localhost:5443/as-inference; override to a real tag,
+#                          local-registry retag or DockerHub repo-swap
+#                          (foundationbot/as-inference). MUST be arm64/Thor.
+#   as-inference-models    core stack — as-inference's load-models init. manifest
+#                          pins localhost:5443/as-inference-models. busybox
+#                          bundle: Thor-built dinov2 + per-task AS engines + PCA
+#                          + norm-stats + state-machine + text-embeds + registry.
+#   dma-ghost-wbc-node / -policies / -teleop
+#                          core stack — wolverine-loco's 3 containers (node /
+#                          load-policies init / teleop sidecar). All publish to
+#                          ONE shared repo foundationbot/dma-ghost-wbc-inference,
+#                          tag-prefixed (v / policies- / teleop-, +/-aarch64).
+#                          Base pins localhost:5443/dma-ghost-wbc-* find-keys;
+#                          override each to the shared repo + its prefixed tag.
 images:
   positronic-control:
     image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -198,6 +234,31 @@ images:
   #   image: foundationbot/psi0-sonic:REPLACE-WITH-CI-TAG
   # phantom-loco:
   #   image: foundationbot/phantom-psi0-loco:REPLACE-WITH-CI-TAG-aarch64
+  # wm-inference is default-off (nodeLabels has-wm-inference: 'false');
+  # uncomment BOTH on hosts that opt in. Use a local-registry retag (push
+  # the arm64 images to localhost:5443 first) or a DockerHub repo-swap.
+  # wm-inference:
+  #   image: localhost:5443/wm-inference:REPLACE-WITH-WM-BUILD-TAG
+  # wm-inference-models:
+  #   image: localhost:5443/wm-inference-models:REPLACE-WITH-WM-MODELS-TAG
+  # as-inference is default-off (nodeLabels has-as-inference: 'false');
+  # uncomment BOTH on hosts that opt in (pairs with wm-inference — the
+  # action-solver consumes WM z_ref). Local-registry retag or DockerHub swap.
+  # as-inference:
+  #   image: localhost:5443/as-inference:REPLACE-WITH-AS-BUILD-TAG
+  # as-inference-models:
+  #   image: localhost:5443/as-inference-models:REPLACE-WITH-AS-MODELS-TAG
+  # wolverine-loco is default-off (nodeLabels has-wolverine-loco: 'false') and
+  # is in the /desired exclusion group — opting in REQUIRES
+  # foundation.bot/has-positronic: 'false'. Uncomment all three on hosts that
+  # opt in; they all point at the one shared repo with a per-container tag
+  # prefix (pin the -aarch64 tags on Jetson/Thor).
+  # dma-ghost-wbc-node:
+  #   image: foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64
+  # dma-ghost-wbc-policies:
+  #   image: foundationbot/dma-ghost-wbc-inference:policies-v0.1.0-aarch64
+  # dma-ghost-wbc-teleop:
+  #   image: foundationbot/dma-ghost-wbc-inference:teleop-v0.1.0-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
@@ -283,17 +344,21 @@ images:
 # Reboot required to pick up cmdline changes; bootstrap warns when
 # they're written.
 #
+# Pinning convention: within partitions[].cpus, put the RT loop on the
+# FIRST core and the NIC IRQs on the LAST core so they never contend.
+# For cpus "11-13": dmaRtCpu=11 (first), irqCore=13 (last).
+#
 # cpuIsolation:
 #   enabled: true
 #   partitions:
 #     - {name: ecat, cpus: "11-13", description: "EtherCAT master RT loop"}
 #   nic:
 #     iface: ecat0
-#     irqCore: 13              # NIC IRQs pinned here (one core, isolated)
+#     irqCore: 13              # NIC IRQs pinned here -> LAST core of the partition
 #     selector:
 #       mac: aa:bb:cc:dd:ee:ff # OR pci: "0000:01:00.0"
 #                              # OR {driver: igc, index: 0}
-#   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
+#   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full) -> FIRST core
 #   installAffinityDefaults: true
 #   kubepodsCpus: "0-9"        # pin the k0s pod cgroup off cores 10-13
 
@@ -708,10 +773,10 @@ images:
 # by the cluster phase. The validator rejects any attempt to set or
 # override it via this block.
 #
-# Mutual exclusion: positronic-control, phantom-locomotion, and
-# phantom-sonic each drive /desired, so at most ONE may be 'true' per
-# robot. positronic defaults to on, so enabling has-locomotion OR
-# has-sonic requires foundation.bot/has-positronic: 'false' (the
+# Mutual exclusion: positronic-control, phantom-locomotion, phantom-sonic,
+# and wolverine-loco each drive /desired, so at most ONE may be 'true' per
+# robot. positronic defaults to on, so enabling has-locomotion, has-sonic OR
+# has-wolverine-loco requires foundation.bot/has-positronic: 'false' (the
 # validator rejects the conflict with a pointed error).
 #
 # Values must be strings — quote 'true' / 'false' or the YAML parser
@@ -730,6 +795,8 @@ nodeLabels:
   foundation.bot/has-cameras: 'true'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
+  # okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM; GPU + DMA shm)
+  foundation.bot/has-okvis: 'false'
   # positronic-control Deployment
   foundation.bot/has-positronic: 'true'
   # phantom-psi DaemonSet (Ψ₀ VLA + loco bridge; mutually exclusive with
@@ -748,6 +815,17 @@ nodeLabels:
   foundation.bot/has-state-estimator: 'false'
   # rerun-streamer Deployment (dma-streams)
   foundation.bot/has-streamer: 'false'
+  # wm-inference DaemonSet (world-model z_ref service; feeds positronic —
+  # co-schedules with the control brain, NOT in the exclusion group)
+  foundation.bot/has-wm-inference: 'false'
+  # as-inference DaemonSet (action-solver; consumes WM z_ref, produces
+  # /as_action for the WBC — co-schedules with wm-inference, NOT in the
+  # exclusion group)
+  foundation.bot/has-as-inference: 'false'
+  # wolverine-loco DaemonSet (MK2 whole-body velocity-locomotion, pure-C++
+  # 1 kHz node + teleop web-UI sidecar; mutually exclusive with
+  # has-positronic/locomotion/sonic — all drive /desired)
+  foundation.bot/has-wolverine-loco: 'false'
   # yovariable-server DaemonSet
   foundation.bot/has-yovariable: 'true'
 
@@ -776,6 +854,36 @@ nodeLabels:
 #                                       (accepts extraArgs — see below)
 #   dma-recorder           core stack, container 'recorder' (DMA.streams .rrd writer)
 #   rerun-streamer         core stack, container 'streamer' (DMA.streams live viewer)
+#   okvis2x                core stack, container 'okvis2x' (OKVIS2-X SLAM)
+#                                       (accepts extraArgs — full argv replace, see below)
+#   wm-inference           core stack, container 'wm-inference' (world-model
+#                                       z_ref service; mounts-only — no args,
+#                                       the service is the image entrypoint)
+#   as-inference           core stack, container 'as-inference' (action-solver
+#                                       service; mounts-only — no args, the
+#                                       service is the image entrypoint)
+#
+# deployments.okvis2x.extraArgs (optional):
+#   okvis2x's argv is POSITIONAL (<app> <okvis.yaml> <se2.yaml> <output>), so
+#   extraArgs REPLACES the container argv wholesale rather than appending — the
+#   first element is the app (dma_live | snetwork). Omit it to keep the baked
+#   Thor foundation_rig config the base manifest ships. Camera calibration is
+#   per-robot, so the common pattern is to mount host YAMLs at /etc/okvis and
+#   repoint argv at them:
+#
+#     deployments:
+#       okvis2x:
+#         mounts:
+#           # per-robot okvis + se2 YAMLs (calibration differs per robot)
+#           - {name: okvis-config, host: /etc/phantomos/okvis, container: /etc/okvis}
+#           # persist trajectories/meshes (default /output is an ephemeral emptyDir)
+#           - {name: output,       host: /data/okvis,          container: /output}
+#         extraArgs: [dma_live, /etc/okvis/okvis_stereo_dense_thor.yaml,
+#                     /etc/okvis/se2.yaml, /output]
+#
+#   snetwork (dataset replay) instead of live SLAM — argv is
+#   [snetwork, <okvis.yaml>, <se2.yaml>, <dataset-dir>, <output-dir>]; add a
+#   mount for the dataset dir alongside.
 #
 # deployments.cpp-robot-state-estimator.extraArgs (optional):
 #   List of additional CLI flags appended after the SE's base args. Use
@@ -889,6 +997,43 @@ nodeLabels:
 #     # Raise only if frame loss during transient viewer stalls is a
 #     # bigger problem than RSS growth.
 #     queueMemoryLimitMb: 8
+#     # Per-queue downsample overrides. The shm producer (dma_main)
+#     # writes every queue at ~482 Hz; the streamer's --downsample N
+#     # publishes 1 of every N shm samples, so the rate to the viewer
+#     # is 482 / N. The base manifest sets --downsample 25, giving the
+#     # joint stream ≈ 20 Hz at the viewer.
+#     #
+#     # EVERY high-rate queue has its own override. All default to 0
+#     # (= inherit --downsample); set positive to override for that
+#     # queue only. Useful when one queue's per-cycle entity count
+#     # saturates the gRPC sender at the global rate — most commonly:
+#     #   /motor_diagnostics  ~300 entities/cycle (per-motor temp/fault/
+#     #                       status × ~30 joints + bus + slave state)
+#     #   /state_estimator    ~120 entities/cycle (pelvis 6-DoF + joints
+#     #                       + IMU + F/T + contact)
+#     #   /raw_imu_actuals    shm depth 1024 vs other queues' 128
+#     #
+#     # Set LARGER than --downsample to slow that queue. With
+#     # --downsample 25 (20 Hz joints):
+#     #   125 → 482 / 125 ≈ 4 Hz   (good for diagnostics / SE)
+#     #   500 → 482 / 500 ≈ 1 Hz   (truly bare minimum)
+#     #
+#     # Event-driven queues (/errors, /commands, /command_responses,
+#     # /motor_params_applied) are NOT downsampled — they fire rarely
+#     # enough that the global rate is fine and dropping events would
+#     # mask real activity.
+#     #
+#     # The recorder is unaffected — captures the full 482 Hz stream
+#     # to .rrd regardless of these knobs.
+#     actualsDownsample: 0              # /actuals             (0 = inherit)
+#     actualsTransformsDownsample: 0    # /actuals_transforms
+#     desiredDownsample: 0              # /desired
+#     desiredsControllerDownsample: 0   # /desireds_controller
+#     desiredsTransformsDownsample: 0   # /desireds_transforms
+#     rawImuDownsample: 50              # /raw_imu_actuals     → ~10 Hz
+#     motorDiagnosticsDownsample: 125   # /motor_diagnostics   → ~4 Hz
+#     stateEstimatorDownsample: 125     # /state_estimator     → ~4 Hz
+#     gripperDownsample: 0              # /desired_{left,right}_gripper
 #
 #   # cpp-robot-state-estimator: on robots without F/T sensors (0-F/T
 #   # hardware like mk11000009), the default ft_sensors contact source

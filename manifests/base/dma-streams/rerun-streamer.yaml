@@ -1,5 +1,43 @@
-# rerun-streamer — DaemonSet that serves a live Rerun web view of the robot's
-# DMA shm queues. Sibling to dma-recorder; same image, different binary.
+# rerun-streamer — DaemonSet that serves a live Rerun web view of the
+# robot's DMA shm queues. Sibling to dma-recorder; same image, three
+# roles wired together in one pod.
+#
+# ── Pod shape ────────────────────────────────────────────────────────────
+# Two containers in one pod:
+#   server     (NATIVE SIDECAR — initContainer with restartPolicy: Always)
+#              /usr/local/bin/rerun --serve-web ...
+#              hosts the browser web viewer (HTTP :9788) and the gRPC
+#              ingest socket (:9877) that buffers chunks in memory and
+#              fans them out to connected viewers.
+#   streamer   (regular container)
+#              /usr/local/bin/rerun_streamer ...
+#              reads /dev/shm, dials the colocated server at
+#              127.0.0.1:9877 (loopback within the hostNetwork pod),
+#              and pushes Rerun chunks.
+#
+# Why a SIDECAR initContainer (k8s 1.29+ feature, stable on k0s 1.35.4):
+# Regular containers cannot start until ALL initContainers complete.
+# Putting the server in `containers:` with a busybox `nc -z` gate in
+# `initContainers:` is a deadlock — the port the init waits on can
+# never bind. The native sidecar (initContainer with
+# `restartPolicy: Always`) runs in parallel with regular containers,
+# starts FIRST, and gates regular-container startup on its
+# `startupProbe`. Termination is reversed: streamer SIGTERMs first,
+# sidecar last — the streamer drains its publish queue before its
+# downstream listener disappears.
+#
+# The streamer's `--port` is the gRPC TARGET it dials, NOT a bind port.
+# The pre-server manifest passed `--port 9788` (the web port) — the
+# streamer was trying to dial the browser-facing HTTP socket and
+# could never have published. Fixed here to dial the server's gRPC
+# ingest on 9877.
+#
+# ── DaemonSet name preserved ─────────────────────────────────────────────
+# The DaemonSet is still named `rerun-streamer` despite the pod now
+# containing both containers. Renaming would cascade into host-config.py,
+# its tests, host-config templates, and all per-host overlays that
+# reference `deployments.rerun-streamer.*`. Documenting the
+# multi-container fact inline costs much less.
 #
 # ── Disabled by default ──────────────────────────────────────────────────
 # Gated on TWO node labels:
@@ -7,9 +45,11 @@
 #   foundation.bot/has-streamer:  "true"   — opt-in per host
 #
 # Bootstrap manages foundation.bot/* labels as a closed set (see
-# host-config.yaml). foundation.bot/has-streamer is NOT applied by default,
-# so kubectl/ArgoCD will render this manifest but no node will match the
-# selector → zero pods scheduled.
+# host-config.yaml). foundation.bot/has-streamer is NOT applied by
+# default, so kubectl/ArgoCD will render this manifest but no node
+# will match the selector → zero pods scheduled.
+#
+# Flipping the label now provisions BOTH server + streamer in one pod.
 #
 # Activate per-host:
 #   1) add to /etc/phantomos/host-config.yaml:
@@ -20,12 +60,14 @@
 #
 # Deactivate by removing the label or flipping it to "false".
 #
-# ── Why a separate DaemonSet (not a sidecar of dma-recorder) ──────────────
-# Recorder writes to disk; streamer serves a websocket. Different lifetimes,
-# different failure modes, different resource profiles. Keeping them in
-# separate pods means a streamer crash never restarts the recorder (or
-# vice-versa), and either can be scheduled to a different CPU set without
-# affecting the other.
+# ── Why a separate DaemonSet (not a sidecar of dma-recorder) ─────────
+# Recorder writes to disk; streamer+server serve a websocket. Different
+# lifetimes, different failure modes, different resource profiles.
+# Separate DaemonSets keep restarts independent and CPU pinning
+# orthogonal.
+#
+# Design + rationale (incl. alternatives rejected):
+#   DMA.streams/docs/superpowers/specs/2026-06-17-rerun-server-image-and-pod-design.md
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -51,58 +93,167 @@ spec:
         - operator: Exists
           effect: NoSchedule
 
-      # The Rerun viewer is dialed directly via the robot's IP; sit in the
-      # host network namespace so the websocket port binds the host iface.
+      # The Rerun viewer is dialed directly via the robot's IP; sit in
+      # the host network namespace so the websocket port binds the host
+      # iface AND the streamer can dial the colocated server on
+      # 127.0.0.1 without going through CNI / NetworkPolicy.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
 
       # Same shm queue requirements as dma-recorder: hostIPC for the
       # POSIX IPC namespace, privileged below for cross-namespace mmap.
+      # (Server doesn't need hostIPC, but it's a pod-level setting.)
       hostIPC: true
 
       terminationGracePeriodSeconds: 10
       imagePullSecrets:
         - name: dockerhub-creds
 
+      # ── rerun-server as a native SIDECAR ─────────────────────────
+      # restartPolicy: Always on an initContainer = sidecar.
+      # Starts before regular containers; the regular streamer waits
+      # on this container's startupProbe before launching.
+      initContainers:
+        - name: server
+          image: foundationbot/dma-streams:main-latest
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          # `rerun --serve-web` hosts BOTH the browser HTTP viewer
+          # (--web-viewer-port) and the gRPC ingest socket (--port).
+          # Do NOT also pass --serve-grpc — combining them suppresses
+          # the web viewer in rerun 0.32.x.
+          # --server-memory-limit caps the in-memory ring; old chunks
+          # get dropped past the cap. Sized in concert with the
+          # streamer's --downsample (20 Hz publish rate, ~2.4 MB/s
+          # data rate) → 32 MB ring holds ~13 s of history. The
+          # earlier 96 MB value was sized for the un-downsampled
+          # 50 Hz push rate; with the streamer now publishing at
+          # 20 Hz the smaller ring suffices and the server-side
+          # eviction work per ingest drops. Field measurement on
+          # phantom-mk2-3 (2026-06-19) showed steady-state ring
+          # depth near-empty because the browser drains it; this
+          # cap mostly governs reconnect-history replay.
+          # --cors-allow-origin: the browser dials the gRPC ingest
+          # (:9877) from the WASM viewer page hosted on the same robot
+          # at :9788. Default CORS allow-list only covers localhost, so
+          # any remote operator URL (http://phantom-mk2-3:9788, an IP,
+          # or a DNS alias) triggers a preflight that returns 200 but
+          # WITHOUT an Access-Control-Allow-Origin header — the browser
+          # blocks the actual request and the WASM viewer reports
+          # "TypeError: failed to fetch source". The glob `http://*:9788`
+          # whitelists any robot-hostname variant operators might use.
+          # Tighten if multi-tenancy on the same network ever matters.
+          command: ["rerun"]
+          args:
+            - --serve-web
+            - --web-viewer-port
+            - "9788"
+            - --port
+            - "9877"
+            - --bind
+            - "0.0.0.0"
+            - --server-memory-limit
+            - "32MB"
+            - --cors-allow-origin
+            - "http://*:9788"
+
+          ports:
+            - name: rerun-web
+              containerPort: 9788
+              hostPort: 9788
+            - name: rerun-grpc
+              containerPort: 9877
+              hostPort: 9877
+
+          securityContext:
+            runAsUser: 0
+
+          # Memory headroom = 32 MB ring (--server-memory-limit) +
+          # ~80 MB peak Tokio/gRPC working set + ~64 MB headroom for
+          # per-publish chunk handling once the streamer publishes ALL
+          # of: actuals, desired, desireds_controller, motor_diagnostics
+          # (~300 entities/cycle), motor_params_applied, errors,
+          # left/right gripper, /commands, /command_responses, and
+          # optionally /state_estimator. At the prior 128–192 Mi cap
+          # the server OOMKilled within a few minutes of the rerun-
+          # streamer-more-queues image landing, which severed the
+          # streamer's gRPC socket and zeroed the live view.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+
+          # Sidecar startup gate. Regular containers (streamer below)
+          # wait on this to pass. 60 × 1 s = 60 s cold-start budget.
+          startupProbe:
+            tcpSocket:
+              port: 9877
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 60
+          # Liveness checks gRPC ingest. Lenient timing here is
+          # deliberate — short blips while the server evicts old
+          # chunks under load should NOT kill the container, because
+          # a server restart breaks the streamer's gRPC socket. With
+          # the streamer's in-process reconnect (see streamer source),
+          # we recover anyway, but avoid the churn.
+          livenessProbe:
+            tcpSocket:
+              port: 9877
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket:
+              port: 9877
+            periodSeconds: 5
+
       containers:
+        # ── rerun-streamer — /dev/shm reader → gRPC publisher ───────
         - name: streamer
           image: foundationbot/dma-streams:main-latest
           imagePullPolicy: IfNotPresent
-          # The image's default ENTRYPOINT is dma_recorder — override here
-          # to launch the streamer binary instead.
+          # Default ENTRYPOINT is dma_recorder — override here.
           command: ["rerun_streamer"]
-          # rerun_streamer's argv parser is space-separated: `--flag value`,
-          # not `--flag=value`. Each option/value is its own list element.
+          # rerun_streamer's argv parser is space-separated: `--flag value`.
           #
-          # --variant selects which bundled URDF the streamer loads from
-          # /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf
-          # (baked into the image alongside the referenced meshes/). Override
-          # per-host with a kustomize patch when the robot is mk2 or later.
+          # --bind + --port: the gRPC TARGET the streamer dials. The
+          # dial URL is `rerun+http://<bind>:<port>/proxy`. With the
+          # server colocated in this pod (hostNetwork), 127.0.0.1:9877
+          # is the server's gRPC ingest.
           #
-          # --queue-memory-limit caps the in-process AsyncLogQueue in MB and
-          # drops oldest entries past the cap. The streamer was OOMing
-          # under sustained backpressure (downstream viewer slow or
-          # disconnected); the tight default keeps RSS bounded. Override
-          # per-host through deployments.rerun-streamer.queueMemoryLimitMb
-          # in host-config.yaml.
+          # --variant selects which bundled URDF the streamer loads
+          # from /usr/local/share/dma-streams/urdf/phantom_<variant>.urdf.
+          # Override per-host with `deployments.rerun-streamer.variant`
+          # in host-config.yaml — host-config writes args by CONTAINER
+          # name, so it still targets this `streamer` container.
+          #
+          # --queue-memory-limit caps the in-process AsyncLogQueue in
+          # MB; drops oldest entries past the cap to bound RSS.
           args:
+            - --bind
+            - "127.0.0.1"
             - --port
-            - "9788"
+            - "9877"
             - --variant
             - "mk1"
             - --queue-memory-limit
-            - "8"
+            - "4"
+            # --downsample 25 → publish 1 in 25 frames from the 500 Hz
+            # shm side = 20 Hz to Rerun. Halved from the earlier 1/10
+            # (= 50 Hz) default to cut data volume ~60% — see
+            # DMA.streams/docs/superpowers/specs/2026-06-19-rerun-memory-buffer-redesign.md.
+            - --downsample
+            - "25"
             # - --urdf
             # - /opt/configs/robot.urdf       # optional, overrides --variant
 
-          ports:
-            - name: rerun
-              containerPort: 9788
-              hostPort: 9788
-
           securityContext:
             runAsUser: 0      # /dev/shm segments are root-owned on host
-            privileged: true  # see dma-recorder.yaml — required for shm IPC access
+            privileged: true  # see dma-recorder.yaml — required for shm IPC
 
           resources:
             requests:
@@ -112,19 +263,32 @@ spec:
               cpu: 2000m
               memory: 2Gi
 
-          # Liveness via TCP connect on the websocket port — the streamer
-          # has no separate /health endpoint.
+          # The streamer has no listening socket of its own. The
+          # process can be alive (pgrep would say so) while its gRPC
+          # publish pipeline is stuck on a dead transport — that's the
+          # failure mode we hit when the rerun-server sidecar restarts
+          # and the streamer's TCP socket gets a one-shot transport
+          # error but nothing reconnects in the SDK.
+          #
+          # The streamer writes /tmp/rerun_streamer.alive with a unix
+          # timestamp every successful flush_blocking (5 s cadence;
+          # see rerun_streamer.cpp's stats-report block). If the file
+          # is older than 30 s the publish pipeline is wedged — kill
+          # the container so kubelet restarts it with a fresh gRPC
+          # dial. The streamer's in-process reconnect handles the
+          # common case first; this probe is the backup for cases
+          # where the main thread is itself stuck.
           livenessProbe:
-            tcpSocket:
-              port: 9788
-            initialDelaySeconds: 10
-            periodSeconds: 30
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >
+                  test -f /tmp/rerun_streamer.alive &&
+                  [ "$(( $(date +%s) - $(stat -c %Y /tmp/rerun_streamer.alive) ))" -lt 30 ]
+            initialDelaySeconds: 60
+            periodSeconds: 15
             failureThreshold: 3
-          readinessProbe:
-            tcpSocket:
-              port: 9788
-            initialDelaySeconds: 2
-            periodSeconds: 10
 
           volumeMounts:
             - name: dev-shm

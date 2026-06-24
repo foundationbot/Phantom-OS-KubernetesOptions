@@ -127,6 +127,7 @@ spec:
         # ── psi0-vla — Ψ₀ flow policy on the GPU ───────────────────────────
         - name: psi0-vla
           image: foundationbot/psi0-policy:PLACEHOLDER
+          image: psi0-policy:thor-cu130
           imagePullPolicy: IfNotPresent
           # The image entrypoint sources setup_env.sh (TORCH_CUDA_ARCH_LIST
           # autodetect, HF/torch caches) then exec's args. We override command
@@ -170,6 +171,10 @@ spec:
           securityContext:
             privileged: true
           resources:
+          resources:
+            # GPU via the NVIDIA k8s device plugin (no privileged needed).
+            limits:
+              nvidia.com/gpu: 1
             requests:
               cpu: "2"
               memory: "6Gi"

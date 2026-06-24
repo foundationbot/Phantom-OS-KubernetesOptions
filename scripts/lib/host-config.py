@@ -116,6 +116,11 @@ RESERVED_NODE_LABEL_KEYS: frozenset[str] = frozenset({"foundation.bot/robot"})
 #
 # Tuple: (key, default, description-shown-as-comment-in-host-config).
 NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
+    ("foundation.bot/has-as-inference",
+     "false",
+     "as-inference DaemonSet (action-solver z_ref consumer; produces "
+     "/as_action for the WBC — co-schedules with wm-inference, NOT in the "
+     "has-positronic/locomotion/sonic exclusion group)"),
     ("foundation.bot/has-cameras",
      "true",
      "dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)"),
@@ -128,6 +133,9 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-locomotion",
      "false",
      "phantom-locomotion DaemonSet (mutually exclusive with has-positronic)"),
+    ("foundation.bot/has-okvis",
+     "false",
+     "okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM, GPU + DMA shm)"),
     ("foundation.bot/has-positronic",
      "true",
      "positronic-control Deployment"),
@@ -153,6 +161,16 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-streamer",
      "false",
      "rerun-streamer Deployment (dma-streams)"),
+    ("foundation.bot/has-wm-inference",
+     "false",
+     "wm-inference DaemonSet (world-model z_ref service; feeds "
+     "positronic-control — co-schedules with the control brain, NOT "
+     "in the has-positronic/locomotion/sonic exclusion group)"),
+    ("foundation.bot/has-wolverine-loco",
+     "false",
+     "wolverine-loco DaemonSet (MK2 whole-body velocity-locomotion, pure-C++ "
+     "1 kHz node + teleop web-UI sidecar; mutually exclusive with "
+     "has-positronic/locomotion/sonic — all drive /desired)"),
     ("foundation.bot/has-yovariable",
      "true",
      "yovariable-server DaemonSet"),
@@ -495,6 +513,157 @@ def cmd_clear_positronic_launch_command(path: str) -> int:
         out.append(line)
 
     p.write_text("".join(out))
+    return 0
+
+
+# Containers whose image MUST live in the in-cluster local registry
+# (localhost:5443/*). These are locally-built busybox carrier images with
+# no DockerHub upstream and no containerd mirror fallthrough — a non-local
+# ref would never resolve on the robot. Used by cmd_set_image (Component B
+# of the offline image-tarball provisioning design, 2026-06-22).
+LOCAL_REGISTRY_PREFIX: str = "localhost:5443/"
+LOCAL_REGISTRY_ONLY_CONTAINERS: frozenset[str] = frozenset(
+    {"phantom-models", "phantom-policies"}
+)
+
+
+def cmd_set_image(path: str, container: str, ref: str) -> int:
+    """Persist images.<container>.image: <ref> into the host-config file
+    in place, preserving surrounding comments / formatting. Component B
+    of the offline image-tarball provisioning design (2026-06-22) — the
+    setter the --load-image-tars bootstrap phase calls after pushing a
+    docker-save'd tarball into the local registry.
+
+    Line-based rewrite, mirroring cmd_set_positronic_launch_command.
+    Cases handled:
+      (a) images.<container>.image already exists -> replace value.
+      (b) images: block exists but has no <container> entry -> insert a
+          '  <container>:\\n    image: <ref>\\n' entry under images:.
+      (c) images: block absent entirely -> append a fresh images: block
+          at EOF with the one entry.
+
+    Validation:
+      - <container> must be a key in CONTAINER_TARGETS.
+      - <ref> must be a non-empty repo:tag string (per _split_image_ref).
+      - phantom-models / phantom-policies are local-registry-only: a ref
+        that does not start with 'localhost:5443/' is rejected."""
+    p = Path(path)
+    if not p.is_file():
+        print(f"error: {path} not found", file=sys.stderr)
+        return 2
+
+    if container not in CONTAINER_TARGETS:
+        print(
+            f"error: unknown container {container!r} "
+            f"(valid: {', '.join(sorted(CONTAINER_TARGETS))})",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not isinstance(ref, str) or not ref.strip():
+        print("error: image ref must be a non-empty string", file=sys.stderr)
+        return 2
+    ref = ref.strip()
+    try:
+        _split_image_ref(ref)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if (
+        container in LOCAL_REGISTRY_ONLY_CONTAINERS
+        and not ref.startswith(LOCAL_REGISTRY_PREFIX)
+    ):
+        print(
+            f"error: container {container!r} is local-registry-only; "
+            f"ref {ref!r} must start with {LOCAL_REGISTRY_PREFIX!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    src = p.read_text().splitlines(keepends=True)
+
+    def _line_indent(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    def _is_yaml_key_line(line: str) -> bool:
+        stripped = line.lstrip(" ")
+        return bool(stripped.strip()) and not stripped.startswith("#")
+
+    # Locate images:, <container>:, image: line spans. We record the END
+    # of the images block so a new <container> entry inserts at the right
+    # position.
+    images_line: "int | None" = None
+    container_line: "int | None" = None
+    image_line: "int | None" = None
+    images_block_end: "int | None" = None  # exclusive insert point
+
+    n = len(src)
+    i = 0
+    while i < n:
+        line = src[i]
+        if _line_indent(line) == 0 and line.lstrip(" ").startswith("images:"):
+            images_line = i
+            # Walk forward over the images block (indent > 0 or blank/comment).
+            j = i + 1
+            while j < n:
+                if _is_yaml_key_line(src[j]) and _line_indent(src[j]) == 0:
+                    break
+                stripped_j = src[j].lstrip(" ")
+                if (
+                    _line_indent(src[j]) == 2
+                    and stripped_j.startswith(f"{container}:")
+                ):
+                    container_line = j
+                    # Walk over the <container> block (indent >= 4).
+                    k = j + 1
+                    while k < n:
+                        if _is_yaml_key_line(src[k]) and _line_indent(src[k]) <= 2:
+                            break
+                        stripped_k = src[k].lstrip(" ")
+                        if (
+                            _line_indent(src[k]) == 4
+                            and stripped_k.startswith("image:")
+                        ):
+                            image_line = k
+                        k += 1
+                j += 1
+            images_block_end = j
+            break
+        i += 1
+
+    # Case (a): image: line already exists — replace the value in place.
+    if image_line is not None:
+        src[image_line] = f"    image: {ref}\n"
+        p.write_text("".join(src))
+        print(f"set images.{container}.image = {ref}")
+        return 0
+
+    # Case (a'): <container> exists but has no image: line — insert one.
+    if container_line is not None:
+        src.insert(container_line + 1, f"    image: {ref}\n")
+        p.write_text("".join(src))
+        print(f"set images.{container}.image = {ref}")
+        return 0
+
+    # Case (b): images: block exists, no <container> entry — append entry
+    # at the end of the images block.
+    if images_line is not None:
+        assert images_block_end is not None
+        block = f"  {container}:\n    image: {ref}\n"
+        src.insert(images_block_end, block)
+        p.write_text("".join(src))
+        print(f"set images.{container}.image = {ref}")
+        return 0
+
+    # Case (c): no images: block — append a fresh one at EOF.
+    if src and not src[-1].endswith("\n"):
+        src[-1] = src[-1] + "\n"
+    src.append("images:\n")
+    src.append(f"  {container}:\n")
+    src.append(f"    image: {ref}\n")
+    p.write_text("".join(src))
+    print(f"set images.{container}.image = {ref}")
     return 0
 
 
@@ -1315,6 +1484,108 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # psi0-state and the psi0-dma-walking gripper container.
         "stack": "core",
         "manifest_image": "foundationbot/psi0-sonic",
+    "okvis2x": {
+        # okvis2x DaemonSet — OKVIS2-X live dense-stereo SLAM (has-okvis
+        # gated, default-off). Multi-arch manifest: the aarch64 image is
+        # the Jetson Thor build. OKVIS2-X CircleCI publishes :<branch> and
+        # :latest (and immutable :<arch>-<version> on release tags).
+        "stack": "core",
+        "manifest_image": "foundationbot/okvis2x",
+    },
+    "okvis2x-models": {
+        # Consumed by okvis2x's load-models initContainer — busybox bundle
+        # of the SLAM model assets (~3.6 GB: SuperPoint/LightGlue
+        # .onnx/.engine, depth/seg .pt, DBoW vocab), staged into a shared
+        # emptyDir. Same load-models pattern as phantom-models. CircleCI's
+        # build-models job content-addresses + publishes it.
+        "stack": "core",
+        "manifest_image": "foundationbot/okvis2x-models",
+    },
+    "as-inference": {
+        # as-inference DaemonSet (foundation.bot/has-as-inference gated): the
+        # action-solver z_ref consumer / /as_action producer. Base manifest
+        # pins localhost:5443/as-inference:PLACEHOLDER; a host overrides it to
+        # a real tag — local-registry retag or DockerHub repo-swap
+        # (foundationbot/as-inference, via dockerhub-creds). MUST be
+        # arm64/Thor; x86 fails CUDA init.
+        "stack": "core",
+        "manifest_image": "localhost:5443/as-inference",
+    },
+    "as-inference-models": {
+        # Consumed by as-inference's load-models initContainer — busybox bundle
+        # carrying the Thor-built TensorRT engines (dinov2 + per-task AS
+        # engines) + PCA + norm-stats + state-machine + text-embeds + registry.
+        # Image-only — an initContainer image, not a standalone workload, so it
+        # has NO DEPLOYMENT_TARGETS entry. Arch-specific (arm64/Thor).
+        "stack": "core",
+        "manifest_image": "localhost:5443/as-inference-models",
+    },
+    "wm-inference": {
+        # wm-inference DaemonSet (foundation.bot/has-wm-inference gated):
+        # the world-model z_ref service. Base manifest pins
+        # localhost:5443/wm-inference:PLACEHOLDER; a host overrides it to a
+        # real tag — either a local-registry retag
+        # (localhost:5443/wm-inference:<tag>) or a DockerHub repo-swap
+        # (foundationbot/wm-inference:<tag>, pulled via dockerhub-creds).
+        # The published image MUST be arm64/Thor (Dockerfile.thor); x86
+        # fails CUDA init.
+        "stack": "core",
+        "manifest_image": "localhost:5443/wm-inference",
+    },
+    "wm-inference-models": {
+        # Consumed by wm-inference's load-models initContainer — busybox
+        # bundle carrying the Thor-built TensorRT engines + PCA + tokenizer
+        # + registry, staged into a shared emptyDir. Same load-models
+        # pattern as phantom-models / okvis2x-models. Arm64/Thor-specific
+        # (the engines are arch- and TensorRT-version-bound). Image-only —
+        # an initContainer image, not a standalone workload, so it has NO
+        # DEPLOYMENT_TARGETS entry (nothing user-configurable to mount).
+        "stack": "core",
+        "manifest_image": "localhost:5443/wm-inference-models",
+    },
+    # wolverine-loco's three images all publish to ONE shared DockerHub repo
+    # foundationbot/dma-ghost-wbc-inference, distinguished by tag prefix
+    # (v / policies- / teleop-, +/-aarch64). To keep them independently
+    # host-configurable despite the shared name, each container has a DISTINCT
+    # localhost:5443/* find-key in manifests/base/wolverine-loco/ (pinned at
+    # :PLACEHOLDER); a host overrides each via images: to the real shared repo +
+    # its prefixed tag, and Kustomize find=replaces them independently (same
+    # localhost-find-key -> foundationbot-override pattern as as-inference).
+    "dma-ghost-wbc-node": {
+        # wolverine-loco's 1 kHz pure-C++ inference node container.
+        # e.g. images.dma-ghost-wbc-node.image: foundationbot/dma-ghost-wbc-inference:v0.1.0-aarch64
+        "stack": "core",
+        "manifest_image": "localhost:5443/dma-ghost-wbc-node",
+    },
+    "dma-ghost-wbc-policies": {
+        # load-policies initContainer (ONNX carrier).
+        # e.g. ...:policies-v0.1.0-aarch64
+        "stack": "core",
+        "manifest_image": "localhost:5443/dma-ghost-wbc-policies",
+    },
+    "dma-ghost-wbc-teleop": {
+        # teleop web-UI sidecar (:8080).
+        # e.g. ...:teleop-v0.1.0-aarch64
+        "stack": "core",
+        "manifest_image": "localhost:5443/dma-ghost-wbc-teleop",
+    },
+    "psi0-policy": {
+        # psi0-vla container of the phantom-psi DaemonSet (foundation.bot/has-psi
+        # gated): the Ψ₀ VLA GPU policy. Built on-device from
+        # Psi0-VLA/infra/docker/Dockerfile.policy (MUST be a CUDA-13/sm_110 torch
+        # base for Thor — the Orin igpu base does not run there). Currently a
+        # LOCAL image (k0s containerd, not the fleet registry), so the in-repo
+        # tag is the working default; kustomize rewrites it from
+        # images.psi0-policy. TODO: publish to the registry for multi-robot.
+        "stack": "core",
+        "manifest_image": "psi0-policy",
+    },
+    "phantom-loco": {
+        # bridge + walking containers of the phantom-psi DaemonSet. Local image
+        # (bridge.psi0_loco_bridge + inference.policy_node). Rewritten from
+        # images.phantom-loco. TODO: publish to the registry for multi-robot.
+        "stack": "core",
+        "manifest_image": "phantom-loco",
     },
 }
 
@@ -1574,6 +1845,50 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "kind": "DaemonSet",
         "namespace": "psi",
         "container": "walking",
+    # okvis2x DaemonSet — OKVIS2-X live dense-stereo SLAM. Override channels:
+    #   * mounts: host-path overlays. The two common ones are a per-robot
+    #     config dir (camera calibration differs per robot) and a persistent
+    #     output dir (trajectories/meshes default to an ephemeral emptyDir):
+    #
+    #       deployments:
+    #         okvis2x:
+    #           mounts:
+    #             - {name: okvis-config, host: /etc/phantomos/okvis, container: /etc/okvis}
+    #             - {name: output,       host: /data/okvis,          container: /output}
+    #           extraArgs: [dma_live, /etc/okvis/okvis_stereo_dense_thor.yaml,
+    #                       /etc/okvis/se2.yaml, /output]
+    #
+    #   * extraArgs: REPLACES the container argv wholesale (the base manifest's
+    #     args:). DEPLOYMENT_BASE_ARGS["okvis2x"] is empty, so extraArgs IS the
+    #     full argv — first element is the app (dma_live | snetwork), then the
+    #     config/output positionals. Repoint to the /etc/okvis mount above, or
+    #     switch to snetwork dataset replay. Omit it to keep the baked Thor
+    #     config the manifest ships.
+    "okvis2x": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "okvis2x",
+    },
+    # wm-inference DaemonSet — world-model z_ref service (positronic ns,
+    # has-wm-inference gated). Mounts-only override channel (no args: the
+    # service is the image entrypoint, no DEPLOYMENT_BASE_ARGS entry). The
+    # base manifest declares the universal /dev/shm + /dev + models mounts;
+    # a robot can overlay extra host paths (e.g. a debug/log dir) by name.
+    "wm-inference": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "wm-inference",
+    },
+    # as-inference DaemonSet — action-solver service (positronic ns,
+    # has-as-inference gated). Mounts-only override channel (no args: the
+    # service is the image entrypoint, no DEPLOYMENT_BASE_ARGS entry).
+    "as-inference": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "positronic",
+        "container": "as-inference",
     },
 }
 
@@ -1589,7 +1904,29 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
 # Each list is exactly what the manifest's `args:` contains EXCEPT for
 # the fields we project from host-config (variant, queueMemoryLimitMb,
 # extraArgs). Those are appended onto the base list when set.
-RERUN_STREAMER_BASE_ARGS: list[str] = ["--port", "9788"]
+RERUN_STREAMER_BASE_ARGS: list[str] = [
+    # --bind + --port are the gRPC TARGET the streamer dials, NOT a bind
+    # port. The dial URL is `rerun+http://<bind>:<port>/proxy`. With the
+    # rerun-server colocated in the same pod (hostNetwork), 127.0.0.1:9877
+    # is the server's gRPC ingest socket; 9788 is the browser-facing web
+    # viewer (HTTP), which the streamer must NOT dial.
+    #
+    # Pre-2026-06-19 value was `--port 9788` — that pre-dated the
+    # rerun-server sidecar and made the streamer dial the web port,
+    # silently hanging the gRPC handshake. Keep this in sync with the
+    # `--port` arg the rerun-server's `--port` value in
+    # manifests/base/dma-streams/rerun-streamer.yaml.
+    "--bind", "127.0.0.1",
+    "--port", "9877",
+    # --downsample sets the publish rate (every Nth frame from the 500 Hz
+    # shm side). 25 → 20 Hz to Rerun. MUST live in BASE_ARGS rather than
+    # only in the base manifest because any host that sets variant /
+    # queueMemoryLimitMb / extraArgs triggers a full args replacement
+    # (see _build_streamer_patch_args below), which would drop a
+    # base-manifest-only flag silently. Keep this in sync with the
+    # `--downsample` value in manifests/base/dma-streams/rerun-streamer.yaml.
+    "--downsample", "25",
+]
 DMA_RECORDER_BASE_ARGS: list[str] = [
     "--output", "/recordings",
     "--max-duration", "60",
@@ -1617,11 +1954,20 @@ IK_MK2_BASE_ARGS: list[str] = [
     "--command-out", "upper_body_cmd",
     "--rate", "50",
 ]
+# okvis2x's argv is POSITIONAL (<app> <okvis.yaml> <se2.yaml> <output>) — there
+# is nothing to append a flag to, so extraArgs is used as a WHOLESALE argv
+# replacement rather than an append. Keeping the base empty makes the rendered
+# args == extraArgs verbatim. The real default lives in the base manifest's
+# args:; an operator who sets extraArgs is opting into specifying the full argv
+# themselves (typically to repoint at a host-mounted per-robot config, or to
+# switch to snetwork dataset replay).
+OKVIS2X_BASE_ARGS: list[str] = []
 DEPLOYMENT_BASE_ARGS: dict[str, list[str]] = {
     "rerun-streamer": RERUN_STREAMER_BASE_ARGS,
     "dma-recorder": DMA_RECORDER_BASE_ARGS,
     "cpp-robot-state-estimator": CPP_ROBOT_STATE_ESTIMATOR_BASE_ARGS,
     "ik-mk2": IK_MK2_BASE_ARGS,
+    "okvis2x": OKVIS2X_BASE_ARGS,
 }
 
 # Allowlist for deployments.{rerun-streamer,dma-recorder}.variant. Add
@@ -1658,7 +2004,7 @@ EXPLODE_JOINTS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"dma-recorder"
 # sensors (e.g. mk11000009) that need --foot-contact-source kinematic
 # instead of the default ft_sensors contact source.
 EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
-    {"cpp-robot-state-estimator", "ik-mk2"}
+    {"cpp-robot-state-estimator", "okvis2x", "ik-mk2"}
 )
 
 # Allowlist for deployments.<name>.disableWalking. Spec-017 DMA-walking
@@ -1680,6 +2026,15 @@ PHANTOM_PSI_WALKING_CONTAINERS: tuple[str, ...] = ("walking", "bridge")
 _WORKLOAD_PATCH_FIELDS: frozenset[str] = frozenset({
     "mounts", "privileged", "variant", "queueMemoryLimitMb", "explodeJoints",
     "extraArgs", "disableWalking",
+    "mounts", "privileged", "variant", "queueMemoryLimitMb",
+    "explodeJoints", "extraArgs",
+    # Per-queue downsample overrides on rerun-streamer. Each becomes a
+    # --<queue>-downsample N flag in the rendered DaemonSet args.
+    "actualsDownsample", "actualsTransformsDownsample",
+    "desiredDownsample", "desiredsControllerDownsample",
+    "desiredsTransformsDownsample", "rawImuDownsample",
+    "motorDiagnosticsDownsample", "stateEstimatorDownsample",
+    "gripperDownsample",
 })
 
 
@@ -1770,15 +2125,41 @@ def _build_deployment_patch(
         container_spec["securityContext"] = {"privileged": True}
 
     # Argv-overlay fields (variant, queueMemoryLimitMb, explodeJoints,
-    # extraArgs). When any of these are set, strategic-merge REPLACES the
-    # whole args list, so we re-emit the base manifest's args from
-    # DEPLOYMENT_BASE_ARGS and append the overlay flags. validate()
-    # rejects each field on deployments where it isn't supported.
+    # extraArgs, per-queue downsample overrides). When any of these are
+    # set, strategic-merge REPLACES the whole args list, so we re-emit
+    # the base manifest's args from DEPLOYMENT_BASE_ARGS and append the
+    # overlay flags. validate() rejects each field on deployments where
+    # it isn't supported.
     variant = spec.get("variant")
     queue_limit_mb = spec.get("queueMemoryLimitMb")
     explode_joints = spec.get("explodeJoints")
     extra_args = spec.get("extraArgs") or []
-    if variant is not None or queue_limit_mb is not None or explode_joints or extra_args:
+    # Per-queue downsample overrides for the streamer. Each maps a
+    # YAML key (camelCase, matching the host-config schema) to a CLI
+    # flag exposed by `rerun_streamer` in foundationbot/DMA.streams.
+    # Adding a new queue here is a 1-line change.
+    streamer_per_queue_downsamples = [
+        ("actualsDownsample",             "--actuals-downsample"),
+        ("actualsTransformsDownsample",   "--actuals-transforms-downsample"),
+        ("desiredDownsample",             "--desired-downsample"),
+        ("desiredsControllerDownsample",  "--desireds-controller-downsample"),
+        ("desiredsTransformsDownsample",  "--desireds-transforms-downsample"),
+        ("rawImuDownsample",              "--raw-imu-downsample"),
+        ("motorDiagnosticsDownsample",    "--motor-diagnostics-downsample"),
+        ("stateEstimatorDownsample",      "--state-estimator-downsample"),
+        ("gripperDownsample",             "--gripper-downsample"),
+    ]
+    per_queue_overrides = [
+        (flag, spec[key]) for key, flag in streamer_per_queue_downsamples
+        if key in spec
+    ]
+    if (
+        variant is not None
+        or queue_limit_mb is not None
+        or explode_joints
+        or per_queue_overrides
+        or extra_args
+    ):
         base_args = DEPLOYMENT_BASE_ARGS.get(deployment_name)
         if base_args is None:
             # Defensive — validate() should have caught this. Skip silently
@@ -1790,6 +2171,11 @@ def _build_deployment_patch(
                 args_out += ["--variant", str(variant)]
             if queue_limit_mb is not None:
                 args_out += ["--queue-memory-limit", str(queue_limit_mb)]
+            # Append per-queue downsample overrides in the schema-list
+            # order (deterministic for snapshot diffs). Each is a
+            # streamer-only CLI flag; validate() rejects them elsewhere.
+            for flag, value in per_queue_overrides:
+                args_out += [flag, str(value)]
             if explode_joints:
                 # Recorder's parser expects a single comma-joined string
                 # ("SpineYaw,RightAnklePitch"), so flatten the list here.
@@ -2829,6 +3215,42 @@ def cmd_validate(cfg: dict) -> int:
                             f"deployments.{name}.queueMemoryLimitMb: "
                             f"must be >= 1 MB"
                         )
+            # Per-queue downsample overrides on rerun-streamer. Each is
+            # a non-negative integer; 0 means "inherit the global
+            # --downsample". The list is kept in sync with the streamer's
+            # CLI surface in foundationbot/DMA.streams; adding a new
+            # queue here is a 1-line change.
+            _PER_QUEUE_DOWNSAMPLE_FIELDS = (
+                "actualsDownsample",
+                "actualsTransformsDownsample",
+                "desiredDownsample",
+                "desiredsControllerDownsample",
+                "desiredsTransformsDownsample",
+                "rawImuDownsample",
+                "motorDiagnosticsDownsample",
+                "stateEstimatorDownsample",
+                "gripperDownsample",
+            )
+            for field in _PER_QUEUE_DOWNSAMPLE_FIELDS:
+                if field not in spec:
+                    continue
+                if name != "rerun-streamer":
+                    errors.append(
+                        f"deployments.{name}.{field}: only supported on "
+                        f"rerun-streamer"
+                    )
+                    continue
+                d = spec[field]
+                if isinstance(d, bool) or not isinstance(d, int):
+                    errors.append(
+                        f"deployments.{name}.{field}: must be a non-"
+                        f"negative integer (0 = inherit --downsample)"
+                    )
+                elif d < 0:
+                    errors.append(
+                        f"deployments.{name}.{field}: must be >= 0 "
+                        f"(0 = inherit --downsample)"
+                    )
             # extraArgs: generic append-only argv escape hatch. Supported
             # only on EXTRA_ARGS_SUPPORTED_DEPLOYMENTS (currently
             # cpp-robot-state-estimator). Must be a list of scalars
@@ -2955,17 +3377,18 @@ def cmd_validate(cfg: dict) -> int:
                         f"value (alnum + - _ ., max 63 chars, can be empty)"
                     )
 
-            # Mutual exclusion: positronic-control, phantom-locomotion, and
-            # phantom-sonic are competing workloads — each drives /desired,
-            # so at most ONE may be enabled per robot. has-positronic
-            # defaults to "true" (the cluster phase reconciler injects it on
-            # every robot unless explicitly set false), so operators
-            # enabling locomotion or sonic MUST also explicitly disable
-            # positronic — otherwise both would render and fight for the
-            # robot.
+            # Mutual exclusion: positronic-control, phantom-locomotion,
+            # phantom-sonic, and wolverine-loco are competing workloads —
+            # each drives /desired, so at most ONE may be enabled per robot.
+            # has-positronic defaults to "true" (the cluster phase
+            # reconciler injects it on every robot unless explicitly set
+            # false), so operators enabling locomotion / sonic / wolverine-loco
+            # MUST also explicitly disable positronic — otherwise both would
+            # render and fight for the robot.
             effective_pos = nl.get("foundation.bot/has-positronic", "true")
             effective_loc = nl.get("foundation.bot/has-locomotion", "false")
             effective_sonic = nl.get("foundation.bot/has-sonic", "false")
+            effective_wloco = nl.get("foundation.bot/has-wolverine-loco", "false")
             effective_psi = nl.get("foundation.bot/has-psi", "false")
             effective_psi_dma = nl.get(
                 "foundation.bot/has-psi-dma-walking", "false"
@@ -3001,6 +3424,7 @@ def cmd_validate(cfg: dict) -> int:
                     ("foundation.bot/has-positronic", effective_pos),
                     ("foundation.bot/has-locomotion", effective_loc),
                     ("foundation.bot/has-sonic", effective_sonic),
+                    ("foundation.bot/has-wolverine-loco", effective_wloco),
                     ("foundation.bot/has-psi", effective_psi),
                     ("foundation.bot/has-psi-dma-walking", effective_psi_dma),
                 )
@@ -3034,9 +3458,10 @@ def cmd_validate(cfg: dict) -> int:
                         "nodeLabels: the robot-driving workloads "
                         "foundation.bot/has-positronic, "
                         "foundation.bot/has-locomotion, "
-                        "foundation.bot/has-sonic and "
+                        "foundation.bot/has-sonic, "
+                        "foundation.bot/has-wolverine-loco and "
                         "foundation.bot/has-psi are mutually exclusive — "
-                        f"only one may be \"true\" (got: "
+                        "only one may be \"true\" (got: "
                         f"{', '.join(enabled_drivers)})"
                     )
 
@@ -3173,6 +3598,14 @@ def main() -> int:
             )
             return 2
         return cmd_get_image_for_container(cfg, sys.argv[3])
+    if cmd == "set-image":
+        if len(sys.argv) != 5:
+            print(
+                "usage: host-config.py <path> set-image <container> <ref>",
+                file=sys.stderr,
+            )
+            return 2
+        return cmd_set_image(path, sys.argv[3], sys.argv[4])
     if cmd == "get-dma-ethercat-config-set":
         return cmd_get_dma_ethercat_config_set(cfg)
     if cmd == "get-dma-ethercat-config-path":

@@ -1,0 +1,191 @@
+# wolverine-loco — DaemonSet running the MK2 whole-body VELOCITY-locomotion
+# policy (wolverine, pure-C++ 1 kHz node). Sibling of phantom-locomotion, but:
+#   * pure C++ (no ROS) — the image ENTRYPOINT is launch.sh, no /entrypoint.sh
+#     ROS sourcing; steering is the /dev/shm command scratch, not ROS topics.
+#   * CPU-only — onnxruntime CPUExecutionProvider, so NO nvidia runtime / NVIDIA_*.
+#   * carries its own teleop web-UI as a sidecar container.
+#
+# ── Images ─────────────────────────────────────────────────────────────────
+# All three publish to ONE shared DockerHub repo foundationbot/dma-ghost-wbc-inference
+# (omni-wbc CI), distinguished by tag prefix:
+#   :v<x.y.z>(-aarch64)           — the 1 kHz pure-C++ node (docker/dma_policy_cpp)
+#   :policies-v<x.y.z>(-aarch64)  — busybox carrier of the ONNX (/models/policies)
+#   :teleop-v<x.y.z>(-aarch64)    — Python teleop web server (joystick/e-stop/motors/record)
+#
+# Because they share one image NAME, Kustomize can't retag them by name. So each
+# container carries a DISTINCT localhost:5443/* FIND-KEY here (pinned :PLACEHOLDER);
+# the host's host-config.yaml images: block swaps each to the real shared repo +
+# its prefixed tag (same localhost-find-key -> foundationbot-override pattern as
+# as-inference). host-config container keys: dma-ghost-wbc-{node,policies,teleop}.
+# A host that opts in MUST set those three images: entries (else PLACEHOLDER).
+#
+# ── Mutual exclusion ───────────────────────────────────────────────────────
+# Writes /desired, so it is in the positronic/locomotion/sonic mutual-exclusion
+# group (host-config validator enforces). A robot opting into wolverine-loco MUST
+# set has-positronic / has-locomotion / has-sonic all "false" in nodeLabels.
+#
+# ── Policies ───────────────────────────────────────────────────────────────
+# An initContainer copies /models/policies from the policies carrier image
+# (dma-ghost-wbc-inference:policies-*) into
+# a shared emptyDir; the node container mounts it at /data/policies. The policy
+# NAME per host comes from the wolverine-loco-config ConfigMap (WOLVERINE_POLICY);
+# launch.sh resolves POLICY_ONNX_PATH=/data/policies/$WOLVERINE_POLICY.onnx with a
+# baked default, so the pod still starts if the CM isn't applied yet.
+#
+# ── Teleop + recording + motors ────────────────────────────────────────────
+# The teleop sidecar exposes a web UI on port 8090 (http://<robot-ip>:8090).
+# It writes the velocity command to /dev/shm/wolverine_command (the node reads it,
+# stale->stop). Its Enable-Motors / Record buttons send dma_common CommandClient
+# opcodes (ENABLE_MOTORS / DISABLE_MOTORS, RECORDING_START 0x0700 / RECORDING_STOP
+# 0x0701) onto the host /commands queue — consumed by dma_main (motors) and the
+# dma-recorder DaemonSet (recording; it already runs --manual-arm). Works because
+# the pod has hostIPC + the /dev/shm hostPath (the queue is host-global across
+# namespaces). Recording requires the robot to also carry has-recorder=true.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wolverine-loco
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: wolverine-loco
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wolverine-loco
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wolverine-loco
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-wolverine-loco: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # hostIPC + the /dev/shm hostPath share the POSIX-SHM seam with dma_main
+      # (the RT EtherCAT master). hostNetwork puts the teleop web UI directly on
+      # the robot's IP. NO runtimeClassName: the C++ node + teleop are CPU-only.
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      initContainers:
+        # Copy /models/policies from the policies carrier image into the shared
+        # emptyDir; the node mounts it at /data/policies. Fail loud if the image
+        # doesn't ship /models/policies (init logs name the missing path).
+        - name: load-policies
+          image: localhost:5443/dma-ghost-wbc-policies:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if [ -d /models/policies ]; then
+                echo "==> copying /models/policies -> /shared"
+                cp -a /models/policies/. /shared/
+              else
+                echo "==> /models/policies missing in policies carrier image" >&2
+                echo "    expected: /models/policies/<name>.onnx" >&2
+                exit 1
+              fi
+              echo "==> done; /shared:"; ls -la /shared | head
+          volumeMounts:
+            - { name: policies, mountPath: /shared }
+          resources:
+            requests: { cpu: "500m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+
+      containers:
+        # ── The 1 kHz C++ inference node ──────────────────────────────────
+        - name: node
+          image: localhost:5443/dma-ghost-wbc-node:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT is launch.sh (no ROS). launch.sh resolves the ONNX
+          # from WOLVERINE_POLICY (-> /data/policies/$WOLVERINE_POLICY.onnx) with a
+          # baked default if the ConfigMap isn't present.
+          stdin: true            # allow `kubectl exec -it` for live inspection
+          tty: true
+          envFrom:
+            # Per-host policy selection (WOLVERINE_POLICY) + optional overrides.
+            # optional: true so the pod starts on launch.sh's default if absent.
+            - configMapRef:
+                name: wolverine-loco-config
+                optional: true
+          env:
+            - { name: LOCOMOTION_MODE,  value: "policy" }
+            - { name: RATE_HZ,          value: "1000" }
+            # REAL hardware: undo the pelvis-IMU site->body mounting. (identity is
+            # sim-only.)
+            - { name: IMU_MOUNT,        value: "mk2-pelvis" }
+            - { name: COMMAND_SCRATCH,  value: "/dev/shm/wolverine_command" }
+            - { name: COMMAND_TIMEOUT,  value: "0.3" }
+            # Operator dead-man: the node commands nothing until this file exists
+            # (engage: `touch`; kill: `rm`). The teleop UI / an operator creates it.
+            - { name: ENABLE_GATE,      value: "/dev/shm/wolverine_enable" }
+          volumeMounts:
+            - { name: shm,        mountPath: /dev/shm }
+            - { name: policies,   mountPath: /data/policies }
+            - { name: recordings, mountPath: /recordings }
+          resources:
+            # Light, CPU-bound; real RT pinning is the cpu-isolation phase's job.
+            requests: { cpu: "2", memory: "1Gi" }
+            limits:   { cpu: "4", memory: "2Gi" }
+          securityContext:
+            privileged: true
+
+        # ── Teleop web UI (sidecar) ───────────────────────────────────────
+        # Serves the joystick + e-stop + Enable-Motors + Record page on
+        # http://<robot-ip>:8090. Writes the velocity scratch the node reads, and
+        # sends ENABLE_MOTORS / RECORDING_* opcodes (needs the shared /dev/shm).
+        # Bound 0.0.0.0:8090 with NO auth token for easiest operator access —
+        # tighten with --token (from a Secret) if the robot is on an open network.
+        # PORT 8090: 8080 is already taken on the host by yovariable-server (admin)
+        # — and this pod is hostNetwork, so the bind is the host port. See the
+        # hostPort registry in docs/operations.md. The hostPort: below is
+        # documentation only (ignored under hostNetwork; must equal containerPort).
+        - name: teleop
+          image: localhost:5443/dma-ghost-wbc-teleop:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -u
+            - /app/web_command_server.py
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8090"
+            - --scratch
+            - /dev/shm/wolverine_command
+          ports:
+            - name: teleop
+              containerPort: 8090
+              hostPort: 8090
+              protocol: TCP
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "250m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          securityContext:
+            privileged: true
+
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm,         type: Directory }
+        - name: policies
+          emptyDir: {}
+        # Shared with the dma-recorder DaemonSet so operator-visible run
+        # artifacts (.rrd recordings + any node diagnostics) live under one tree.
+        # DirectoryOrCreate so the mount succeeds on robots that never ran the
+        # recorder.
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }

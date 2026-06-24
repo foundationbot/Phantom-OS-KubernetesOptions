@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# wolverine-loco DaemonSet — MK2 whole-body velocity-locomotion (pure-C++ 1 kHz
+# node + teleop web-UI sidecar). Gated on foundation.bot/has-wolverine-loco;
+# in the positronic/locomotion/sonic mutual-exclusion group (host-config
+# validator enforces — see scripts/lib/host-config.py, added in Phase 3).
+# See wolverine-loco.yaml for the full design notes + image dependencies.
+resources:
+  - wolverine-loco.yaml

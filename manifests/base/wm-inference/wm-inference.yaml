@@ -1,0 +1,211 @@
+# wm-inference — DaemonSet that runs the world-model z_ref inference
+# service (imu-policy/world-model/inference). Ported from that repo's
+# inference/deploy/daemonset-nvidia.yaml into the fleet paradigm.
+#
+# What it does: reads camera frames from the DMA.video shm rings, runs
+# the frozen vision + text encoders and the per-task predictor, and
+# publishes z_ref goals to the action-solver over POSIX shm rings
+# (/wm_zref_req, /wm_zref_resp) on the shared host /dev/shm. The
+# action-solver (the z_ref consumer) is a SEPARATE workload from
+# positronic-control / phantom-locomotion / phantom-sonic and from the
+# PSI0 VLA — it must be co-located on the same node to share the shm.
+#
+# Relationship to the control brain: wm-inference FEEDS the action-solver
+# (z_ref provider); it does NOT drive /desired, so it is NOT a competitor
+# of positronic-control / phantom-locomotion / phantom-sonic and is NOT
+# part of their mutual-exclusion group — it co-schedules alongside its
+# consumer / whichever control brain is active. Gate it with its own
+# foundation.bot/has-wm-inference label; leave the exclusion validator
+# untouched.
+#
+# A DaemonSet (not a Deployment) for symmetry with positronic-control:
+# gating on a nodeSelector label means a robot that opts out gets zero
+# pods, versus a Deployment that would leave a Pending replica.
+#
+# Two images flow into this pod, both rewritten per-robot via Kustomize's
+# `images:` transformer in the overlay:
+#   1. localhost:5443/wm-inference:<tag>         — the C++ service binary.
+#   2. localhost:5443/wm-inference-models:<tag>  — carries the
+#      Thor(arm64)-built TensorRT engines + PCA + tokenizer + registry;
+#      the load-models initContainer copies its /models tree into a
+#      shared emptyDir the main container mounts read-only at /wm-models.
+#      NB: the engines are arch- (and TensorRT-version-) specific — this
+#      image MUST be built for arm64/Thor; x86 engines fail CUDA init.
+#
+# Models are loaded via initContainer + emptyDir copy rather than the
+# native image: volume because k0s 1.35.3's containerd has only partial
+# image-volume support (same reason positronic-control does this).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: wm-inference
+  namespace: positronic
+spec:
+  selector:
+    matchLabels:
+      app: wm-inference
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # One node at a time. Readiness gates on the first valid camera
+      # frame (below), so a node whose camera is not yet streaming will
+      # not go ready and — by design — stalls its own rollout rather
+      # than advancing to a pod that cannot serve.
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: wm-inference
+    spec:
+      # Own gating label — co-schedules with the action-solver (its z_ref
+      # consumer); NOT in the /desired mutual-exclusion group (see header). The
+      # robot=true guard (carried by every robot DaemonSet) keeps the
+      # GPU/camera-bound pod off non-robot nodes even if the feature
+      # label is mis-applied.
+      nodeSelector:
+        foundation.bot/has-wm-inference: "true"
+        foundation.bot/robot: "true"
+      # Robot nodes may carry a NoSchedule taint; tolerate it blanket
+      # (the nodeSelector is what actually constrains placement). Matches
+      # the fleet-wide robot-DaemonSet convention.
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # > the ~10 s worst-case SIGINT shutdown lag of the C++ service.
+      terminationGracePeriodSeconds: 15
+      # dockerhub-creds is seeded by bootstrap phase 5 (seed-pull-secrets).
+      # Required when an image override swaps either image to a
+      # foundationbot/* (private DockerHub) ref; harmless for the
+      # local-registry default (kubelet ignores auth for it).
+      imagePullSecrets:
+        - name: dockerhub-creds
+      # GPU access flows through the nvidia container runtime registered
+      # in containerd by scripts/configure-k0s-nvidia-runtime.sh. The
+      # NVIDIA_* env below is also required — runtimeClassName + privileged
+      # alone do NOT inject the device on this containerd/Tegra setup; the
+      # first TensorRT deserialize fails with CUDA init error 35 without it.
+      runtimeClassName: nvidia
+      initContainers:
+        # Copy the engine/PCA/tokenizer/registry payload out of the
+        # immutable models image into the shared emptyDir, then fail loud
+        # if the task-independent assets are missing. Per-task predictor
+        # engines are host-specific (driven by WM_PREDICTOR_ENGINES in the
+        # ConfigMap) so they are NOT asserted here — the service binary
+        # fails loud at boot if a configured engine is absent.
+        - name: load-models
+          image: localhost:5443/wm-inference-models:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "==> copying /models -> /wm-models"
+              cp -a /models/. /wm-models/
+              test -f /wm-models/vjepa.engine
+              test -f /wm-models/siglip_text.engine
+              test -f /wm-models/pca_basisA.bin
+              test -f /wm-models/spiece.model
+              test -f /wm-models/registry.json
+              echo "==> done; /wm-models contents:"
+              ls -la /wm-models | head
+          volumeMounts:
+            - name: models
+              mountPath: /wm-models
+          resources:
+            # requests == limits → Guaranteed; runs once for ~10–30 s
+            # at pod start (mirrors positronic-control's load-models).
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "1", memory: "1Gi" }
+      containers:
+        - name: wm-inference
+          image: localhost:5443/wm-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # No command/args: the image entrypoint is the service binary.
+          envFrom:
+            # Per-host knobs (camera id, base-ckpt sha, task<->engine list).
+            - configMapRef:
+                name: wm-inference-config
+                optional: true
+          env:
+            # Image contract — fixed paths into the emptyDir the init
+            # container populated; never vary per robot.
+            - { name: WM_VJEPA_ENGINE,  value: /wm-models/vjepa.engine }
+            - { name: WM_SIGLIP_ENGINE, value: /wm-models/siglip_text.engine }
+            - { name: WM_PCA_PATH,      value: /wm-models/pca_basisA.bin }
+            - { name: WM_SPM_PATH,      value: /wm-models/spiece.model }
+            - { name: WM_REGISTRY,      value: /wm-models/registry.json }
+            # Readiness sentinel + metrics/heartbeat file. Written to the
+            # container's own ephemeral /tmp (NOT a host mount) so the
+            # ready sentinel cannot latch stale across pod restarts.
+            - { name: WM_READY_FILE,    value: /tmp/wm_ready }
+            - { name: WM_METRICS_PATH,  value: /tmp/wm_metrics.json }
+            # GPU injection gate (see runtimeClassName note above).
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+          securityContext:
+            privileged: true  # /dev GPU (tegra) + camera device nodes
+          # Cold TensorRT deserialize of several engines + first-frame
+          # acquisition can take tens of seconds on Thor; while the
+          # startup probe fails, readiness + liveness are suspended.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/wm_ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          # Ready == engines loaded + first valid camera frame pair seen
+          # (the binary touches WM_READY_FILE only then). Latches once set.
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/wm_ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          # Liveness = the serve loop is still turning. The metrics file
+          # is rewritten every ~10 s at the TOP of the serve loop, BEFORE
+          # the camera/serve work — so a camera stall does NOT kill the
+          # pod (by design) but a wedged/hung loop does (mtime ages out).
+          # Threshold 40 s >> the 10 s emit interval (+ reconnect block).
+          # `stat -c %Y` is GNU coreutils (the service image is an
+          # l4t/Ubuntu base); this exact probe is validated live on Thor.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test "$(( $(date +%s) - $(stat -c %Y /tmp/wm_metrics.json 2>/dev/null || echo 0) ))" -lt 40
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 3
+          # Burstable QoS — matches the measured footprint (host RSS
+          # peaked ~1.3 GiB at init, ~0.17 GiB idle). The TRT engines
+          # live in unified LPDDR via the iGPU and are not counted in
+          # this memcg. CPU burst headroom covers the turbojpeg-decode +
+          # CUDA-launch spikes. [RE-TUNE under live action-solver load.]
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          volumeMounts:
+            - { name: models, mountPath: /wm-models, readOnly: true }
+            - { name: shm,    mountPath: /dev/shm }
+            - { name: dev,    mountPath: /dev }
+      volumes:
+        # Engines/PCA/tokenizer/registry staged by the init container.
+        - name: models
+          emptyDir: {}
+        # Shared POSIX shm: the DMA.video camera rings + the z_ref
+        # request/response rings, shared with the camera producer + the
+        # action-solver client (both hostIPC).
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
+        # GPU + camera device nodes.
+        - name: dev
+          hostPath: { path: /dev, type: Directory }

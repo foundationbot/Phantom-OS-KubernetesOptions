@@ -81,6 +81,16 @@
 #                        the per-host phantomos-<robot> Application
 #   --argocd-admin       install argocd CLI; prompt and set admin
 #                        password (default '1984' on empty input)
+#   --load-image-tars    load + push prebuilt phantom-models /
+#                        phantom-policies image tarballs into the
+#                        in-cluster localhost:5443 registry, then wire
+#                        the loaded tag into host-config.yaml's images:
+#                        block. Provide the tarball paths via
+#                        --phantom-models-tar / --phantom-policies-tar
+#                        (on an interactive full bootstrap, prompts for
+#                        any path not given). Runs between gitops and
+#                        image-overrides so the unchanged image-overrides
+#                        phase injects the new tag. See operations.md §3.13.
 #   --image-overrides    inject host-config.yaml's images list into
 #                        the live Application
 #   --deployments        inject host-config.yaml's deployments: patches
@@ -148,6 +158,16 @@
 #   --positronic-image <image>
 #                      local docker image to push as positronic-control
 #                      (used with --setup-positronic).
+#   --phantom-models-tar <path>
+#                      path to a prebuilt phantom-models image tarball
+#                      (docker save output: .tar / .tar.gz / .tgz /
+#                      .tar.zst). Consumed by the load-image-tars phase:
+#                      loaded, pushed to localhost:5443, and wired into
+#                      host-config.yaml's images: block.
+#   --phantom-policies-tar <path>
+#                      path to a prebuilt phantom-policies image tarball
+#                      (same formats as --phantom-models-tar). Consumed
+#                      by the load-image-tars phase.
 #   --dockerhub-secret-file <path>
 #                      path to a file containing the raw `.dockerconfigjson`
 #                      payload (the JSON object with `auths`) for the
@@ -283,6 +303,17 @@
 #                    hash. Idempotent (always rewrites the hash). Also
 #                    removes argocd-initial-admin-secret since it is no
 #                    longer authoritative.
+#   14b. load-image-tars (optional; runs between gitops and image-overrides)
+#                    wait for the k0s-registry Deployment to become
+#                    Available, then for each provided tarball
+#                    (--phantom-models-tar / --phantom-policies-tar, or,
+#                    on an interactive full bootstrap, prompted) call
+#                    scripts/load-image-tars.sh to load + push the
+#                    localhost:5443/* tag and host-config.py set-image to
+#                    wire that tag into host-config.yaml's images: block.
+#                    Soft-skips if neither tarball is provided or the
+#                    registry never becomes Available. The following
+#                    image-overrides phase injects the new tag live.
 #   15. image overrides
 #                    inject host-config.yaml's images: list into the live
 #                    per-stack Argo Applications via
@@ -321,6 +352,8 @@ AI_PC_URL=""
 HOST_CONFIG_INPUT=""
 SETUP_POSITRONIC=0
 POSITRONIC_IMAGE=""
+PHANTOM_MODELS_TAR=""
+PHANTOM_POLICIES_TAR=""
 DOCKERHUB_SECRET_FILE=""
 # Empty = "no flag passed; fall back to host-config.yaml's production
 # field (default false)". Flag values: 0 or 1.
@@ -341,6 +374,7 @@ SKIP_SONIC_CONFIG=0
 SKIP_PSI_CONFIG=0
 SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
+SKIP_LOAD_IMAGE_TARS=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
 SKIP_VALIDATE=0
@@ -404,6 +438,7 @@ while [ $# -gt 0 ]; do
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
+    --load-image-tars)   SELECTED_PHASES+=(load-image-tars); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
     --deployments|--dev-mounts)
                          SELECTED_PHASES+=(dev-mounts); shift ;;
@@ -451,6 +486,10 @@ while [ $# -gt 0 ]; do
                          DOCKERHUB_SECRET_FILE="${2:-}"; shift 2 ;;
     --setup-positronic)  SETUP_POSITRONIC=1; shift ;;
     --positronic-image)  POSITRONIC_IMAGE="${2:-}"; shift 2 ;;
+    --phantom-models-tar)
+                         PHANTOM_MODELS_TAR="${2:-}"; shift 2 ;;
+    --phantom-policies-tar)
+                         PHANTOM_POLICIES_TAR="${2:-}"; shift 2 ;;
 
     # Behavior modifiers.
     -y|--yes)            YES=1; shift ;;
@@ -630,6 +669,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_LOG_MANAGEMENT=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
+  SKIP_LOAD_IMAGE_TARS=1
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
   SKIP_VALIDATE=1
@@ -657,6 +697,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
+      load-image-tars)   SKIP_LOAD_IMAGE_TARS=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
@@ -675,7 +716,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface|load-image-tars) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -1253,14 +1294,27 @@ deps() {
     fi
   fi
 
+  # k0s — PINNED for deterministic bringup. get.k0s.sh installs the
+  # LATEST release by default, which silently jumped fresh robots from
+  # containerd 1.7.x (k0s 1.35.x) to containerd 2.x (k0s 1.36+). The two
+  # use different containerd config formats, so the unpinned jump broke
+  # the containerd drop-ins (configure-k0s-*). Pin so every fresh robot
+  # lands on the same validated version; bump deliberately with
+  # K0S_VERSION=v1.x.y+k0s.0 (and re-test the containerd config format).
+  K0S_VERSION="${K0S_VERSION:-v1.35.4+k0s.0}"
   if command -v k0s >/dev/null 2>&1; then
-    skip "k0s already in PATH ($(k0s version 2>/dev/null | head -1))"
+    installed_k0s="$(k0s version 2>/dev/null | head -1)"
+    if [ "$installed_k0s" = "$K0S_VERSION" ]; then
+      skip "k0s already in PATH ($installed_k0s, matches pin)"
+    else
+      skip "k0s already in PATH ($installed_k0s) — differs from pin $K0S_VERSION; not reinstalling ('k0s reset' then re-run to change)"
+    fi
   elif [ "$DRY_RUN" = 1 ]; then
-    info "DRY-RUN  curl -sSLf https://get.k0s.sh | sh"
-  elif curl -sSLf https://get.k0s.sh | sh >/dev/null 2>&1; then
-    pass "k0s installed"
+    info "DRY-RUN  curl -sSLf https://get.k0s.sh | K0S_VERSION=$K0S_VERSION sh"
+  elif curl -sSLf https://get.k0s.sh | K0S_VERSION="$K0S_VERSION" sh >/dev/null 2>&1; then
+    pass "k0s installed ($K0S_VERSION)"
   else
-    fail "k0s install failed (curl https://get.k0s.sh | sh)"
+    fail "k0s install failed (curl https://get.k0s.sh | K0S_VERSION=$K0S_VERSION sh)"
   fi
 
   # terraform — fixed minor version, matched binary by host arch. The
@@ -3713,6 +3767,7 @@ install_dma_ethercat() {
     info "DRY-RUN  kubectl apply -f $DMA_ETHERCAT_RENDERED"
     info "DRY-RUN  kubectl -n phantom wait --for=condition=complete job/dma-ethercat-installer (10min budget, transient-tolerant)"
     info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb"
+    info "DRY-RUN  dpkg -i /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb  (if baked in; non-fatal)"
     info "DRY-RUN  resolve+write DMA_CONFIG, INTERFACE, DMA_CPU_AFFINITY, DMA_RT_CPU into $DMA_ETHERCAT_ENV_FILE"
     info "DRY-RUN  systemctl enable --now dma-ethercat.service"
     return
@@ -3831,6 +3886,24 @@ install_dma_ethercat() {
   else
     fail "dpkg -i $deb"
     ethercat_die "dpkg -i failed — check above output for missing dependencies or conflicting packages"
+  fi
+
+  # mk2-debug-tui: optional debug TUI baked into the same image (arm64
+  # only — see the dma-ethercat image's ci/fetch_mk2_debug_tui.sh and the
+  # installer Job's best-effort copy). NON-FATAL by design: it's a debug
+  # tool, not part of the realtime control path, so a missing/failed
+  # install must never ethercat_die and wedge the fleet bringup.
+  local tui_deb
+  tui_deb=$(ls -1t /var/lib/dma-ethercat-installer/mk2-debug-tui_*.deb 2>/dev/null | head -1 || true)
+  if [ -z "$tui_deb" ]; then
+    info "no mk2-debug-tui .deb baked into image — skipping (expected on amd64)"
+  else
+    note "installing mk2-debug-tui: $(basename "$tui_deb")"
+    if dpkg -i "$tui_deb"; then
+      pass "dpkg -i $(basename "$tui_deb")"
+    else
+      warn "dpkg -i $(basename "$tui_deb") failed — continuing (debug tool, non-fatal)"
+    fi
   fi
 
   # Resolve DMA_CONFIG and pin it in /etc/dma/dma-ethercat.env. The .deb
@@ -4902,6 +4975,125 @@ PY
   # place. The validate phase confirms Healthy.
 }
 
+# ---- phase 14b: load-image-tars (optional, between gitops + overrides) -
+#
+# Load + push prebuilt phantom-models / phantom-policies image tarballs
+# into the in-cluster localhost:5443 registry, then wire the loaded tag
+# into host-config.yaml's images: block. The registry op itself lives in
+# scripts/load-image-tars.sh (pure, off-robot-usable); this phase adds
+# the registry-readiness wait, the host-config edit, and the interactive
+# prompt. It runs BEFORE image_overrides so the unchanged image_overrides
+# phase injects the new tag into the live Application — no duplicated
+# injection logic here.
+#
+# Trigger: act only on --phantom-models-tar / --phantom-policies-tar in a
+# non-interactive run (-y, selected-phases mode, or no TTY). On an
+# interactive full bootstrap, prompt for any path not pre-filled by a
+# flag. If neither resolves to a path, this is a no-op.
+load_image_tars() {
+  if [ "$SKIP_LOAD_IMAGE_TARS" = 1 ]; then phase "phase 14b: load-image-tars  (skipped)"; return; fi
+  phase "phase 14b: load-image-tars (load + push prebuilt model/policy tarballs)"
+
+  # Resolve the two tar paths. Flags win; on an interactive TTY (not -y,
+  # stdin is a terminal) prompt for any path a flag did not provide.
+  local models_tar="$PHANTOM_MODELS_TAR"
+  local policies_tar="$PHANTOM_POLICIES_TAR"
+  if [ "$YES" = 0 ] && [ -t 0 ]; then
+    local reply
+    if [ -z "$models_tar" ]; then
+      printf 'phantom-models tarball path? [Enter to skip] '
+      read -r reply || true
+      models_tar="$reply"
+    fi
+    if [ -z "$policies_tar" ]; then
+      printf 'phantom-policies tarball path? [Enter to skip] '
+      read -r reply || true
+      policies_tar="$reply"
+    fi
+  fi
+
+  # Optional no-op: nothing to load.
+  if [ -z "$models_tar" ] && [ -z "$policies_tar" ]; then
+    info "no tarballs provided — skipping"
+    return
+  fi
+
+  # Wait for the in-cluster registry Deployment to become Available before
+  # pushing. Soft: kubectl absent or the Deployment never coming up is a
+  # skip-with-guidance, NOT a bootstrap failure (mirrors
+  # validate-local-registry.sh's wait_for_registry).
+  local reg_ns="registry" reg_deploy="k0s-registry" reg_wait="120"
+  if [ "${#KUBECTL[@]}" -eq 0 ]; then
+    skip "kubectl unavailable — cannot confirm registry is up; re-run --load-image-tars once the cluster is reachable"
+    return
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  ${KUBECTL[*]} -n $reg_ns wait --for=condition=Available deploy/$reg_deploy --timeout=${reg_wait}s"
+  else
+    info "waiting up to ${reg_wait}s for deploy/$reg_deploy in $reg_ns to become Available..."
+    if ! "${KUBECTL[@]}" -n "$reg_ns" wait \
+         --for=condition=Available "deploy/$reg_deploy" \
+         "--timeout=${reg_wait}s" >/dev/null 2>&1; then
+      skip "deploy/$reg_deploy not Available within ${reg_wait}s — registry down; re-run --load-image-tars once it is up"
+      return
+    fi
+    info "deploy/$reg_deploy Available"
+  fi
+
+  local loader="$REPO_ROOT/scripts/load-image-tars.sh"
+  if [ ! -f "$loader" ]; then
+    fail "scripts/load-image-tars.sh not found"; return
+  fi
+
+  local edited=0
+  # (container, tarball-path) pairs. The container name doubles as the
+  # localhost:5443/<container> repo the loader pushes, so we match the
+  # pushed ref by that prefix.
+  local pair container path out ref
+  for pair in "phantom-models|$models_tar" "phantom-policies|$policies_tar"; do
+    container="${pair%%|*}"
+    path="${pair#*|}"
+    [ -z "$path" ] && continue
+
+    if [ "$DRY_RUN" = 1 ]; then
+      info "DRY-RUN  bash $loader $path"
+      info "DRY-RUN  python3 $HOST_CONFIG_HELPER $HOST_CONFIG_FILE set-image $container <localhost:5443/$container:TAG-from-tar> (ref unknown in dry-run)"
+      continue
+    fi
+
+    info "loading + pushing $container from $path"
+    # load-image-tars.sh prints `PUSHED localhost:5443/<name>:<tag>` lines
+    # to stdout (human logs go to stderr); exit code = failure count.
+    if ! out="$(bash "$loader" "$path")"; then
+      fail "$container tarball load/push failed"
+      continue
+    fi
+    ref="$(printf '%s\n' "$out" \
+            | grep '^PUSHED ' \
+            | awk '{print $2}' \
+            | grep "^localhost:5443/$container:" \
+            | head -1)"
+    if [ -z "$ref" ]; then
+      fail "$container tarball load/push failed"
+      continue
+    fi
+    if python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" set-image "$container" "$ref"; then
+      edited=1
+      pass "$container -> $ref (host-config updated)"
+    else
+      fail "$container pushed as $ref but host-config set-image failed"
+    fi
+  done
+
+  # In a selected-phase run (--load-image-tars alone, implies -y) the
+  # image-overrides phase won't run, so the host-config edit isn't live
+  # yet. Tell the operator how to apply it. In a full bootstrap
+  # image-overrides runs next and picks it up automatically.
+  if [ "$edited" = 1 ] && [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then
+    info "host-config updated; run --image-overrides to apply (automatic in a full bootstrap)"
+  fi
+}
+
 # ---- phase 15: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
@@ -5793,6 +5985,7 @@ print_plan() {
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
+  _step $([ "$SKIP_LOAD_IMAGE_TARS"      = 0 ] && echo 1 || echo 0) "phase 14b load-image-tars"                 "--load-image-tars not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 15  image-overrides"                 "--image-overrides not selected"
   _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 16  deployments"                     "--deployments not selected"
   _step "$SETUP_POSITRONIC"                                         "phase 17  setup-positronic"             "--setup-positronic not set"
@@ -5862,6 +6055,7 @@ log_management     ; guard
 install_dma_ethercat ; guard
 gitops             ; guard
 argocd_admin       ; guard
+load_image_tars    ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
 setup_positronic   ; guard

@@ -37,27 +37,36 @@ cd Phantom-OS-KubernetesOptions
 git switch <branch>     # main for production; or a release branch
 ```
 
-### Locally-built images
+### Where the image list comes from (host-config by default)
 
-For full robot bringup the image bundle ships two images not on
-DockerHub:
+`build-images-deb.sh` builds the bundle for **what a robot actually
+deploys**. By default it reads the build host's system host-config
+(`/etc/phantomos/host-config.yaml`) and merges its `images:` block over
+the manifest scan:
 
-- **positronic-control** — built from the foundationbot positronic-control
-  source repo. Typically tagged something like
-  `foundationbot/phantom-cuda:0.2.46-dev.2-production-cu128` (the
-  "phantom-cuda" repo name is a swap-repo alias; the manifest reference
-  is `localhost:5443/positronic-control`).
-- **phantom-models** — built via `scripts/phantom-models/build.py`,
-  tagged like `localhost:5443/phantom-models:2026-05-09`.
+- **Exact deployed tags** — host-config carries the per-host overrides
+  (e.g. `positronic-control → foundationbot/phantom-cuda:0.2.48-…`,
+  `vr-web → …:<sha>-arm64`), which the manifest scan's in-repo defaults
+  would miss. Host-config wins per repo.
+- **Every `localhost:5443/*` local image** — `phantom-models`,
+  `phantom-policies`, and any stack-specific locals (`psi0-policy`,
+  `psi0-sonic`, `phantom-loco`, …) are discovered straight from the
+  block; no per-image flags.
 
-Both must be present in `docker images` before step 2 below. Verify:
+**So build on a configured robot** (or any host with the target's
+host-config) to get the right set. The `localhost:5443/*` refs must be
+present in that host's `docker images` (they're `docker save`d straight
+from the daemon — they don't exist on DockerHub); the `foundationbot/*`
+refs are pulled. Preview the resolved set without building:
 
 ```bash
-docker images foundationbot/phantom-cuda:<tag>
-docker images localhost:5443/phantom-models:<tag>
+bash scripts/build-images-deb.sh --arch arm64 --list
 ```
 
-The build script fails fast with a clear error if either is missing.
+**Off-robot / CI builds** (no host-config): pass `--no-host-config` to
+fall back to a manifest-scan-only build, and supply any local images
+explicitly with `--positronic-image` / `--phantom-models-image`. Or
+point at a specific file with `--host-config <path>`.
 
 ---
 
@@ -82,28 +91,38 @@ with `+dirty` appended if the working tree has uncommitted changes.
 
 ### 2. Build the image bundle (`.deb` + sidecar `.tar.zst`)
 
+On a configured robot, no per-image flags are needed — host-config
+supplies the full set at exact tags:
+
 ```bash
-bash scripts/build-images-deb.sh \
-  --arch amd64 \
-  --positronic-image foundationbot/phantom-cuda:<tag> \
-  --phantom-models-image localhost:5443/phantom-models:<tag>
+bash scripts/build-images-deb.sh --arch arm64 --no-prompt
 ```
 
-Produces **two** artifacts in `dist/`:
+Useful options:
 
-- `phantomos-k0s-images-<version>-amd64.deb` — small (~10 KB). Just the
-  bundle manifest YAML + postinst. Tells the robot what tarballs to
-  expect and how to import them.
-- `phantomos-k0s-images-<version>-amd64.tar.zst` — multi-GB (~15-18 GB
-  on a typical fleet). All image tarballs (foundationbot/*, mongo,
-  nginx, postgres, redis, plus the two `--*-image` refs).
+- `--exclude '<glob>'` (repeatable) — drop refs, e.g.
+  `--exclude 'localhost:5443/psi0-*'` to skip the large psi0 models.
+- `--list` — print the resolved pullable + local-save set and exit
+  (preview before a multi-GB build).
+- `--no-host-config` / `--host-config <path>` — see the discovery
+  section above.
+- `--arch arm64` / `--arch amd64,arm64` — narrow or widen the arches.
+
+Produces **two** artifacts per arch in `dist/`:
+
+- `phantomos-k0s-images-<version>-<arch>.deb` — small (~5–10 KB). Bundle
+  manifest YAML + postinst. Tells the robot what tarballs to expect and
+  how to import them.
+- `phantomos-k0s-images-<version>-<arch>.tar.zst` — multi-GB (tens of GB
+  with the CUDA images). Every image tarball, zstd-compressed.
 
 Why two files? See RFC 0007 — the `.deb` `ar` format caps individual
-archive members at ~9.3 GB; the phantom-cuda CUDA image alone is ~12 GB.
-The sidecar `.tar.zst` escapes the cap.
+archive members at ~9.3 GB; the phantom-cuda CUDA image alone is far
+larger. The sidecar `.tar.zst` escapes the cap.
 
-Add `--no-prompt` to run non-interactively (CI). Add `--arch arm64` or
-`--arch amd64,arm64` to build for Jetson hosts.
+A `.report.txt` is written next to each `.deb` listing every included
+image (with size) and any skipped one (with the reason) — check it after
+the build.
 
 ### 3. Inspect what's in the bundle (recommended)
 
@@ -116,19 +135,25 @@ cat /tmp/inspect/var/lib/k0s/images/.phantomos-image-bundle.yaml
 tar -I 'zstd -d' -tf dist/phantomos-k0s-images-*-amd64.tar.zst | head -25
 ```
 
-Bundle manifest should have four canonical entries:
+With a host-config-driven build the bundle manifest records an entry for
+**every deployed container** it can name — both the local images and the
+host-config-overridden pullables (`positronic-control`, `dma-bridge`,
+`cpp-robot-state-estimator`, `dma-streams`, `phantom-locomotion`,
+`phantom-motion-replay`, `vr-web`, `yovariable-server`, plus
+`phantom-models`/`phantom-policies` and any psi0 locals). The wizard's
+auto-images mode reads these on install to pre-fill **the whole image
+override set** — no hand-typing, no release template needed.
 
-| container | source | comes from |
-|---|---|---|
-| `positronic-control` | `flag` | `--positronic-image` |
-| `phantom-models` | `flag` | `--phantom-models-image` |
-| `operator-ui` | `manifest-scan` | grep of `manifests/` |
-| `dma-ethercat` | `extra-images` | `packaging/deb-images/extra-images.txt` |
+`foundationbot/phantom-cuda` backs *two* containers (`positronic-control`
+and `dma-bridge`); they're disambiguated by the host-config block keys
+(distinct tags → distinct entries). Manifest-scan-only builds
+(`--no-host-config`) still record just the repo-unambiguous canonical
+containers.
 
-The sidecar will contain ~21-22 tarballs (the four above plus standard
-infrastructure images: mongo, nginx, redis, postgres, registry, alpine,
-mediamtx, argus.*, dma-streams, nimbus.*, yovariable-server, plus
-phantomos-api-server).
+The sidecar also contains the standard infrastructure tarballs not tied
+to a container (mongo, nginx, redis, postgres, registry, alpine,
+mediamtx, argus.*, nimbus.*) — bundled for offline import, simply not
+listed in the manifest.
 
 ### 4. Transfer to the robot
 
@@ -155,22 +180,21 @@ filename stems disagree.
 
 ```bash
 # default: both amd64 and arm64
-bash scripts/build-images-deb.sh \
-  --positronic-image <amd64-ref> \
-  --phantom-models-image <amd64-ref>
+bash scripts/build-images-deb.sh
 
 # explicit narrow:
-bash scripts/build-images-deb.sh --arch arm64 [...]
+bash scripts/build-images-deb.sh --arch arm64
 ```
 
 Cross-arch image pulls go through `docker pull --platform <arch>` and
 require docker buildx (any modern docker has it; no qemu/binfmt needed
 since the build only pulls and saves, never executes).
 
-Each arch produces its own `.deb` + `.tar.zst` pair. The local-image
-flags (`--positronic-image`, `--phantom-models-image`) only attach to
+Each arch produces its own `.deb` + `.tar.zst` pair. `localhost:5443/*`
+local images (from host-config, or the `--*-image` flags) only attach to
 the build whose arch matches the local image; cross-arch local images
-are silently skipped per-arch.
+are silently skipped per-arch. Since most robots are single-arch, narrow
+to `--arch <arch>` matching the build host.
 
 ---
 
@@ -186,9 +210,10 @@ rm dist/build/image-cache/amd64/<sanitized-ref>.tar
 bash scripts/build-images-deb.sh ...
 ```
 
-The two `--*-image` flags' tarballs are NOT cached — they're saved fresh
-from the local docker daemon on every build (so a rebuild of phantom-cuda
-under the same tag gets re-bundled correctly).
+`localhost:5443/*` local images (from host-config or the `--*-image`
+flags) are NOT cached — they're saved fresh from the local docker daemon
+on every build, so a rebuild of a local image under the same tag gets
+re-bundled correctly.
 
 ---
 
@@ -221,23 +246,23 @@ SHA (modulo timestamp metadata).
 
 ## What gets bundled (full list)
 
-The build script's manifest scan finds and bundles:
+The build draws from three sources, merged (later wins per repo):
 
-- **From `manifests/`** (`source: manifest-scan` in the bundle):
-  `foundationbot/argus.{auth,company,gateway,operator-ui,user}:qa`,
-  `foundationbot/dma-video:main`, `foundationbot/dma-streams:main-latest`,
-  `foundationbot/nimbus.s3_dynamo_athena{,-jobs}:main`,
-  `foundationbot/phantomos-api-server:V-...`,
-  `foundationbot/yovariable-server:V-...`,
-  `mongo:7`, `nginx:latest`, `postgres:16`, `redis:7-alpine`,
-  `registry:2`, `alpine:3.19`, `bluenviron/mediamtx:latest`.
-- **From `packaging/deb-images/extra-images.txt`** (`source: extra-images`):
-  per-arch dma-ethercat (`main-latest-aarch64` on arm64,
-  `main-latest` on amd64).
-- **From `--positronic-image`** (`source: flag`): operator-built.
-- **From `--phantom-models-image`** (`source: flag`): operator-built.
+- **Manifest scan** (`source: manifest-scan`) — every `image:` in
+  `manifests/` at its in-repo default tag, minus `*:PLACEHOLDER` and
+  `localhost:5443/*` (don't exist upstream / are template placeholders).
+  Covers the stack infra: `foundationbot/argus.*`,
+  `foundationbot/dma-video`, `foundationbot/nimbus.*`,
+  `phantomos-api-server`, `mongo`, `nginx`, `postgres`, `redis`,
+  `registry`, `alpine`, `bluenviron/mediamtx`, etc.
+- **`packaging/deb-images/extra-images.txt`** (`source: extra-images`) —
+  refs not discoverable from `manifests/`, e.g. per-arch dma-ethercat.
+- **System host-config** (`source: host-config`, default; disable with
+  `--no-host-config`) — the `images:` block at **exact deployed tags**,
+  overriding the manifest-scan default for the same repo, plus every
+  `localhost:5443/*` local image. This is what makes the bundle match
+  the robot it was built on.
 
-Only the first set is filtered against the manifest's `image:` tag —
-that's where the `*:PLACEHOLDER` and `localhost:5443/*` exclusions
-apply (those images either don't exist upstream or are template
-placeholders).
+`--from-file <list>` replaces the manifest scan + host-config merge with
+an explicit list (still augmented by extra-images). `--exclude '<glob>'`
+drops refs from the final set.
