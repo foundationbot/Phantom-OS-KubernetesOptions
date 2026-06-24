@@ -5,7 +5,11 @@ Requires=docker.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f gaia-ask-server
-ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:gaia-llm-rag
+ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:SOF-1167
+# CLIP_URL: the host reaches the in-cluster eg-server (/api/clip) directly via its
+# argus-ns ClusterIP (kube-proxy routes it from the node; no auth, unlike the
+# operator-ui :8004 proxy). NOTE: this IP is stable per-Service but changes if the
+# eg-server Service is recreated — re-check `k0s kubectl get svc eg-server -n argus`.
 ExecStart=/usr/bin/docker run --rm --name gaia-ask-server --network host \
   -e OLLAMA_HOST=http://localhost:11434 \
   -e LOKI_URL=http://localhost:10310 \
@@ -14,7 +18,8 @@ ExecStart=/usr/bin/docker run --rm --name gaia-ask-server --network host \
   -e EVENTS_ARCHIVE=/data/logs/boundary.jsonl \
   -v /data:/data \
   -e PROM_URL=http://localhost:10390 -e JAEGER_URL=http://localhost:10386 \
-  foundationbot/gaia-tools:gaia-llm-rag python3 ask_server.py --host 0.0.0.0 --port 8200
+  -e CLIP_URL=http://10.110.7.238/api/clip \
+  foundationbot/gaia-tools:SOF-1167 python3 ask_server.py --host 0.0.0.0 --port 8200
 ExecStop=/usr/bin/docker stop gaia-ask-server
 Restart=on-failure
 RestartSec=5
