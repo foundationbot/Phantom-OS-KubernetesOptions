@@ -1740,6 +1740,7 @@ land directly on the host):
 | 7865 | TCP | `phantom-sonic` / `motion-replay` web UI (`WEB_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
 | 5557 | TCP | `phantom-sonic` motion ZMQ stream (`MOTION_ZMQ_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
 | 5558 | TCP | `phantom-sonic` mode-control ZMQ (`CONTROL_ZMQ_PORT`) | `manifests/base/phantom-sonic/phantom-sonic.yaml` |
+| 8090 | TCP | `wolverine-loco` teleop web UI (`--port 8090`) | `manifests/base/wolverine-loco/wolverine-loco.yaml` |
 | dynamic 7400+ | UDP | `positronic-control`, `phantom-sonic`, `cpp-robot-state-estimator` ROS 2 / DDS | respective deployment YAMLs |
 
 `producer` and `rtsp-streamer` use `hostNetwork: true` for USB / IPC
