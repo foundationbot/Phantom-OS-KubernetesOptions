@@ -1,0 +1,181 @@
+# dma-video-recorder — DaemonSet that records the DMA.video shared-memory
+# camera streams to rolling .mp4 segments + a drop-safe per-frame timestamp
+# index (CSV) on the robot host, alongside the dma-recorder .rrd files.
+#
+# Source: foundation/DMA/DMA.streams (module dma_video, entrypoint
+# `dma-video-recorder`, same image foundationbot/dma-streams:<tag> as
+# dma-recorder). Reads /dev/shm/video_{meta,frames}_cam* (produced by
+# DMA.video) and writes video_<cam>_<ts>.mp4 + .csv to /recordings (the
+# same host /root/recordings hostPath as dma-recorder), so video and .rrd
+# sit side-by-side on one host-epoch clock.
+#
+# ── Lifecycle ────────────────────────────────────────────────────────────
+# Pod-level on/off: schedules only on nodes labelled
+#   foundation.bot/has-video-recorder=true
+# Recording on/off mirrors dma-recorder's "robot is ON" gate: the process
+# reads /motor_diagnostics and records only while >=1 EtherCAT slave is
+# OPERATIONAL (debounced), so it starts/stops with the .rrd recorder. No
+# arm/disarm command — it follows the bus.
+#
+# ── Clipping (out of band) ───────────────────────────────────────────────
+# Recording is always-on (while the robot is ON); extract a window with the
+# `dma-clip` tool baked into the same image — it traverses the rolled
+# segments to cut an aligned [t0,t1] of BOTH video and .rrd:
+#
+#   POD=$(kubectl -n phantom get pod -l app.kubernetes.io/name=dma-video-recorder \
+#                                    --field-selector spec.nodeName=<robot> \
+#                                    -o jsonpath='{.items[0].metadata.name}')
+#   kubectl -n phantom exec -c recorder $POD -- \
+#       dma-clip --from <t0_ns> --to <t1_ns> --data /recordings
+#
+# ── Retention ────────────────────────────────────────────────────────────
+# The recorder rolls a new .mp4 every --segment-seconds; it does NOT delete
+# old files. The `janitor` sidecar prunes video_*.{mp4,csv} + clips/ by
+# lifetime and a video-only byte budget (scoped to video_* so it does not
+# fight dma-recorder's own .rrd janitor over the shared folder).
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dma-video-recorder
+  namespace: phantom
+  labels:
+    app.kubernetes.io/name: dma-video-recorder
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dma-video-recorder
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dma-video-recorder
+    spec:
+      # Schedule only where the host owns the DMA.video shm + opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-video-recorder: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # Same shm namespace as the host producers (DMA.video frame queues +
+      # dma_main's /motor_diagnostics). hostIPC so POSIX shm/futex sync sees
+      # the host kernel namespace, like dma-recorder.
+      hostPID: false
+      hostNetwork: false
+      hostIPC: true
+
+      # Give the writer threads time to flush + close the current .mp4 on SIGTERM.
+      terminationGracePeriodSeconds: 30
+
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        # ── Video recorder ─────────────────────────────────────────────
+        - name: recorder
+          # Same image as dma-recorder. Bump the tag through host-config
+          # kustomize.images, not here.
+          image: foundationbot/dma-streams:SOF-1167-latest
+          imagePullPolicy: IfNotPresent
+          # ENTRYPOINT defaults to dma_recorder; override to the video sidecar.
+          command: ["dma-video-recorder"]
+          # NOTE (k0s health, SOF-1167 #4): intentionally NO liveness/readiness
+          # probe — same rationale as dma-recorder. It's PID 1 (crash → container
+          # exit → DaemonSet restart), has no in-band health endpoint, and its
+          # record-on-motor-state behavior means "idle" (motors off) is normal, so
+          # a freshness probe would flap. Add a heartbeat to the binary first.
+          # Space-separated argv (--flag value). Per-host overlay knobs:
+          #   cameras:        --cameras <comma ids>     (DMA.video camera ids)
+          #   segmentSeconds: --segment-seconds <N>     (match the .rrd roll)
+          #   fps:            --fps <N>                 (nominal mp4 rate)
+          args:
+            - --output
+            - /recordings
+            - --cameras
+            - "0,1,2,3,4,5"
+            - --segment-seconds
+            - "60"
+
+          securityContext:
+            # /dev/shm segments are root-owned; match UID. privileged for
+            # cross-namespace POSIX IPC — same rationale as dma-recorder.
+            runAsUser: 0
+            privileged: true
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+          volumeMounts:
+            - name: dev-shm
+              mountPath: /dev/shm
+            - name: recordings
+              mountPath: /recordings
+
+        # ── Janitor sidecar — prune video_* + clips by age and byte budget ──
+        - name: janitor
+          image: alpine:3.19
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              : "${RETENTION_DAYS:=7}"
+              : "${MAX_BYTES:=107374182400}"      # 100 GiB of video
+              : "${CHECK_INTERVAL_SECONDS:=300}"  # 5 min
+              echo "[janitor] video retention=${RETENTION_DAYS}d max_bytes=${MAX_BYTES} interval=${CHECK_INTERVAL_SECONDS}s"
+              while true; do
+                # 1) Lifetime cap on video segments + their indices + clips.
+                find /recordings -maxdepth 1 -type f \
+                     \( -name 'video_*.mp4' -o -name 'video_*.csv' \) \
+                     -mtime +"${RETENTION_DAYS}" -print -delete || true
+                find /recordings/clips -mindepth 1 -mtime +"${RETENTION_DAYS}" \
+                     -print -delete 2>/dev/null || true
+
+                # 2) Byte budget — scoped to video_*.mp4 so it does NOT fight
+                #    dma-recorder's .rrd janitor. Remove oldest mp4 (+ its .csv)
+                #    until the video footprint is under MAX_BYTES.
+                while :; do
+                  used=$(find /recordings -maxdepth 1 -name 'video_*.mp4' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                  if [ "${used:-0}" -le "${MAX_BYTES}" ]; then break; fi
+                  oldest=$(ls -1tr /recordings/video_*.mp4 2>/dev/null | head -1 || true)
+                  if [ -z "${oldest}" ]; then break; fi
+                  echo "[janitor] video over budget (used=${used}); removing $(basename "${oldest}")"
+                  rm -f "${oldest}" "${oldest%.mp4}.csv"
+                done
+
+                sleep "${CHECK_INTERVAL_SECONDS}"
+              done
+          env:
+            - name: RETENTION_DAYS
+              value: "7"
+            - name: MAX_BYTES
+              value: "107374182400"     # 100 GiB
+            - name: CHECK_INTERVAL_SECONDS
+              value: "300"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: recordings
+              mountPath: /recordings
+
+      volumes:
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory
+        - name: recordings
+          hostPath:
+            path: /root/recordings
+            type: DirectoryOrCreate

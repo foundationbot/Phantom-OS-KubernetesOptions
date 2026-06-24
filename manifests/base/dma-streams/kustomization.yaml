@@ -1,14 +1,16 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# DMA.streams workloads — same image, two binaries:
-#   dma-recorder  — writes .rrd files (always rendered, gated on
-#                   foundation.bot/has-recorder)
-#   rerun-streamer — live web visualization on :9788 (always rendered,
-#                    gated on foundation.bot/has-streamer; the label is
-#                    NOT applied by default → zero pods scheduled)
+# DMA.streams workloads — same image, three entrypoints:
+#   dma-recorder       — writes .rrd files (gated on foundation.bot/has-recorder)
+#   dma-video-recorder — writes camera .mp4 + CSV index (gated on
+#                        foundation.bot/has-video-recorder)
+#   rerun-streamer     — live web visualization on :9788 (gated on
+#                        foundation.bot/has-streamer; label NOT applied by
+#                        default → zero pods scheduled)
 #
-# Both gate via nodeSelector, so manifests can ship enabled in git but
+# All gate via nodeSelector, so manifests can ship enabled in git but
 # remain inert until a host opts in via host-config.yaml > nodeLabels.
 resources:
   - dma-recorder.yaml
+  - dma-video-recorder.yaml
   - rerun-streamer.yaml

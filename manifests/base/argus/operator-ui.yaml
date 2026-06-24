@@ -17,10 +17,14 @@ spec:
         - name: dockerhub-creds
       containers:
         - name: operator-ui
-          image: foundationbot/argus.operator-ui:qa
+          image: foundationbot/argus.operator-ui:gaia-chat
           imagePullPolicy: IfNotPresent
           ports:
+            # hostPort so the UI is reachable directly on the robot at :8004
+            # (matches the operator_ui compose `8004:8004`), in addition to the
+            # argus-nginx NodePort :30080 same-origin entry.
             - containerPort: 8004
+              hostPort: 8004
           env:
             - name: ENV
               value: qa
@@ -57,6 +61,21 @@ spec:
               value: /api/control
             - name: RERUN_URL
               value: rerun+http://nitrogen:9876/proxy
+            # gaia + rerun nginx upstreams. This robot runs everything on the
+            # one host, so point them at the robot's own tailscale IP (the
+            # operator-ui-pairing CONTROL_PC_HOST). Without these the image
+            # defaults GAIA_HOST to the unresolvable "host-gateway" and the
+            # operator-ui nginx emergs at startup ("host not found in upstream").
+            - name: GAIA_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: CONTROL_PC_HOST
+            - name: RERUN_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: operator-ui-pairing
+                  key: CONTROL_PC_HOST
           resources:
             requests:
               cpu: "50m"

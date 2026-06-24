@@ -13,7 +13,12 @@ metadata:
   name: voice-server
   namespace: argus
 spec:
-  replicas: 1
+  # Removed: foundationbot/argus.voice-server is amd64-only (exec format error
+  # on arm64/Jetson). Deployment scaled to 0 so no pod is scheduled; the
+  # Service below is kept so vr-web's nginx `__VOICE_PROXY__` upstream still
+  # resolves (it would emerg on an absent `voice-server` host). /api/voice
+  # returns 502 until an arm64 image exists.
+  replicas: 0
   selector:
     matchLabels:
       app: voice-server
