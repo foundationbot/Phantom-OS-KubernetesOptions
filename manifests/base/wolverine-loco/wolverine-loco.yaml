@@ -33,7 +33,7 @@
 # baked default, so the pod still starts if the CM isn't applied yet.
 #
 # ── Teleop + recording + motors ────────────────────────────────────────────
-# The teleop sidecar exposes a web UI on hostPort 8080 (http://<robot-ip>:8080).
+# The teleop sidecar exposes a web UI on port 8090 (http://<robot-ip>:8090).
 # It writes the velocity command to /dev/shm/wolverine_command (the node reads it,
 # stale->stop). Its Enable-Motors / Record buttons send dma_common CommandClient
 # opcodes (ENABLE_MOTORS / DISABLE_MOTORS, RECORDING_START 0x0700 / RECORDING_STOP
@@ -144,10 +144,14 @@ spec:
 
         # ── Teleop web UI (sidecar) ───────────────────────────────────────
         # Serves the joystick + e-stop + Enable-Motors + Record page on
-        # http://<robot-ip>:8080. Writes the velocity scratch the node reads, and
+        # http://<robot-ip>:8090. Writes the velocity scratch the node reads, and
         # sends ENABLE_MOTORS / RECORDING_* opcodes (needs the shared /dev/shm).
-        # Bound 0.0.0.0:8080 with NO auth token for easiest operator access —
+        # Bound 0.0.0.0:8090 with NO auth token for easiest operator access —
         # tighten with --token (from a Secret) if the robot is on an open network.
+        # PORT 8090: 8080 is already taken on the host by yovariable-server (admin)
+        # — and this pod is hostNetwork, so the bind is the host port. See the
+        # hostPort registry in docs/operations.md. The hostPort: below is
+        # documentation only (ignored under hostNetwork; must equal containerPort).
         - name: teleop
           image: localhost:5443/dma-ghost-wbc-teleop:PLACEHOLDER
           imagePullPolicy: IfNotPresent
@@ -158,13 +162,13 @@ spec:
             - --host
             - "0.0.0.0"
             - --port
-            - "8080"
+            - "8090"
             - --scratch
             - /dev/shm/wolverine_command
           ports:
             - name: teleop
-              containerPort: 8080
-              hostPort: 8080
+              containerPort: 8090
+              hostPort: 8090
               protocol: TCP
           volumeMounts:
             - { name: shm, mountPath: /dev/shm }
