@@ -17,6 +17,7 @@
 
 CPUSETS_CONF="${CPUSETS_CONF:-/etc/cpusets.conf}"
 CPUSETS_SCRIPT="${CPUSETS_SCRIPT:-$REPO_ROOT/scripts/cpusets/manage_cpusets.sh}"
+PIN_KUBEPODS_SCRIPT="${PIN_KUBEPODS_SCRIPT:-$REPO_ROOT/scripts/cpusets/pin-kubepods.sh}"
 CPU_ISOLATION_REBOOT_MARKER="${CPU_ISOLATION_REBOOT_MARKER:-/etc/phantomos/cpu-isolation.reboot-pending}"
 
 # Render /etc/cpusets.conf from a JSON cpuIsolation block. Atomic write

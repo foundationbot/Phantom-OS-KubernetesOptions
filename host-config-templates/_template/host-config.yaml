@@ -147,6 +147,22 @@ stacks:
 #                          via the 'phantom-locomotion' key above (same
 #                          published image; the two workloads are mutually
 #                          exclusive so one find-key serves both).
+#   psi0-policy            core stack — psi0-vla (Ψ₀ VLA GPU policy) of the
+#                          phantom-psi DaemonSet (has-psi, default-off). CI
+#                          publishes foundationbot/psi0-policy:<branch>-<ts>
+#                          (Psi0-VLA .circleci/config.yml, spec 005). aarch64.
+#   psi0-sonic             core stack — psi0-state (proprio producer) of the
+#                          phantom-psi DaemonSet. CI publishes
+#                          foundationbot/psi0-sonic:<branch>-<ts> (superset of
+#                          psi0-policy + phantom_sonic/bridge + mujoco +
+#                          dma_common). aarch64.
+#   phantom-loco           core stack — bridge / walking / operator /
+#                          loco-state-mirror of phantom-psi (and the
+#                          psi0-dma-walking DaemonSet). Published as
+#                          foundationbot/phantom-psi0-loco:<tag>-aarch64 by the
+#                          phantom-locomotion repo CI (carries bridge.psi0_* +
+#                          inference.policy_node). One find-key serves both
+#                          workloads. aarch64.
 #   okvis2x                core stack — OKVIS2-X live dense-stereo SLAM
 #                          DaemonSet (has-okvis gated, default-off). manifest
 #                          uses foundationbot/okvis2x. Multi-arch manifest —
@@ -196,6 +212,28 @@ images:
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
   #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
+  #
+  # phantom-psi stack (has-psi gated, default-off). Three images, all CI-published;
+  # the base manifest defaults to the registry refs with a :PLACEHOLDER tag, so a
+  # has-psi robot MUST pin these (an unrewritten :PLACEHOLDER ImagePullBackOffs by
+  # design). Uncomment and pin a real CI tag on hosts that opt in (nodeLabels
+  # has-psi: 'true', has-positronic/has-sonic/has-locomotion: 'false'). To run a
+  # LOCAL on-device build instead, point the image at the local tag
+  # (psi0-policy:thor-cu130 / psi0-sonic:thor-cu130 / phantom-loco:local) —
+  # Kustomize repo-swaps it off the registry default. aarch64/Jetson Thor only.
+  #   - psi0-policy / psi0-sonic: foundationbot/psi0-{policy,sonic}:<branch>-<UTC-ts>
+  #     from Psi0-VLA CI (.circleci/config.yml, spec 005). Pin an immutable
+  #     <branch>-<ts> tag, NOT :latest (identical bits per robot, one-line rollback).
+  #   - phantom-loco: foundationbot/phantom-psi0-loco:<tag>-aarch64 from the
+  #     phantom-locomotion repo CI (carries bridge.psi0_* + inference.policy_node);
+  #     it rewrites BOTH the phantom-psi bridge/walking/operator/loco-state-mirror
+  #     containers AND the psi0-dma-walking DaemonSet (same find-key).
+  # psi0-policy:
+  #   image: foundationbot/psi0-policy:REPLACE-WITH-CI-TAG
+  # psi0-sonic:
+  #   image: foundationbot/psi0-sonic:REPLACE-WITH-CI-TAG
+  # phantom-loco:
+  #   image: foundationbot/phantom-psi0-loco:REPLACE-WITH-CI-TAG-aarch64
   # wm-inference is default-off (nodeLabels has-wm-inference: 'false');
   # uncomment BOTH on hosts that opt in. Use a local-registry retag (push
   # the arm64 images to localhost:5443 first) or a DockerHub repo-swap.
@@ -287,6 +325,18 @@ images:
 #                              so systemd-spawned services stay off both
 #                              the isolated cores and cpu 0 (which is
 #                              dedicated to kernel housekeeping).
+#   kubepodsCpus             optional cpu-list. Pins the k0s pod cgroup
+#                              (kubepods) to exactly these cores via a
+#                              k0s-bound systemd unit (kubepods-cpuset.
+#                              service, installed by scripts/cpusets/
+#                              pin-kubepods.sh). Must NOT overlap the
+#                              partitions. Use this to keep ALL pods off
+#                              the RT cores AND on a strict subset of
+#                              housekeeping (the uniform slice shrink can't
+#                              express that, and kubelet's native
+#                              reservedSystemCPUs is unusable on Jetson
+#                              Thor — see RFC 0003). Unset → pod cgroup
+#                              left at the default. e.g. "0-9".
 #
 # Bootstrap phase 8 (under RFC 0004) renders kernel cmdline tokens
 # directly: isolcpus=<partitions>, nohz_full=<dmaRtCpu>,
@@ -310,6 +360,7 @@ images:
 #                              # OR {driver: igc, index: 0}
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full) -> FIRST core
 #   installAffinityDefaults: true
+#   kubepodsCpus: "0-9"        # pin the k0s pod cgroup off cores 10-13
 
 # Per-host phantom-locomotion config. Bootstrap phase locomotion-config
 # renders /etc/phantomos/phantom-locomotion-config.yaml from this
@@ -661,12 +712,22 @@ images:
 #   walkingOnnx:  /models/walking/policy.onnx   # POLICY_ONNX_PATH (walking)
 #   locoHealthPath: /dev/shm/psi0_loco.health   # PSI0_LOCO_HEALTH_PATH (loco-state-mirror)
 #   locoMirrorHz: "5"                      # PSI0_LOCO_MIRROR_HZ (loco-state-mirror rewrite rate)
+#   autoEnableMotors: "0"                  # PSI0_AUTO_ENABLE_MOTORS (DMA walking; "1" on real HW)
+#   operator:     "auto"                   # PSI0_OPERATOR (DMA walking engage source: auto|gamepad)
+#   gamepadDevice: /dev/input/js0          # PSI0_GAMEPAD_DEVICE (operator=gamepad joystick node)
+#   startEngaged: "0"                      # PSI0_START_ENGAGED (gamepad initial latch; OFF=safe)
 #
 # Example — point at a different checkpoint and enable yaw passthrough:
 # phantomPsi:
 #   runDir: "/models/full_task_yawfix.real.flow1000.cosine.lr1.0e-04.b128.gpus1.2606110450"
 #   ckptStep: "76000"
 #   enableYaw: "1"
+#
+# Example — drive the DMA walking node by handheld controller (START = Square +
+# Triangle; STOP = Triangle; HOLD = Circle) and let it own motor-enable on HW:
+# phantomPsi:
+#   operator: "gamepad"
+#   autoEnableMotors: "1"
 
 # Log retention caps. Bootstrap phase log-management writes drop-ins
 # under /etc/systemd/journald.conf.d/ and /etc/logrotate.d/ to keep

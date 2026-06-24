@@ -33,15 +33,23 @@
 # plugin (nvidia.com/gpu: 1) + runtimeClassName nvidia.
 #
 # ── Images ───────────────────────────────────────────────────────────────
-# psi0-vla runs `psi0-policy` (Psi0-VLA/infra/docker/Dockerfile.policy, built
-# on-device for the Thor — MUST be a CUDA-13 / sm_110 torch base; the Orin
-# 25.08-py3-igpu base does NOT run on Thor, see k0sdeployment.md §0). bridge +
-# walking run `phantom-loco`. Both are currently LOCAL images (built on the
-# robot, imported into k0s containerd) — the in-repo tags below are the
-# working ch4 defaults; per-robot tags are rewritten by Kustomize from
-# host-config.yaml's images.{psi0-policy,phantom-loco} entries (see
-# scripts/lib/host-config.py:CONTAINER_TARGETS). TODO: publish both to the
-# fleet registry so non-ch4 robots can pull them.
+# psi0-vla runs `psi0-policy` (Psi0-VLA/infra/docker/Dockerfile.policy — MUST be
+# a CUDA-13 / sm_110 torch base; the Orin 25.08-py3-igpu base does NOT run on
+# Thor, see k0sdeployment.md §0). psi0-state runs `psi0-sonic` (superset of
+# psi0-policy). bridge + walking + operator + loco-state-mirror run
+# `phantom-loco`. All three are CI-PUBLISHED to the fleet registry and the base
+# image refs below now point AT the registry (aarch64 / Jetson Thor only):
+#   foundationbot/psi0-policy        (Psi0-VLA CI, spec 005)
+#   foundationbot/psi0-sonic         (Psi0-VLA CI, spec 005)
+#   foundationbot/phantom-psi0-loco  (phantom-locomotion CI; uses a -aarch64 tag)
+# The `:PLACEHOLDER` tags are sentinels — Kustomize ALWAYS rewrites the tag (and,
+# for a local on-device build, the whole ref via repo-swap) per-robot from
+# host-config.yaml's images.{psi0-policy,psi0-sonic,phantom-loco} entries (see
+# scripts/lib/host-config.py:CONTAINER_TARGETS). So every has-psi robot MUST set
+# those three images entries — a `:PLACEHOLDER` left unrewritten fails loudly
+# (ImagePullBackOff) rather than silently pulling a wrong/`:latest` image. Pin an
+# immutable tag (registry: <branch>-<ts>; local build: psi0-policy:thor-cu130 etc.
+# via repo-swap). Same find-keys serve the psi0-dma-walking DaemonSet.
 #
 # ── Mutual exclusion ───────────────────────────────────────────────────────
 # foundation.bot/has-psi gates this DaemonSet. psi (via the bridge), SONIC,
@@ -75,6 +83,13 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: phantom-psi
+  # Retain only the live ControllerRevision — no rollback history. A DaemonSet
+  # always keeps the revision backing the current pods; revisionHistoryLimit: 0
+  # prunes every *older* CR on each successful roll, so `kubectl -n psi get
+  # controllerrevisions` only ever shows the latest. (Single-node, single-GPU
+  # robot deploy: image/ckpt rollbacks are driven from gitops + host-config,
+  # not from stale on-cluster DaemonSet revisions.)
+  revisionHistoryLimit: 0
   # Single GPU: roll the old pod down before the new one comes up so two
   # psi0-vla containers never contend for the device.
   updateStrategy:
@@ -111,6 +126,7 @@ spec:
       containers:
         # ── psi0-vla — Ψ₀ flow policy on the GPU ───────────────────────────
         - name: psi0-vla
+          image: foundationbot/psi0-policy:PLACEHOLDER
           image: psi0-policy:thor-cu130
           imagePullPolicy: IfNotPresent
           # The image entrypoint sources setup_env.sh (TORCH_CUDA_ARCH_LIST
@@ -143,6 +159,18 @@ spec:
             - { name: PSI_ATTN_IMPL, value: "sdpa" }
             - { name: PSI_HOME,      value: "/models" }
             - { name: HF_HOME,       value: "/cache/huggingface" }
+            # iGPU access via the nvidia-container-runtime hook (mirrors
+            # positronic-control): the hook injects all GPUs + driver libs when
+            # NVIDIA_VISIBLE_DEVICES is set. No k8s device plugin / nvidia.com/gpu
+            # request — GPU exclusivity is already guaranteed by the has-psi
+            # body-driver mutual exclusion (one GPU workload per robot).
+            - { name: NVIDIA_VISIBLE_DEVICES, value: all }
+          # GPU via runtimeClassName: nvidia + /dev passthrough (Jetson iGPU):
+          # privileged so the /dev/nvidia* + /dev/nvgpu* device nodes are usable
+          # (device cgroup otherwise blocks them). Same posture as positronic.
+          securityContext:
+            privileged: true
+          resources:
           resources:
             # GPU via the NVIDIA k8s device plugin (no privileged needed).
             limits:
@@ -154,10 +182,11 @@ spec:
             - { name: models, mountPath: /models, readOnly: true }
             - { name: cache,  mountPath: /cache }
             - { name: dshm,   mountPath: /dev/shm }
+            - { name: dev,    mountPath: /dev }
 
         # ── bridge — action ring → locomotion command stream ──────────────
         - name: bridge
-          image: phantom-loco:local
+          image: foundationbot/phantom-psi0-loco:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args: ["python", "-m", "bridge.psi0_loco_bridge"]
           # ROS_DOMAIN_ID / PSI0_ACTION_QUEUE / PSI0_BRIDGE_RATE_HZ /
@@ -178,7 +207,7 @@ spec:
 
         # ── walking — lower-body walking ONNX policy ──────────────────────
         - name: walking
-          image: phantom-loco:local
+          image: foundationbot/phantom-psi0-loco:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args: ["python", "-m", "inference.policy_node"]
           # ROS_DOMAIN_ID + POLICY_ONNX_PATH come from the CM (envFrom).
@@ -207,12 +236,15 @@ spec:
         # lean psi0-policy image does NOT carry phantom_sonic, so it cannot run
         # this producer. CPU-only (no nvidia.com/gpu) — it just reads /actuals.
         #
-        # PREREQS (Psi0-VLA/infra/docker/build-sonic.sh): build psi0-sonic ON THE
-        # THOR *and* drop the dma_common aarch64/cp312 wheel into
-        # infra/docker/wheels/ BEFORE building, then import into k0s containerd —
-        # else actuals_state_source ImportErrors (dma_common) at runtime.
+        # PREREQS: the registry image already bakes the dma_common aarch64/cp312
+        # wheel (committed at Psi0-VLA/infra/docker/wheels/, copied in by
+        # Dockerfile.sonic), so a registry pull is self-contained. Only a LOCAL
+        # on-device build (Psi0-VLA/infra/docker/build-sonic.sh, repo-swapped via
+        # this robot's host-config images.psi0-sonic) must drop that wheel in
+        # BEFORE building + import into k0s containerd — else actuals_state_source
+        # ImportErrors (dma_common) at runtime.
         - name: psi0-state
-          image: psi0-sonic:thor-cu130
+          image: foundationbot/psi0-sonic:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           # Same source-env-then-exec + "${VAR:-default}" pattern as psi0-vla so
           # the run dir + state-queue stay byte-for-byte in lockstep with the
@@ -251,7 +283,7 @@ spec:
         # puts the node on the robot's DDS domain. PSI0_START_ENGAGED (CM) sets the
         # boot engage default — leave unset/0 so Ψ₀ stays held until START (Y+B).
         - name: operator
-          image: phantom-loco:local
+          image: foundationbot/phantom-psi0-loco:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args: ["python", "-m", "bridge.psi0_operator_node"]
           envFrom:
@@ -283,7 +315,7 @@ spec:
         # entrypoint sources the ROS env before exec'ing these args, so a plain
         # `bash -c` wrapper keeps rclpy importable.
         - name: loco-state-mirror
-          image: phantom-loco:local
+          image: foundationbot/phantom-psi0-loco:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args:
             - bash
@@ -314,6 +346,10 @@ spec:
           hostPath: { path: /var/lib/psi0/cache, type: DirectoryOrCreate }
         - name: dshm
           hostPath: { path: /dev/shm, type: Directory }
+        # Full host /dev for psi0-vla's iGPU access (privileged + nvidia runtime):
+        # exposes /dev/nvidia* + /dev/nvgpu* device nodes. Same as positronic.
+        - name: dev
+          hostPath: { path: /dev, type: Directory }
         # Operator gamepad char device(s) for the `operator` container.
         - name: devinput
           hostPath: { path: /dev/input, type: Directory }

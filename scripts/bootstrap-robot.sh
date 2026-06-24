@@ -3145,6 +3145,9 @@ cpu_isolation() {
     info "DRY-RUN  render $CPUSETS_CONF from cpuIsolation.partitions[]"
     info "DRY-RUN  apply cpuset partitions (cgroup-v2) covering cpus $isolcpus"
     info "DRY-RUN  install cpusets.service for boot persistence"
+    local _kp_cpus; _kp_cpus="$(cpusets_json_field "$ci_json" kubepodsCpus)"
+    [ -n "$_kp_cpus" ] && \
+      info "DRY-RUN  install kubepods-cpuset.service (pin k0s pod cgroup to cpus $_kp_cpus)"
     info "DRY-RUN  migrate-cmdline --add-rt-flags  (adds isolcpus=managed_irq,$isolcpus,"
     info "DRY-RUN    nohz_full=$_ci_dma_rt, rcu_nocbs=$isolcpus, rcu_nocb_poll,"
     info "DRY-RUN    skew_tick=1, irqaffinity=<housekeeping>)"
@@ -3213,6 +3216,35 @@ cpu_isolation() {
   else
     fail "manage_cpusets.sh install-service failed"
     return
+  fi
+
+  # ---- Step 3b: pin the k0s pod cgroup (kubepods) off the RT cores ------
+  # Optional, driven by cpuIsolation.kubepodsCpus. Two reasons this is its
+  # own unit rather than part of the uniform slice shrink above:
+  #   1. The shrink writes ONE housekeeping set to every managed slice, so
+  #      it can't put pods on a strict subset distinct from the rest of
+  #      housekeeping (the "three-group" layout — see RFC 0003).
+  #   2. kubepods is a cgroupfs cgroup that k0s/kubelet creates AFTER boot,
+  #      so cpusets.service (ordered Before=k0scontroller) never sees it,
+  #      and a `systemctl restart k0scontroller` re-creates it at all-CPUs.
+  # pin-kubepods.sh installs kubepods-cpuset.service (After=/PartOf=/
+  # WantedBy=k0scontroller) so the pin re-asserts on every k0s (re)start,
+  # and re-validates the RT partitions kubepods would otherwise break.
+  local kubepods_cpus
+  kubepods_cpus="$(cpusets_json_field "$ci_json" kubepodsCpus)"
+  if [ -n "$kubepods_cpus" ]; then
+    if [ ! -x "$PIN_KUBEPODS_SCRIPT" ]; then
+      fail "$PIN_KUBEPODS_SCRIPT not found or not executable"
+      return
+    fi
+    if "$PIN_KUBEPODS_SCRIPT" install "$kubepods_cpus" >/dev/null; then
+      pass "kubepods-cpuset.service installed (pods pinned to cpus $kubepods_cpus)"
+    else
+      fail "pin-kubepods.sh install failed"
+      return
+    fi
+  else
+    skip "cpuIsolation.kubepodsCpus unset — k0s pod cgroup left at housekeeping default"
   fi
 
   # Note: per-partition slice units are rendered by `manage_cpusets.sh apply`

@@ -628,6 +628,32 @@ Investigation log preserved here for whoever picks this up next —
 likely needed once we move off Jetson Thor, or when the Thor
 kernel fixes its topology reporting.
 
+### Update (2026-06-23) — targeted cgroup-direct kubepods pin shipped
+
+The native-kubelet path stays parked (issues 2 and 3 above are unchanged).
+But the **specific** goal of "keep `kubepods` on a fixed housekeeping subset
+and off the RT cores" now ships as a small, targeted mechanism that sidesteps
+the static CPU manager entirely:
+
+- `scripts/cpusets/pin-kubepods.sh` writes `kubepods/cpuset.cpus` directly
+  (cgroupfs path) and re-asserts the isolated partitions afterwards — which
+  also **repairs** the `ecat … isolated invalid` state (Experiment 4's
+  "negative" observation) that appears whenever k0s recreates `kubepods` at
+  all-CPUs.
+- It installs `kubepods-cpuset.service`, ordered `After=` / `PartOf=` /
+  `WantedBy=k0scontroller.service`, so the pin re-applies on every k0s
+  (re)start — closing the `systemctl restart k0scontroller` window without a
+  drain or a `cpu_manager_state` reset (CPU manager policy stays `none`,
+  so issue 2's `CoreID=0` topology bug never comes into play).
+- Driven from host-config by `cpuIsolation.kubepodsCpus` (a cpu-list,
+  validated disjoint from `partitions`), wired into bootstrap phase 10 step
+  5b. See [docs/internal/cpu-isolation.md](../cpu-isolation.md#pinning-the-k0s-pod-cgroup-kubepods).
+
+This is deliberately NOT the structured `KubeletConfiguration` surface that
+Option 3 recommended — it's the pragmatic fix that works on the Thor topology
+today. Revisit Option 3 if/when the kernel `CoreID` bug is fixed or the fleet
+moves off Jetson Thor.
+
 ### Open follow-ups
 
 - [ ] Test `enforceNodeAllocatable: [pods]` on a non-Jetson host

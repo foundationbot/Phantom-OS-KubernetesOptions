@@ -1014,6 +1014,19 @@ DEFAULT_PSI: dict[str, str] = {
     # /desired is pushed into un-enabled motors). "0" = no handshake (sim, or an
     # external mode-manager owns enable). Default off; a robot opts in.
     "autoEnableMotors": "0",
+    # spec 017: who supplies the DMA walking node's engage latch (bridge.operator).
+    # "auto" = always engaged (sim / headless / the AC-7 gate — the default that
+    # ships, matching the node's own make_operator() fallback). "gamepad" = a
+    # handheld controller on `gamepadDevice` gates engage (START = Square □ +
+    # Triangle △; STOP = Triangle △ alone; HOLD/pause = Circle ○) — REQUIRED on a
+    # robot you drive by controller, otherwise the gamepad is never read by the
+    # walking node and the policy engages on its own / not at all.
+    "operator":         "auto",
+    # PSI0_GAMEPAD_DEVICE — joystick node the gamepad operator reads (operator=gamepad).
+    "gamepadDevice":    "/dev/input/js0",
+    # PSI0_START_ENGAGED — gamepad initial engage latch. "0" (safe hardware
+    # default): node boots OFF until the operator presses START.
+    "startEngaged":     "0",
 }
 
 PSI_FIELD_TO_ENV: dict[str, str] = {
@@ -1032,6 +1045,9 @@ PSI_FIELD_TO_ENV: dict[str, str] = {
     "locoHealthPath": "PSI0_LOCO_HEALTH_PATH",
     "locoMirrorHz":   "PSI0_LOCO_MIRROR_HZ",
     "autoEnableMotors": "PSI0_AUTO_ENABLE_MOTORS",
+    "operator":         "PSI0_OPERATOR",
+    "gamepadDevice":    "PSI0_GAMEPAD_DEVICE",
+    "startEngaged":     "PSI0_START_ENGAGED",
 }
 
 
@@ -1428,6 +1444,46 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/dma_bridge",
     },
+    "psi0-policy": {
+        # psi0-vla container of the phantom-psi DaemonSet (foundation.bot/has-psi
+        # gated): the Ψ₀ VLA GPU policy. Built from Psi0-VLA/infra/docker/
+        # Dockerfile.policy (MUST be a CUDA-13/sm_110 torch base for Thor — the
+        # Orin igpu base does not run there). NOW CI-PUBLISHED to the fleet
+        # registry as foundationbot/psi0-policy:<branch>-<ts> (Psi0-VLA
+        # .circleci/config.yml, spec 005). The in-repo base-manifest tag
+        # (psi0-policy:thor-cu130, local) is the find-key + on-device fallback;
+        # kustomize rewrites the tag from images.psi0-policy. New robots pull the
+        # registry image; a local on-device build (psi0-policy:thor-cu130) is a
+        # repo-swap override in that robot's host-config.
+        "stack": "core",
+        "manifest_image": "foundationbot/psi0-policy",
+    },
+    "phantom-loco": {
+        # bridge + walking + operator + loco-state-mirror containers of the
+        # phantom-psi DaemonSet (and the psi0-dma-walking DaemonSet — same
+        # find-key). bridge.psi0_* + inference.policy_node. CI-published by the
+        # phantom-locomotion repo as foundationbot/phantom-psi0-loco:<tag>-aarch64.
+        # The base manifest points at foundationbot/phantom-psi0-loco; rewritten
+        # from images.phantom-loco (tag, or full repo-swap for a local build).
+        # The host-config key stays 'phantom-loco' (legacy); the published repo
+        # is foundationbot/phantom-psi0-loco — same key/image indirection as the
+        # 'phantom-locomotion' / 'operator-ui' entries above.
+        "stack": "core",
+        "manifest_image": "foundationbot/phantom-psi0-loco",
+    },
+    "psi0-sonic": {
+        # psi0-state container of the phantom-psi DaemonSet (foundation.bot/has-psi
+        # gated): the proprio producer (phantom_sonic.actuals_state_source). Built
+        # from Psi0-VLA/infra/docker/Dockerfile.sonic — a SUPERSET of psi0-policy
+        # (adds phantom_sonic + phantom_bridge + MJCF + mujoco + the dma_common IPC
+        # wheel) on the SAME CUDA-13/sm_110 torch base. NOW CI-PUBLISHED as
+        # foundationbot/psi0-sonic:<branch>-<ts> (Psi0-VLA .circleci/config.yml,
+        # spec 005). The in-repo base-manifest tag (psi0-sonic:thor-cu130, local)
+        # is a repo-swap override; new robots pull the registry image. kustomize
+        # rewrites the tag from images.psi0-sonic. Serves both phantom-psi's
+        # psi0-state and the psi0-dma-walking gripper container.
+        "stack": "core",
+        "manifest_image": "foundationbot/psi0-sonic",
     "okvis2x": {
         # okvis2x DaemonSet — OKVIS2-X live dense-stereo SLAM (has-okvis
         # gated, default-off). Multi-arch manifest: the aarch64 image is
@@ -1760,6 +1816,35 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
         "namespace": "positronic",
         "container": "ik-mk2",
     },
+    # psi0-dma-walking DaemonSet (Ψ₀ DMA walking, namespace psi). Override
+    # channels: privileged + mounts — the gamepad operator (PSI0_OPERATOR=
+    # gamepad) reads /dev/input/js0 in-process, which needs the host /dev/input
+    # passed through (and the device cgroup opened via privileged). The base
+    # manifest also declares this, but Argo deploys a pinned commit; this patch
+    # supplies it per-host without a manifest bump. Patches the `walking-dma`
+    # container.
+    "psi0-dma-walking": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "psi",
+        "container": "walking-dma",
+    },
+    # phantom-psi DaemonSet (Ψ₀ stack, namespace psi). The only supported
+    # override is `disableWalking: true` — the spec-017 DMA-walking cutover.
+    # When a robot opts into the psi0-dma-walking DaemonSet (which writes
+    # /desired), phantom-psi's own ROS `walking` (inference.policy_node) and
+    # `bridge` (psi0_loco_bridge) containers must stand down or two
+    # controllers fight over /desired. This injects a strategic-merge
+    # $patch: delete on those two containers (psi0-vla / psi0-state /
+    # operator / loco-state-mirror keep running, so the VLA ring + proprio +
+    # gamepad still flow). Reversible: drop the key and the containers return
+    # on the next bootstrap. `container` is nominal (the disableWalking path
+    # deletes by name and does not build a single-container patch).
+    "phantom-psi": {
+        "stack": "core",
+        "kind": "DaemonSet",
+        "namespace": "psi",
+        "container": "walking",
     # okvis2x DaemonSet — OKVIS2-X live dense-stereo SLAM. Override channels:
     #   * mounts: host-path overlays. The two common ones are a per-robot
     #     config dir (camera calibration differs per robot) and a persistent
@@ -1922,6 +2007,14 @@ EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
     {"cpp-robot-state-estimator", "okvis2x", "ik-mk2"}
 )
 
+# Allowlist for deployments.<name>.disableWalking. Spec-017 DMA-walking
+# cutover: deletes phantom-psi's ROS `walking` + `bridge` containers so the
+# psi0-dma-walking DaemonSet can own /desired without a two-controller
+# conflict. Only meaningful on phantom-psi.
+DISABLE_WALKING_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset({"phantom-psi"})
+#: Containers deleted from phantom-psi when disableWalking is set.
+PHANTOM_PSI_WALKING_CONTAINERS: tuple[str, ...] = ("walking", "bridge")
+
 
 # Fields under a deployments.<name> entry that target the workload
 # resource itself (volumes, container args, securityContext). Used by
@@ -1931,6 +2024,8 @@ EXTRA_ARGS_SUPPORTED_DEPLOYMENTS: frozenset[str] = frozenset(
 # which patches the positronic-config ConfigMap instead) don't trigger
 # an empty no-op patch on the workload.
 _WORKLOAD_PATCH_FIELDS: frozenset[str] = frozenset({
+    "mounts", "privileged", "variant", "queueMemoryLimitMb", "explodeJoints",
+    "extraArgs", "disableWalking",
     "mounts", "privileged", "variant", "queueMemoryLimitMb",
     "explodeJoints", "extraArgs",
     # Per-queue downsample overrides on rerun-streamer. Each becomes a
@@ -1959,6 +2054,33 @@ def _build_deployment_patch(
     `deployments:`. Returns (patch_yaml, warnings)."""
     target = DEPLOYMENT_TARGETS[deployment_name]
     warnings: list[str] = []
+
+    # disableWalking (phantom-psi only): a strategic-merge $patch: delete on
+    # the ROS walking + bridge containers, so the psi0-dma-walking DaemonSet
+    # owns /desired without a two-controller conflict (spec 017 cutover).
+    # Handled before the normal single-container path — it deletes containers
+    # by name rather than building one container_spec, and is the only field
+    # supported on phantom-psi.
+    if spec.get("disableWalking"):
+        warnings.append(
+            f"deployments.{deployment_name}.disableWalking=true — deleting "
+            f"the {', '.join(PHANTOM_PSI_WALKING_CONTAINERS)} containers "
+            f"(DMA-walking owns /desired; the ROS walking/bridge stand down)"
+        )
+        patch = {
+            "apiVersion": "apps/v1",
+            "kind": target["kind"],
+            "metadata": {
+                "name": deployment_name,
+                "namespace": target["namespace"],
+            },
+            "spec": {"template": {"spec": {"containers": [
+                {"name": c, "$patch": "delete"}
+                for c in PHANTOM_PSI_WALKING_CONTAINERS
+            ]}}},
+        }
+        return yaml.safe_dump(patch, sort_keys=False), warnings
+
     mounts = spec.get("mounts") or []
     privileged = bool(spec.get("privileged"))
 
@@ -2781,6 +2903,34 @@ def cmd_validate(cfg: dict) -> int:
                         file=sys.stderr,
                     )
 
+            # kubepodsCpus — optional. The cpu-list the k0s pod cgroup
+            # (kubepods) is pinned to, off the RT cores. Applied by
+            # scripts/cpusets/pin-kubepods.sh through a k0s-bound systemd
+            # unit (kubelet's native reservedSystemCPUs path is unusable on
+            # Jetson Thor — every logical CPU reports CoreID=0, see RFC
+            # 0003). Must be disjoint from the isolated partitions, else
+            # pods would land on the RT cores.
+            if "kubepodsCpus" in ci:
+                kp = ci["kubepodsCpus"]
+                if not isinstance(kp, str) or not _CPU_RANGE_RE.match(kp):
+                    errors.append(
+                        "cpuIsolation.kubepodsCpus: must be a kernel cpu-list "
+                        "string (e.g. '0-9', '0-7,9')"
+                    )
+                else:
+                    try:
+                        kp_set = _expand_cpus(kp)
+                    except ValueError as exc:
+                        errors.append(f"cpuIsolation.kubepodsCpus: {exc}")
+                        kp_set = set()
+                    overlap = kp_set & seen_cpus
+                    if overlap:
+                        errors.append(
+                            f"cpuIsolation.kubepodsCpus={kp!r}: overlaps "
+                            f"isolated partition CPUs {sorted(overlap)} — pods "
+                            f"would run on the RT cores"
+                        )
+
             # (RFC 0004: migrateCmdline cross-validation removed —
             # cmdline editing is always-on.)
 
@@ -3149,6 +3299,19 @@ def cmd_validate(cfg: dict) -> int:
                             f"deployments.{name}.launchCommand: must be "
                             f"a string (got: {lc!r})"
                         )
+            # disableWalking: spec-017 DMA-walking cutover — deletes
+            # phantom-psi's ROS walking + bridge containers. Only meaningful
+            # on phantom-psi; must be a bool.
+            if "disableWalking" in spec:
+                if name not in DISABLE_WALKING_SUPPORTED_DEPLOYMENTS:
+                    errors.append(
+                        f"deployments.{name}.disableWalking: only supported "
+                        f"on {sorted(DISABLE_WALKING_SUPPORTED_DEPLOYMENTS)}"
+                    )
+                elif not isinstance(spec["disableWalking"], bool):
+                    errors.append(
+                        f"deployments.{name}.disableWalking: must be true or false"
+                    )
             mounts = spec.get("mounts") or []
             if not isinstance(mounts, list):
                 errors.append(f"deployments.{name}.mounts: must be a list")
@@ -3230,6 +3393,31 @@ def cmd_validate(cfg: dict) -> int:
             effective_psi_dma = nl.get(
                 "foundation.bot/has-psi-dma-walking", "false"
             )
+            # DMA-walking coexistence (spec 017): phantom-psi opts into the
+            # psi0-dma-walking cutover via deployments.phantom-psi.disableWalking.
+            # When set, phantom-psi's ROS walking+bridge are deleted, so it no
+            # longer drives /desired — only psi0-dma-walking does — and
+            # has-psi + has-psi-dma-walking may both be "true".
+            deps_blk = cfg.get("deployments") or {}
+            psi_dep = deps_blk.get("phantom-psi") if isinstance(deps_blk, dict) else None
+            psi_walking_disabled = bool(
+                isinstance(psi_dep, dict) and psi_dep.get("disableWalking")
+            )
+            # has-psi-dma-walking alongside has-psi WITHOUT the cutover = two
+            # /desired drivers (phantom-psi's ROS walking + the DMA node). That
+            # is the dangerous footgun, so flag it with the precise remedy.
+            if (
+                effective_psi_dma == "true"
+                and effective_psi == "true"
+                and not psi_walking_disabled
+            ):
+                errors.append(
+                    "nodeLabels: foundation.bot/has-psi-dma-walking with "
+                    "foundation.bot/has-psi requires "
+                    "deployments.phantom-psi.disableWalking: true — otherwise "
+                    "phantom-psi's ROS walking and the DMA walking node both "
+                    "drive /desired"
+                )
             enabled_drivers = [
                 label
                 for label, eff in (
@@ -3241,6 +3429,12 @@ def cmd_validate(cfg: dict) -> int:
                     ("foundation.bot/has-psi-dma-walking", effective_psi_dma),
                 )
                 if eff == "true"
+                # Cutover exemption: with disableWalking, phantom-psi no longer
+                # drives /desired, so it leaves the exclusion set (the DMA node
+                # is then the sole driver — checked against the others below).
+                and not (
+                    label == "foundation.bot/has-psi" and psi_walking_disabled
+                )
             ]
             if len(enabled_drivers) > 1:
                 # Common case: operator turned on locomotion/sonic but left

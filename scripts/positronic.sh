@@ -217,6 +217,8 @@ ${C_BOLD}Subcommands:${C_RESET}
                                Actions: status | logs [<container>] [-f]
                                [--previous] | exec [<container>] [-- cmd] |
                                shell [<container>] | restart. 'psi --help'.
+                               [--previous] | exec <container> [-- cmd] |
+                               restart. 'psi --help' for details.
   psi-walk <action> [args...]  Helpers for the psi0-dma-walking DaemonSet (the
                                Ψ₀ Early-fan whole-body policy over the DMA
                                plane, spec 013; one container, psi ns).
