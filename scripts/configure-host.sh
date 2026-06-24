@@ -1532,6 +1532,43 @@ tmp="$(mktemp)"
     printf '  # %s\n' "$nl_desc"
     printf "  %s: '%s'\n" "$nl_key" "$nl_value"
   done < <(python3 "$HELPER" /dev/null get-node-label-defaults)
+
+  # cpuIsolation: carry the seed/template block through verbatim so the
+  # per-host CPU layout (partitions/cpus, dmaRtCpu, irqCore) survives a
+  # re-config from a template — bootstrap then sees the block present and
+  # does NOT re-prompt for the cores. The NIC selector is carried too;
+  # bootstrap's ecat-interface phase re-resolves the NIC and its picker
+  # fires when the carried MAC doesn't match this robot. dmaEthercat and
+  # phantomPsi are intentionally NOT carried (dma config is prompted by
+  # bootstrap's phase-12 picker). Emits nothing when the seed has no
+  # cpuIsolation block (e.g. a fresh run off _template) — bootstrap then
+  # prompts to create it, as before.
+  if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
+    python3 - "$seed_path" <<'PY'
+import sys, re, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    cfg = {}
+ci = cfg.get("cpuIsolation") if isinstance(cfg, dict) else None
+if isinstance(ci, dict) and ci:
+    # Drop a NIC selector whose MAC is a placeholder (not a real MAC) and
+    # has no pci/driver: it would fail validation, and we WANT bootstrap's
+    # ecat-interface picker to prompt for this robot's NIC. A real selector
+    # (valid MAC, or pci/driver) is kept and carried over (same-robot re-run).
+    nic = ci.get("nic")
+    if isinstance(nic, dict) and isinstance(nic.get("selector"), dict):
+        sel = nic["selector"]
+        mac = sel.get("mac")
+        mac_ok = isinstance(mac, str) and re.match(
+            r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", mac or "")
+        if not (mac_ok or sel.get("pci") or sel.get("driver")):
+            nic.pop("selector", None)
+    sys.stdout.write(
+        yaml.safe_dump({"cpuIsolation": ci}, default_flow_style=False, sort_keys=False)
+    )
+PY
+  fi
 } > "$tmp"
 
 heading "review"
