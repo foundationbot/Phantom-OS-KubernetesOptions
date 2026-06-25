@@ -1,132 +1,207 @@
-# okvis2x — OKVIS2-X live dense-stereo SLAM (okvis2x_app_dma_live), run as a
-# one-shot Pod with restartPolicy: Never. kubelet does NOT relaunch the
-# container on exit/crash — it goes Completed/Error and stays, which is what we
-# want for hand-driven dev on the bench. To run again: delete the pod, re-apply.
+# okvis2x — DaemonSet running OKVIS2-X live dense-stereo SLAM + volumetric
+# submapping (okvis2x_app_dma_live). The Kubernetes translation of
+# slam/OKVIS2-X/docker/{run.sh,docker-compose.yml}, which the operator has
+# validated on the bench.
 #
-# Reads camera frames + IMU from the host /dev/shm (hostIPC); GPU via the nvidia
-# runtimeclass. Schedules only on nodes labeled foundation.bot/has-okvis=true.
+# It is a CONSUMER of the DMA shared-memory queues published on the host
+# /dev/shm by dma-video (camera frames) and the dma-ethercat service (IMU,
+# /raw_imu_actuals). So, exactly like cpp-robot-state-estimator, it shares the
+# host IPC namespace (hostIPC) and bind-mounts the host /dev/shm. GPU access
+# (SuperPoint/LightGlue TensorRT engines + libtorch) flows through the nvidia
+# RuntimeClass, same as positronic-control.
 #
-# Deploy directly (no ArgoCD / bootstrap needed):
-#   sudo k0s kubectl -n positronic apply -f okvis2x.yaml
-#   sudo k0s kubectl -n positronic logs -f pod/okvis2x -c okvis2x
-#   # rerun after it exits:
-#   sudo k0s kubectl -n positronic delete pod okvis2x --ignore-not-found && \
-#     sudo k0s kubectl -n positronic apply -f okvis2x.yaml
+# run.sh flag → k8s mapping:
+#   --runtime nvidia   → runtimeClassName: nvidia + NVIDIA_* env
+#   --ipc=host         → hostIPC: true + /dev/shm hostPath
+#   --network=host     → hostNetwork: true (lets the Rerun SDK reach a viewer)
+#   models mount       → load-models initContainer + emptyDir (see below)
+#   stop_grace 300s    → terminationGracePeriodSeconds: 300
+#   jetson_clocks       → SKIPPED for now (OKVIS_SKIP_JETSON_CLOCKS=1); see below
 #
-# Two init containers:
-#   load-models  — stages the SLAM models from foundationbot/okvis2x-models into
-#                  a persistent host dir (/etc/phantomos/okvis-models), re-copying
-#                  the ~3.6GB only when the bundle's content signature changes.
-#   seed-config  — seeds /etc/phantomos/okvis with the image's baked
-#                  foundation_rig YAMLs (no-clobber, so per-robot calibration
-#                  edits on the node survive redeploys).
+# ── Disabled by default ────────────────────────────────────────────────────
+# Gated on TWO node labels:
+#   foundation.bot/robot:      "true"   — schedule only on robot nodes
+#   foundation.bot/has-okvis:  "true"   — opt-in per host (default "false" in
+#                                         host-config nodeLabels)
+# Renders everywhere, schedules nowhere until a host opts in — same off-switch
+# pattern as rerun-streamer / cpp-robot-state-estimator.
 #
-# jetson_clocks skipped (OKVIS_SKIP_JETSON_CLOCKS=1); output is an emptyDir
-# (ephemeral) — point it at a hostPath to keep trajectories/meshes.
-apiVersion: v1
-kind: Pod
+# ── Two images (both retaggable per-robot via host-config images.*) ─────────
+#   foundationbot/okvis2x         the app. Multi-arch manifest — the aarch64
+#                                 variant is the Jetson Thor build (sm_110,
+#                                 Thor TensorRT engines). CircleCI publishes
+#                                 :<branch> and :latest.
+#   foundationbot/okvis2x-models  busybox bundle carrying ONLY the SLAM model
+#                                 assets (~3.6 GB: SuperPoint/LightGlue
+#                                 .onnx/.engine, depth/seg .pt, DBoW vocab).
+#                                 The load-models initContainer copies /models
+#                                 into a shared emptyDir; the app mounts it
+#                                 read-only at /home/colby/OKVIS2-X/models — the
+#                                 path the rig configs' model_dir references.
+#                                 Identical pattern to positronic-control +
+#                                 phantom-models.
+#
+# ── jetson_clocks (skipped for now) ─────────────────────────────────────────
+# run.sh pins the host Jetson clocks to max via a privileged jetson_clocks
+# call. We keep this pod unprivileged and set OKVIS_SKIP_JETSON_CLOCKS=1 so the
+# entrypoint no-ops it. To re-enable later either run `sudo jetson_clocks` on
+# the host, or run the pod privileged with /usr/bin/jetson_clocks + /sys
+# bind-mounted (a deployments.okvis2x.{privileged,mounts} host-config override).
+#
+# ── Config (default baked; per-robot override via host-config) ──────────────
+# Defaults to the baked-in foundation_rig THOR config (correct in-image
+# model_dir + use_rerun:false for headless robots). Camera calibration is
+# per-robot, so supply host YAMLs and repoint argv via host-config — extraArgs
+# REPLACES the args list wholesale (DEPLOYMENT_BASE_ARGS["okvis2x"] is empty):
+#
+#   deployments:
+#     okvis2x:
+#       mounts:
+#         - {name: okvis-config, host: /etc/phantomos/okvis, container: /etc/okvis}
+#       extraArgs: [dma_live, /etc/okvis/okvis_stereo_dense_thor.yaml,
+#                   /etc/okvis/se2.yaml, /output]
+#
+# Switch app (snetwork dataset replay) the same way — extraArgs is the full
+# argv: [snetwork, <okvis.yaml>, <se2.yaml>, <dataset-dir>, <output-dir>].
+#
+# ── Output ──────────────────────────────────────────────────────────────────
+# Trajectory CSVs + submap meshes land in /output, an emptyDir here, so they
+# vanish with the pod. To keep them, mount a host dir via host-config:
+#   deployments:
+#     okvis2x:
+#       mounts:
+#         - {name: output, host: /data/okvis, container: /output}
+---
+apiVersion: apps/v1
+kind: DaemonSet
 metadata:
   name: okvis2x
+  # positronic namespace — shared with cpp-robot-state-estimator (the sibling
+  # DMA-shm SLAM/estimator consumer). Reuses that namespace's already-seeded
+  # dockerhub-creds pull secret; no new namespace in bootstrap's seed list.
   namespace: positronic
   labels:
     app.kubernetes.io/name: okvis2x
     app.kubernetes.io/part-of: phantomos
 spec:
-  restartPolicy: Never            # ← run once; kubelet does NOT relaunch on exit/crash
-  nodeSelector:
-    foundation.bot/robot: "true"
-    foundation.bot/has-okvis: "true"
-  tolerations:
-    - { operator: Exists, effect: NoSchedule }
-  hostNetwork: true
-  hostIPC: true
-  dnsPolicy: ClusterFirstWithHostNet
-  imagePullSecrets:
-    - name: dockerhub-creds
-  runtimeClassName: nvidia
-  initContainers:
-    - name: load-models
-      image: foundationbot/okvis2x-models:latest
-      imagePullPolicy: IfNotPresent
-      command:
-        - sh
-        - -c
-        - |
-          set -eu
-          SRC=/models; DST=/shared; MARKER="$DST/.bundle-manifest"
-          NEW="$(du -a "$SRC" | sha256sum | cut -d' ' -f1)"
-          OLD="$(cat "$MARKER" 2>/dev/null || echo none)"
-          if [ "$NEW" = "$OLD" ]; then
-            echo "==> models unchanged ($NEW) — skipping copy"
-          else
-            echo "==> models changed — refreshing $DST"
-            rm -rf "${DST:?}/"* || true
-            cp -a "$SRC"/. "$DST"/
-            printf '%s\n' "$NEW" > "$MARKER"
-          fi
-      volumeMounts:
-        - { name: models, mountPath: /shared }
-      resources:
-        requests: { cpu: "1", memory: "1Gi" }
-        limits:   { cpu: "1", memory: "1Gi" }
-    - name: seed-config
-      image: foundationbot/okvis2x:bharat-feat-custom-dma-indicies-260624.2.0
-      imagePullPolicy: IfNotPresent
-      command:
-        - sh
-        - -c
-        - |
-          set -eu
-          cp -n /home/OKVIS2-X/config/foundation_rig/*.yaml /etc/okvis/ 2>/dev/null || true
-          ls -la /etc/okvis | head
-      volumeMounts:
-        - { name: okvis-config, mountPath: /etc/okvis }
-      resources:
-        requests: { cpu: "1", memory: "256Mi" }
-        limits:   { cpu: "1", memory: "256Mi" }
-  containers:
-    - name: okvis2x
-      image: foundationbot/okvis2x:bharat-feat-custom-dma-indicies-260624.2.0      
-      imagePullPolicy: IfNotPresent
-      # ENTRYPOINT is docker/entrypoint.sh (app dispatcher); args[0]=dma_live.
-      # taskset -c 0-9 pins okvis + its OMP/worker threads to cores 0-9 (the k8s
-      # stand-in for the bench `cpuset`). Needs taskset in the image and a cpuset
-      # cgroup that permits 0-9 (true under cpuManagerPolicy=none; drop this
-      # command if the static policy is on and taskset fails).
-      command: ["taskset", "-c", "0-9", "/usr/local/bin/entrypoint.sh"]
-      args:
-        - dma_live
-        - /etc/okvis/mk12_stereo.yaml
-        - /etc/okvis/se2.yaml
-        - /output
-      env:
-        - { name: OMP_NUM_THREADS,            value: "4" }
-        - { name: OKVIS_DMA_IMU_SHM,          value: /raw_imu_actuals }
-        - { name: OKVIS_DMA_IMU_INDEX,        value: "2" }
-        - { name: OKVIS_DMA_CAMERAS,          value: "2,1" }
-        - { name: GLOG_v,                     value: "1" }
-        - { name: OKVIS_SKIP_JETSON_CLOCKS,   value: "1" }
-        - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
-        - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
-      volumeMounts:
-        - { name: shm,          mountPath: /dev/shm }
-        - { name: models,       mountPath: /okvis-models, readOnly: true }
-        - { name: okvis-config, mountPath: /etc/okvis,    readOnly: true }
-        - { name: output,       mountPath: /output }
-      resources:
-        requests: { cpu: "3", memory: "16Gi" }
-        limits:   { cpu: "3", memory: "16Gi" }
-      securityContext:
-        capabilities:
-          add:
-            - SYS_NICE   # OKVIS sets RT thread priorities / niceness
-            - IPC_LOCK   # mlock for the POSIX /dev/shm queues it mmaps
-  volumes:
-    - name: shm
-      hostPath: { path: /dev/shm, type: Directory }
-    - name: models
-      hostPath: { path: /etc/phantomos/okvis-models, type: DirectoryOrCreate }
-    - name: okvis-config
-      hostPath: { path: /etc/phantomos/okvis, type: DirectoryOrCreate }
-    - name: output
-      emptyDir: {}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: okvis2x
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: okvis2x
+    spec:
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-okvis: "true"   # ← off-switch by default
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # --network=host (Rerun viewer) + --ipc=host (mmap the DMA /dev/shm
+      # queues). dnsPolicy keeps cluster DNS resolving from the host netns.
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      # The app drains + runs a final bundle adjustment + saves the mesh on
+      # SIGTERM (a second signal forces exit). docker-compose gives it
+      # stop_grace_period: 300s; match that so the final map isn't lost when
+      # the pod is rolled.
+      terminationGracePeriodSeconds: 300
+
+      # GPU via the nvidia container runtime registered in containerd by
+      # scripts/configure-k0s-nvidia-runtime.sh; the RuntimeClass lives in
+      # manifests/base/runtime-classes/nvidia.yaml. Without it libtorch /
+      # TensorRT fail with "NVIDIA Driver was not detected". Same as
+      # positronic-control.
+      runtimeClassName: nvidia
+
+      initContainers:
+        # Stage the SLAM models from the okvis2x-models image into the shared
+        # emptyDir the app mounts at /home/colby/OKVIS2-X/models. busybox
+        # supplies sh + cp; the image's tag is rewritten per-robot by the same
+        # Kustomize images: transformer as the app container. Mirrors
+        # positronic-control's load-models init.
+        - name: load-models
+          image: foundationbot/okvis2x-models:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "==> copying /models -> /shared"
+              cp -a /models/. /shared/
+              echo "==> done; /shared contents:"
+              ls -la /shared | head
+          volumeMounts:
+            - name: models
+              mountPath: /shared
+          resources:
+            # requests == limits so this container is Guaranteed; otherwise the
+            # whole pod's QoS drops to Burstable and the main container loses
+            # CPU Manager pinning. Runs once for ~10-30 s at pod start.
+            requests: { cpu: "1", memory: "1Gi" }
+            limits:   { cpu: "1", memory: "1Gi" }
+
+      containers:
+        - name: okvis2x
+          image: foundationbot/okvis2x:latest
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT is docker/entrypoint.sh (the app dispatcher).
+          # argv for dma_live: <app> <okvis.yaml> <se2.yaml> <output-dir>.
+          # Defaults to the baked Thor foundation_rig config; override wholesale
+          # via host-config deployments.okvis2x.extraArgs (see the header).
+          args:
+            - dma_live
+            - config/foundation_rig/okvis_stereo_dense_thor.yaml
+            - config/foundation_rig/se2.yaml
+            - /output
+          env:
+            # Recommended for fast supereight2 depth integration (app warns if
+            # unset). Mirrors the Dockerfile/run.sh default.
+            - { name: OMP_NUM_THREADS,            value: "4" }
+            # DMA IMU shm object name published by the dma-ethercat service.
+            - { name: OKVIS_DMA_IMU_SHM,          value: /raw_imu_actuals }
+            # Skip the entrypoint's privileged jetson_clocks step (see header).
+            - { name: OKVIS_SKIP_JETSON_CLOCKS,   value: "1" }
+            # Make the nvidia runtime hook inject all GPUs + driver libs
+            # regardless of base image (same rationale as positronic-control).
+            - { name: NVIDIA_VISIBLE_DEVICES,     value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+          volumeMounts:
+            - { name: shm,    mountPath: /dev/shm }
+            # Models — populated by the load-models initContainer.
+            - { name: models, mountPath: /home/colby/OKVIS2-X/models, readOnly: true }
+            # Output — ephemeral by default (see header to persist).
+            - { name: output, mountPath: /output }
+          resources:
+            # Guaranteed QoS (requests == limits, whole-number CPU) so k0s CPU
+            # Manager pins the pod onto cores from the allocatable pool and
+            # never onto the isolated RT cores. Starting point — the bench
+            # compose pinned OKVIS to an 8-core cpuset; tune per board. Dense
+            # submapping is memory-hungry on long runs; raise memory if the pod
+            # is OOMKilled mid-session.
+            requests: { cpu: "6", memory: "8Gi" }
+            limits:   { cpu: "6", memory: "8Gi" }
+          securityContext:
+            capabilities:
+              add:
+                - SYS_NICE   # OKVIS sets RT thread priorities / niceness
+                - IPC_LOCK   # mlock for the POSIX /dev/shm queues it mmaps
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
+        # Models — emptyDir populated by the load-models initContainer. Source
+        # of truth is the registry-pinned okvis2x-models image, so losing it
+        # with the pod is fine; re-population is a fast local copy.
+        - name: models
+          emptyDir: {}
+        # Output — ephemeral by default. Redirect to a host dir via host-config
+        # deployments.okvis2x.mounts to persist trajectories/meshes.
+        - name: output
+          emptyDir: {}

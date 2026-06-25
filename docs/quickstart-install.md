@@ -142,7 +142,7 @@ accept any default. Things you'll be asked:
 | **targetRevision** | Skipped automatically when `gitSource: local` (bootstrap pins to the local commit SHA). Asked when `remote`; default is `main` |
 | **production mode** | `n` for dev/debug machines (no auto-revert of `kubectl edit`s); `y` for production |
 | **stack toggles** | Press Enter to accept defaults: `core` (always on), `operator` (on) |
-| **image overrides** | Press Enter to accept. The wizard's `--auto-images` mode reads the bundle manifest and fills positronic-control, phantom-models, operator-ui, and dma-ethercat with the right refs. You'll see a "Defaults from bundle:" preview before any prompts fire |
+| **image overrides** | Press Enter to accept. The wizard's `--auto-images` mode reads the bundle manifest and fills **every** deployed image with the right ref (positronic-control, phantom-models/policies, dma-bridge, cpp-robot-state-estimator, vr-web, yovariable-server, … — whatever the bundle's build host had in its host-config). You'll see a "Defaults from bundle:" preview before any prompts fire. (Older bundles built before full-coverage may only carry a few entries — those bundles ship a `release-host-config.yaml` you can seed with `configure-host.sh --from-template <path>`.) |
 | **CPU isolation** | `y` and pick the EtherCAT NIC for production robots. `n` on dev hosts without EtherCAT hardware — sets `cpuIsolation.enabled: false` and skips phases 7/8/9 cleanly |
 | **deployment mounts** (control runtime) | `production` preset (4 standard mounts) for normal robots |
 | **deployment mounts** (api server) | `n` unless you have on-host project trees to expose |
@@ -206,6 +206,13 @@ Common-and-expected failures:
 - **No OAK cameras**: dma-video producer/viewer exit cleanly and
   Kubernetes restarts them indefinitely → CrashLoopBackOff. Also
   environmental.
+- **dma-video pods `Pending` with `head_camera.json is not a file`**:
+  the `dma-video` pods mount the per-host OAK config from
+  `/etc/phantom/head_camera.json` (hostPath, `type: File`); it isn't
+  created by the install. Create it from the robot's **OAK module ID
+  (MXID)** — see [operations.md §7.21](operations.md#721-dma-video-pods-pending--etcphantomhead_camerajson-missing).
+  On a host with no OAK hardware, set `foundation.bot/has-cameras: 'false'`
+  in host-config `nodeLabels:` so the stack isn't scheduled.
 
 ### 6. Access the ArgoCD UI
 

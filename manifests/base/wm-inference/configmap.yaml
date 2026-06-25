@@ -1,0 +1,34 @@
+# Per-host knobs for the wm-inference DaemonSet, consumed via
+# `envFrom: configMapRef: wm-inference-config` in wm-inference.yaml.
+#
+# These vary per robot (which camera, which base checkpoint, which
+# task<->engine set) — unlike the fixed image-contract paths, which are
+# inline `env:` in the DaemonSet. Per-host overrides are injected as a
+# strategic-merge patch on this ConfigMap into the core Argo app's
+# spec.source.kustomize.patches at bootstrap (same mechanism as
+# positronic-config), so values stamp on every sync.
+#
+# Knobs:
+#   WM_CAMERA_ID        — 0..5 (BOARD0_LEFT..BOARD1_RIGHT). Default "0".
+#   WM_BASE_SHA         — sha1(base predictor ckpt)[:40]; the service
+#                         rejects an adapter whose base sha mismatches.
+#   WM_TASK_IDS         — csv of registered task ids the action-solver
+#                         may request.
+#   WM_PREDICTOR_ENGINES— csv of /wm-models/<engine> paths, positionally
+#                         paired with WM_TASK_IDS. Keep the two lists in
+#                         the same order and length.
+#   WM_FRESHNESS_MS     — (optional) max camera-frame age before a
+#                         request returns STALE_FRAME. Service default 200.
+#
+# The defaults below are the Honda cover task on camera 0; override
+# per-host. WM_TASK_IDS / WM_PREDICTOR_ENGINES are positionally paired.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wm-inference-config
+  namespace: positronic
+data:
+  WM_CAMERA_ID: "0"
+  WM_BASE_SHA: "33cc3ad3ab7cfc92f8eb4cf177ba552680e2def6"
+  WM_TASK_IDS: "honda_reach_insert,honda_rehome"
+  WM_PREDICTOR_ENGINES: "/wm-models/honda_reach_insert.engine,/wm-models/honda_rehome.engine"

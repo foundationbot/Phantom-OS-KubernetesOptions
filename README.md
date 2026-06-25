@@ -99,7 +99,7 @@ uninstall behavior).
                               |
                               v
               workload pods (positronic, dma-video,
-              argus, nimbus, ...)
+              argus, nimbus, registry, ...)
 ```
 
 Two ArgoCD Applications per robot — one per stack. Per-host overrides
@@ -152,7 +152,7 @@ never in k0s.
 manifests/
 ├── base/<workload>/      universal Deployment / DaemonSet / StatefulSet definitions
 └── stacks/
-    ├── core/             dma-video, positronic, phantomos-api-server, yovariable-server
+    ├── core/             registry, dma-video, positronic, phantomos-api-server, yovariable-server, okvis2x (SLAM)
     └── operator/         argus, nimbus
 
 host-config-templates/

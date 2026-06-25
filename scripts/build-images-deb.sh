@@ -9,11 +9,18 @@
 # this one ships the image bytes those manifests reference.
 #
 # Discovery: scans manifests/ for `image:` lines, skipping refs that
-# can't be pulled from upstream (*:PLACEHOLDER template tags).
-# positronic-control / phantom-models / phantom-policies are now
-# foundationbot/* images, so they're discovered and pulled from
-# DockerHub like every other foundationbot/* ref. Override the scan
-# with --from-file <path> (one image per line, # comments OK).
+# can't be pulled from upstream (localhost:5443/* and *:PLACEHOLDER).
+# Override with --from-file <path> (one image per line, # comments OK).
+#
+# Host-config (default on a robot): the system host-config at
+# /etc/phantomos/host-config.yaml is read by default and merged OVER the
+# manifest scan — its images: block carries the EXACT per-host deployed
+# tags plus every localhost:5443/* local image (psi0-*, phantom-loco,
+# phantom-models, phantom-policies, …), so you don't need the per-image
+# flags below. Point at a different file with --host-config <path>, or
+# disable with --no-host-config (off-robot/CI builds where no host file
+# exists). --exclude <glob> drops refs (e.g. --exclude 'localhost:5443/psi0-*').
+# --list prints the resolved image set and exits without building.
 #
 # Extra images: refs whose tag isn't in manifests/ (e.g. dma-ethercat,
 # whose installer manifest carries :PLACEHOLDER and whose real tag is
@@ -24,14 +31,13 @@
 #   foundationbot/dma-ethercat:main-latest-{KERNEL_ARCH}
 # expands to -amd64 in the amd64 .deb and -aarch64 in the arm64 .deb.
 #
-# Unpublished local builds (optional): if you have a positronic-control
-# or phantom-models build that isn't on DockerHub yet, bundle it
-# straight from the local docker daemon with --positronic-image <ref>
-# and --phantom-models-image <ref> (refs must already be present in
-# `docker images`). This is just an override for the normal DockerHub
-# pull — leave the flags unset to bundle the published foundationbot/*
-# images. Refs whose architecture doesn't match the build arch are
-# skipped per-arch (no error).
+# Locally-built images: positronic-control and phantom-models live at
+# localhost:5443/* and don't exist on DockerHub, so they can't be
+# pulled — they have to be saved straight from the local docker
+# daemon. Pass --positronic-image <ref> and --phantom-models-image
+# <ref> with refs already present in `docker images`, or run the
+# script on a TTY and answer the two prompts. Refs whose architecture
+# doesn't match the build arch are skipped per-arch (no error).
 #
 # Multi-arch: defaults to building one .deb per architecture for both
 # amd64 and arm64. Pass --arch <list> (or ARCHES=<list>) to narrow.
@@ -65,9 +71,9 @@
 #   scripts/build-images-deb.sh --from-file list.txt       # explicit image list
 #   ARCHES=amd64 scripts/build-images-deb.sh               # env-var form
 #   scripts/build-images-deb.sh \
-#     --positronic-image positronic-control:0.2.44-dev \
-#     --phantom-models-image phantom-models:2026-05-09-dev
-#                                                          # bundle unpublished local builds
+#     --positronic-image localhost:5443/positronic-control:0.2.44 \
+#     --phantom-models-image localhost:5443/phantom-models:2026-05-09
+#                                                          # bundle local builds
 #   scripts/build-images-deb.sh --no-data-bundle           # legacy single-.deb output
 #                                                          # (embeds tarballs in the .deb;
 #                                                          # only works under ~9.3 GB total)
@@ -100,17 +106,14 @@ FROM_FILE=""
 # packaging/deb-images/extra-images.txt and is silently skipped if absent.
 EXTRA_IMAGES_FILE_DEFAULT="$REPO_ROOT/packaging/deb-images/extra-images.txt"
 EXTRA_IMAGES_FILE="${EXTRA_IMAGES_FILE:-}"
-# Unpublished local-build overrides (already present in `docker images`).
-# Empty by default; populated only by flag/env. Use these to bundle a
-# positronic-control / phantom-models build that isn't on DockerHub yet;
-# otherwise the published foundationbot/* images are discovered and
-# pulled normally. The values are full refs (e.g.
-# positronic-control:0.2.44-dev).
+# Local-only image refs (already present in `docker images`, not pullable
+# from DockerHub). Empty by default; populated by flag or interactive
+# prompt. The values are full refs the manifest will look up at deploy
+# time (e.g. localhost:5443/positronic-control:0.2.44).
 POSITRONIC_IMAGE="${POSITRONIC_IMAGE:-}"
 PHANTOM_MODELS_IMAGE="${PHANTOM_MODELS_IMAGE:-}"
-# Retained as an accepted no-op for backward compatibility: the script
-# no longer prompts interactively (local-build refs come from flags/env
-# only), so there is nothing to suppress.
+# When set to 1, suppresses the interactive prompts even on a TTY (use
+# from CI to take the flag/env values verbatim).
 NO_PROMPT="${NO_PROMPT:-0}"
 # When set to 1, skips the per-arch sidecar tar.zst (see RFC 0007). The
 # .deb then ships the tarballs the old way (under /var/lib/k0s/images/)
@@ -118,6 +121,19 @@ NO_PROMPT="${NO_PROMPT:-0}"
 # debugging or when the tarballs are shipped via a separate channel
 # (S3/rsync) and the operator only wants the manifest-bearing .deb.
 NO_DATA_BUNDLE="${NO_DATA_BUNDLE:-0}"
+# Host-config-driven discovery. By DEFAULT, if the system host-config
+# exists we read its images: block and merge it OVER the manifest scan:
+# exact per-host deployed tags + every localhost:5443/* local image, with
+# no per-image flags. This is the right source on a robot — the manifest
+# scan only knows the in-repo default tags, and skips localhost:5443/*.
+#   --host-config <path>  read a DIFFERENT host-config (implies on).
+#   --no-host-config      disable it (off-robot/CI builds with no host file).
+HOST_CONFIG_FILE="${HOST_CONFIG_FILE:-/etc/phantomos/host-config.yaml}"
+USE_HOST_CONFIG="${USE_HOST_CONFIG:-1}"
+# Exclude globs (repeatable --exclude); matched against the full ref.
+EXCLUDES=()
+# --list: print the resolved image set and exit without building.
+LIST_ONLY=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --from-file)
@@ -135,8 +151,17 @@ while [ "$#" -gt 0 ]; do
     --phantom-models-image)
       [ -n "${2:-}" ] || { echo "error: --phantom-models-image needs a value" >&2; exit 2; }
       PHANTOM_MODELS_IMAGE="$2"; shift 2 ;;
+    --host-config)
+      [ -n "${2:-}" ] || { echo "error: --host-config needs a value" >&2; exit 2; }
+      HOST_CONFIG_FILE="$2"; USE_HOST_CONFIG=1; shift 2 ;;
+    --no-host-config)
+      USE_HOST_CONFIG=0; shift ;;
+    --exclude)
+      [ -n "${2:-}" ] || { echo "error: --exclude needs a glob" >&2; exit 2; }
+      EXCLUDES+=("$2"); shift 2 ;;
+    --list)
+      LIST_ONLY=1; shift ;;
     --no-prompt)
-      # Accepted no-op (no interactive prompts remain); kept for back-compat.
       NO_PROMPT=1; shift ;;
     --no-data-bundle)
       NO_DATA_BUNDLE=1; shift ;;
@@ -257,10 +282,12 @@ unset _prereq_tools
 # ---- image discovery ----------------------------------------------------
 
 discover_from_manifests() {
+  # Mirrors the filter in scripts/prime-registry-cache.sh:
+  #   - drop localhost:5443/* (those don't exist upstream)
   #   - drop *:PLACEHOLDER (template tag, replaced at deploy time)
-  # Everything else (all foundationbot/* refs) is pulled from DockerHub.
   grep -rhE '^\s*image:\s*' manifests/ \
     | sed -E 's/^\s*image:\s*//; s/^["'\'']//; s/["'\'']$//' \
+    | grep -v "^localhost:5443/" \
     | grep -v ':PLACEHOLDER$' \
     | grep -v '^$' \
     | sort -u
@@ -280,7 +307,101 @@ else
   done < <(discover_from_manifests)
 fi
 
-if [ "${#IMAGES[@]}" -eq 0 ]; then
+# ---- merge per-host deployed tags from host-config (default on a robot) --
+#
+# host-config.py get-images-json emits each declared/overridden image at
+# its real ref — plain `repo:tag`, or kustomize swap form `find=repo:tag`
+# (we keep the right-hand side). localhost:5443/* refs become local saves;
+# the rest are pullable and OVERRIDE any manifest-scan entry for the same
+# repo (the host-config tag is what's actually deployed). Skipped when
+# --from-file pins an explicit list, when --no-host-config is set, or when
+# the host-config file is absent (off-robot build → manifest scan only).
+HC_LOCAL=()              # localhost:5443/* refs to docker-save
+HC_LOCAL_CONTAINERS=()   # parallel container labels for the bundle manifest
+# ref -> container for pullable host-config images, so the bundle sidecar
+# records the deployed CONTAINER even for swap repos. foundationbot/phantom-cuda
+# backs both positronic-control and dma-bridge: the repo alone can't tell them
+# apart, but the host-config images: block keys can (and the two run at
+# different tags, so they're distinct keys here).
+declare -A HC_PULL_CONTAINER=()
+# repos host-config pins a pullable image for — used both to drop manifest-scan
+# defaults for the same repo (below) and to drop extra-images.txt entries for
+# the same repo in build_for_arch (so the host-config tag wins, no duplicate).
+declare -A _hc_pull_repos=()
+if [ "$USE_HOST_CONFIG" = 1 ] && [ -z "$FROM_FILE" ] && [ -r "$HOST_CONFIG_FILE" ]; then
+  # Read the images: block DIRECTLY (PyYAML), not get-images-json: we need
+  # the container KEY for every ref, which the kustomize find=replace form
+  # get-images-json emits would drop. The value is already the deployed ref.
+  _hc_lines="$(python3 - "$HOST_CONFIG_FILE" 2>/dev/null <<'PY'
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    cfg = {}
+images = cfg.get("images") if isinstance(cfg, dict) else None
+if isinstance(images, dict):
+    for container, spec in images.items():
+        if not isinstance(spec, dict):
+            continue
+        ref = spec.get("image")
+        if not ref:
+            continue
+        kind = "LOCAL" if str(ref).startswith("localhost:5443/") else "PULL"
+        print("%s\t%s\t%s" % (kind, container, ref))
+PY
+)"
+  if [ -n "$_hc_lines" ]; then
+    # Repos host-config speaks to (pullable) — drop their manifest-scan
+    # default-tag entries so the host-config tag wins. (_hc_pull_repos is
+    # declared at top scope so build_for_arch can read it too.)
+    _hc_pull=()
+    while IFS=$'\t' read -r kind container ref; do
+      [ -z "$ref" ] && continue
+      case "$kind" in
+        PULL)  _hc_pull+=("$ref"); _hc_pull_repos["${ref%:*}"]=1; HC_PULL_CONTAINER["$ref"]="$container" ;;
+        LOCAL) HC_LOCAL+=("$ref"); HC_LOCAL_CONTAINERS+=("$container") ;;
+      esac
+    done <<< "$_hc_lines"
+    _kept=()
+    for img in "${IMAGES[@]}"; do
+      [ -n "${_hc_pull_repos[${img%:*}]:-}" ] || _kept+=("$img")
+    done
+    IMAGES=("${_kept[@]}" "${_hc_pull[@]}")
+    # host-config already supplies the local images — don't also prompt.
+    NO_PROMPT=1
+    echo "host-config merge: ${HOST_CONFIG_FILE} -> ${#_hc_pull[@]} pullable + ${#HC_LOCAL[@]} local image(s)"
+  fi
+fi
+
+# ---- apply --exclude globs ----------------------------------------------
+if [ "${#EXCLUDES[@]}" -gt 0 ]; then
+  _filter_excluded() {  # reads refs on stdin, drops any matching a glob
+    local ref glob keep
+    while IFS= read -r ref; do
+      keep=1
+      for glob in "${EXCLUDES[@]}"; do
+        # shellcheck disable=SC2254  # $glob is intentionally a glob pattern
+        case "$ref" in $glob) keep=0; break ;; esac
+      done
+      [ "$keep" = 1 ] && printf '%s\n' "$ref"
+    done
+  }
+  _tmp=(); while IFS= read -r r; do [ -n "$r" ] && _tmp+=("$r"); done \
+    < <(printf '%s\n' "${IMAGES[@]}" | _filter_excluded); IMAGES=("${_tmp[@]}")
+  # Filter HC_LOCAL + its parallel container array together.
+  _tl=(); _tlc=()
+  for i in "${!HC_LOCAL[@]}"; do
+    keep=1
+    for glob in "${EXCLUDES[@]}"; do
+      # shellcheck disable=SC2254  # $glob is intentionally a glob pattern
+      case "${HC_LOCAL[$i]}" in $glob) keep=0; break ;; esac
+    done
+    [ "$keep" = 1 ] && { _tl+=("${HC_LOCAL[$i]}"); _tlc+=("${HC_LOCAL_CONTAINERS[$i]}"); }
+  done
+  HC_LOCAL=("${_tl[@]}"); HC_LOCAL_CONTAINERS=("${_tlc[@]}")
+fi
+
+if [ "${#IMAGES[@]}" -eq 0 ] && [ "${#HC_LOCAL[@]}" -eq 0 ]; then
   echo "error: no images to bundle (manifests/ scan empty and no --from-file)" >&2
   exit 1
 fi
@@ -300,17 +421,38 @@ fi
 #
 # canonical_container_for_repo <repo>
 #   Print the canonical container name for the given repository (no
-#   tag, no digest) using the four-row lookup, or nothing if the repo
-#   doesn't satisfy a canonical container. Callers handle the
-#   --positronic-image / --phantom-models-image flag overrides
-#   separately, since those flags carry operator intent that the lookup
-#   cannot infer (e.g. a swap-repo like foundationbot/phantom-cuda).
+#   tag, no digest), or nothing if the repo doesn't map to a known
+#   container. The bundle manifest sidecar records one entry per match,
+#   which the wizard's auto-images mode reads to pre-fill image overrides
+#   without operator typing — so this lookup's coverage == how much of
+#   host-config's images: block auto-fills.
+#
+#   Keyed by the repo each container's image actually ships under (incl.
+#   the key/image indirections: phantom-locomotion -> phantom-dma-inference,
+#   vr-web -> argus.vr.web.react), mirroring host-config.py CONTAINER_TARGETS.
+#   Local saves carry their container via LOCAL_IMAGE_CONTAINERS, so the
+#   localhost:5443/* rows here only matter for the no-swap deploy case.
+#
+#   OMITTED (intentionally): foundationbot/phantom-cuda — it backs BOTH
+#   positronic-control and dma-bridge, so the repo alone can't identify
+#   the container. Those two are supplied via flag (--positronic-image)
+#   or the host-config release template, not auto-fill.
 canonical_container_for_repo() {
   case "$1" in
-    foundationbot/positronic-control)  printf 'positronic-control' ;;
-    foundationbot/phantom-models)      printf 'phantom-models' ;;
-    foundationbot/argus.operator-ui)   printf 'operator-ui' ;;
-    foundationbot/dma-ethercat)        printf 'dma-ethercat' ;;
+    localhost:5443/positronic-control)    printf 'positronic-control' ;;
+    localhost:5443/phantom-models)        printf 'phantom-models' ;;
+    localhost:5443/phantom-policies)      printf 'phantom-policies' ;;
+    localhost:5443/psi0-policy)           printf 'psi0-policy' ;;
+    localhost:5443/psi0-sonic)            printf 'psi0-sonic' ;;
+    localhost:5443/phantom-loco)          printf 'phantom-loco' ;;
+    foundationbot/argus.operator-ui)      printf 'operator-ui' ;;
+    foundationbot/argus.vr.web.react)     printf 'vr-web' ;;
+    foundationbot/dma-ethercat)           printf 'dma-ethercat' ;;
+    foundationbot/dma-streams)            printf 'dma-streams' ;;
+    foundationbot/phantom-dma-inference)  printf 'phantom-locomotion' ;;
+    foundationbot/phantom-motion-replay)  printf 'phantom-motion-replay' ;;
+    foundationbot/cpp-robot-state-estimator) printf 'cpp-robot-state-estimator' ;;
+    foundationbot/yovariable-server)      printf 'yovariable-server' ;;
     *) : ;;
   esac
 }
@@ -329,16 +471,38 @@ else
   for _ in "${IMAGES[@]}"; do IMAGE_SOURCES+=("manifest-scan"); done
 fi
 
-# ---- unpublished local-build overrides ---------------------------------
+# ---- locally-built image prompts ---------------------------------------
 #
-# positronic-control / phantom-models / phantom-policies normally come
-# from DockerHub (foundationbot/*) via the manifest scan above. The
-# --positronic-image / --phantom-models-image flags are an optional
-# escape hatch for bundling a local build that isn't on DockerHub yet:
-# the ref must already exist in the local docker daemon and is saved
-# straight from it (no pull). `docker image inspect` is the gate — if
-# the ref isn't present locally, we don't try to do anything clever
-# (no auto-build, no implicit `docker tag`).
+# positronic-control and phantom-models live at localhost:5443/* and
+# can't be pulled from DockerHub. The operator either supplied them
+# via flag/env or we prompt interactively (only on a TTY, only when
+# --no-prompt isn't set). `docker image inspect` is the gate — if the
+# ref isn't already present in the local daemon, we don't try to do
+# anything clever (no auto-build, no implicit `docker tag`).
+
+prompt_local_image() {
+  # prompt_local_image <container-label> <varname>
+  # Prints the chosen ref to stdout (empty if skipped).
+  local label="$1" var="$2" current="${!2}" reply
+  if [ -n "$current" ]; then
+    printf '%s' "$current"
+    return
+  fi
+  if [ "$NO_PROMPT" = 1 ] || [ ! -t 0 ]; then
+    printf ''
+    return
+  fi
+  printf '\n' >&2
+  printf 'Bundle a local %s image?\n' "$label" >&2
+  printf '  Type the local docker ref (e.g. localhost:5443/%s:<tag>)\n' "$label" >&2
+  printf '  or press Enter to skip.\n' >&2
+  printf '  %s ref> ' "$label" >&2
+  IFS= read -r reply || reply=""
+  printf '%s' "$reply"
+}
+
+POSITRONIC_IMAGE="$(prompt_local_image positronic-control POSITRONIC_IMAGE)"
+PHANTOM_MODELS_IMAGE="$(prompt_local_image phantom-models PHANTOM_MODELS_IMAGE)"
 
 # Verify each supplied ref exists locally — fail fast rather than
 # discovering it per-arch inside the build loop. A ref that's present
@@ -370,11 +534,29 @@ if [ -n "$PHANTOM_MODELS_IMAGE" ]; then
   LOCAL_IMAGES+=("$PHANTOM_MODELS_IMAGE")
   LOCAL_IMAGE_CONTAINERS+=("phantom-models")
 fi
+# Fold in the localhost:5443/* images discovered from host-config, skipping
+# any a flag already added (flag wins, keeps its canonical-container label).
+for i in "${!HC_LOCAL[@]}"; do
+  _dup=0
+  for existing in "${LOCAL_IMAGES[@]:-}"; do
+    [ "$existing" = "${HC_LOCAL[$i]}" ] && { _dup=1; break; }
+  done
+  [ "$_dup" = 0 ] && { LOCAL_IMAGES+=("${HC_LOCAL[$i]}"); LOCAL_IMAGE_CONTAINERS+=("${HC_LOCAL_CONTAINERS[$i]}"); }
+done
+
+if [ "$LIST_ONLY" = 1 ]; then
+  echo "Resolved image set (arches: ${ARCHES_LIST[*]}) — no build (--list):"
+  echo "  pullable (${#IMAGES[@]}):"
+  for i in "${IMAGES[@]:-}"; do [ -n "$i" ] && echo "    - $i"; done
+  echo "  local-save (${#LOCAL_IMAGES[@]}):"
+  for i in "${LOCAL_IMAGES[@]:-}"; do [ -n "$i" ] && echo "    - $i"; done
+  exit 0
+fi
 
 echo "Bundling ${#IMAGES[@]} pullable image(s) for arches: ${ARCHES_LIST[*]}"
 for i in "${IMAGES[@]}"; do echo "  - $i"; done
 if [ "${#LOCAL_IMAGES[@]}" -gt 0 ]; then
-  echo "Bundling ${#LOCAL_IMAGES[@]} unpublished local-build image(s) (saved straight from docker daemon):"
+  echo "Bundling ${#LOCAL_IMAGES[@]} local-only image(s) (saved straight from docker daemon):"
   for i in "${LOCAL_IMAGES[@]}"; do echo "  - $i"; done
 fi
 echo
@@ -577,6 +759,14 @@ build_for_arch() {
   local extra
   while IFS= read -r extra; do
     if [ -n "$extra" ]; then
+      # Drop an extra-images.txt ref when host-config already pins that
+      # repo — host-config's deployed tag wins, so we don't bundle two
+      # tags of the same image (e.g. dma-ethercat main-latest-aarch64 from
+      # extra-images vs the host-config-pinned main-<ts>-aarch64).
+      if [ -n "${_hc_pull_repos[${extra%:*}]:-}" ]; then
+        echo "  - skipping extra-image $extra (host-config pins ${extra%:*})"
+        continue
+      fi
       arch_images+=("$extra")
       arch_image_sources+=("extra-images")
     fi
@@ -629,7 +819,11 @@ build_for_arch() {
     # ...) are deliberately omitted — the wizard has nothing to do with
     # them.
     repo="$(image_repo "$img")"
-    container="$(canonical_container_for_repo "$repo")"
+    # Prefer the container the host-config images: block bound to this exact
+    # ref (unambiguous, covers swap repos like phantom-cuda); fall back to the
+    # repo lookup for manifest-scan images not declared in host-config.
+    container="${HC_PULL_CONTAINER[$img]:-}"
+    [ -n "$container" ] || container="$(canonical_container_for_repo "$repo")"
     if [ -n "$container" ]; then
       bundle_containers+=("$container")
       bundle_refs+=("$img")

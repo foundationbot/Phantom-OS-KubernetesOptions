@@ -60,6 +60,14 @@ spec:
               mkdir -p /host-out
               rm -f /host-out/*.deb /host-out/.ready
               cp /usr/local/share/dma/deb/dma-ethercat-*.deb /host-out/
+              # mk2-debug-tui .deb is baked in too (arm64 only, see the
+              # image's ci/fetch_mk2_debug_tui.sh). Best-effort: absent on
+              # amd64 or if the build-time fetch was skipped, and it's a
+              # debug tool the bootstrap installs non-fatally — so a missing
+              # file here is fine.
+              cp /usr/local/share/dma/deb/mk2-debug-tui_*.deb /host-out/ 2>/dev/null \
+                && echo "==> staged $(ls /host-out/mk2-debug-tui_*.deb)" \
+                || echo "==> no mk2-debug-tui .deb baked in (expected on amd64) — skipping"
               # Sentinel — the bootstrap reads /host-out/.ready to
               # confirm the copy finished before running dpkg -i.
               touch /host-out/.ready
