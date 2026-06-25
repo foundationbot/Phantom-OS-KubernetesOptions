@@ -220,6 +220,10 @@
 #                    configure-k0s-nvidia-runtime.sh (if a GPU is detected
 #                    via lspci or /dev/nvidia0). Restarts k0s; waits for
 #                    node Ready before returning so later phases don't race.
+#                    Then preload-registry-image.sh preloads the in-cluster
+#                    registry's own image (registry:2) into containerd so
+#                    the k0s-registry pod can start without pulling its own
+#                    image through the mirror it serves (FIR-465).
 #    5. seed pull secrets
 #                    ensure `dockerhub-creds` (kubernetes.io/dockerconfigjson)
 #                    exists in `argus`, `dma-video`, `nimbus`, `phantom` so
@@ -1421,11 +1425,30 @@ host_config() {
     for _ in $(seq 1 60); do
       if "${KUBECTL[@]}" get nodes 2>/dev/null | awk '/Ready/{ok=1} END{exit !ok}'; then
         info "node Ready"
-        return
+        break
       fi
       sleep 5
     done
-    fail "node did not return to Ready within 5min after host config restart"
+    if ! "${KUBECTL[@]}" get nodes 2>/dev/null | awk '/Ready/{ok=1} END{exit !ok}'; then
+      fail "node did not return to Ready within 5min after host config restart"
+    fi
+  fi
+
+  # FIR-465: preload the in-cluster registry's own image (registry:2) into
+  # containerd BEFORE the k0s-registry pod is deployed by the gitops phase.
+  # configure-k0s-containerd-mirror.sh (above) routes docker.io/* through
+  # localhost:5443 — which is the k0s-registry pod itself. On a host with
+  # no image bundle, that pod cannot pull its own image through the mirror
+  # it serves (chicken-and-egg) and hangs in ContainerCreating forever.
+  # Preloading via docker (which ignores the containerd mirror) breaks the
+  # cycle. Idempotent + degrades gracefully (skip, exit 0) if docker is
+  # absent or the image is already present.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  bash $REPO_ROOT/scripts/preload-registry-image.sh"
+  elif bash "$REPO_ROOT/scripts/preload-registry-image.sh"; then
+    pass "registry image preloaded into containerd (FIR-465 chicken-and-egg guard)"
+  else
+    fail "preload-registry-image.sh"
   fi
 }
 
