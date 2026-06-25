@@ -16,17 +16,14 @@
 # validator rejects "has-locomotion: true with default-on positronic".
 #
 # ── Policies ─────────────────────────────────────────────────────────────
-# Policy ONNX files live in the phantom-policies busybox image under
-# /models/policies/. An initContainer copies that subtree into a shared
-# emptyDir; the main container mounts the emptyDir at /data/policies
-# (matches the docker-compose contract). Same lifecycle as
-# positronic-control's load-models initContainer, but consumes a
-# DIFFERENT image (phantom-policies vs phantom-models) so locomotion
-# robots can ship a small policies-only image (~MB) instead of dragging
-# in positronic-control's full model bundle (~GB).
-#
-# If the operator's phantom-policies build doesn't ship /models/policies,
-# the initContainer fails loud (init logs name the missing path).
+# Policy ONNX files are extracted ONCE onto the host (FIR-467) under
+# /root/models/policies by bootstrap's extract-models phase
+# (scripts/extract-models-to-host.sh, driven from the phantom-policies
+# image ref in host-config.yaml — the /models/policies subtree). The main
+# container read-only bind-mounts that host dir at /data/policies (matches
+# the docker-compose contract). No initContainer, no per-pod emptyDir copy.
+# Policies are self-versioned (the image tag changes when content changes),
+# so the host dir is a flat, overwritten-in-place tree.
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -60,36 +57,6 @@ spec:
       imagePullSecrets:
         - name: dockerhub-creds
       terminationGracePeriodSeconds: 15
-
-      initContainers:
-        # Copy /models/policies from the phantom-policies image into
-        # the shared emptyDir; main container mounts the emptyDir at
-        # /data/policies. Matches the docker-compose volume contract.
-        - name: load-policies
-          image: localhost:5443/phantom-policies:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              set -eu
-              if [ -d /models/policies ]; then
-                echo "==> copying /models/policies -> /shared"
-                cp -a /models/policies/. /shared/
-              else
-                echo "==> /models/policies missing in phantom-policies image"
-                echo "    expected: phantom-policies build manifest with"
-                echo "    .onnx entries mapped to dest: policies/<name>.onnx"
-                exit 1
-              fi
-              echo "==> done; /shared contents:"
-              ls -la /shared | head
-          volumeMounts:
-            - name: policies
-              mountPath: /shared
-          resources:
-            requests: { cpu: "500m", memory: "256Mi" }
-            limits:   { cpu: "500m", memory: "256Mi" }
 
       containers:
         - name: phantom-locomotion
@@ -143,7 +110,9 @@ spec:
           volumeMounts:
             - { name: shm,        mountPath: /dev/shm }
             - { name: dev-input,  mountPath: /dev/input }
-            - { name: policies,   mountPath: /data/policies }
+            # Policies — host's /root/models/policies bind-mounted read-only.
+            # Extracted once by bootstrap's extract-models phase, not per-pod.
+            - { name: policies,   mountPath: /data/policies, readOnly: true }
             # Persistent host directory for diagnostic reports (and
             # other artifacts an operator wants to `kubectl cp` off
             # the robot without scraping /dev/shm). Same hostPath the
@@ -166,8 +135,16 @@ spec:
           hostPath: { path: /dev/shm,         type: Directory }
         - name: dev-input
           hostPath: { path: /dev/input,       type: Directory }
+        # Policies — host's /root/models/policies bind-mounted in (FIR-467).
+        # The subtree is extracted once by bootstrap's extract-models phase
+        # from the phantom-policies image; the main container mounts it
+        # read-only at /data/policies. DirectoryOrCreate so a freshly-imaged
+        # host with no policies yet still schedules (the pod CrashLoops
+        # until the extract populates it, then self-recovers).
         - name: policies
-          emptyDir: {}
+          hostPath:
+            path: /root/models/policies
+            type: DirectoryOrCreate
         # DirectoryOrCreate matches manifests/base/dma-streams/dma-recorder.yaml
         # so the mount succeeds on robots that have never run dma-recorder
         # (the kubelet creates /root/recordings if it doesn't exist).

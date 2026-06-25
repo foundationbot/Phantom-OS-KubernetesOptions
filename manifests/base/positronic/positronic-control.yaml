@@ -9,19 +9,20 @@
 # wants 1 replica and would leave a Pending pod when the selector
 # doesn't match.
 #
-# Two images flow into this pod, both rewritten per-robot via Kustomize's
+# One image runs in this pod, rewritten per-robot via Kustomize's
 # `images:` transformer in the overlay:
-#   1. localhost:5443/positronic-control:<tag>  — the executing image
-#      (currently foundationbot/phantom-cuda retagged for the local registry).
-#   2. localhost:5443/phantom-models:<tag>      — busybox-based image whose
-#      /models tree gets copied into a shared emptyDir by the load-models
-#      initContainer; the main container mounts that emptyDir at /root/models.
+#   localhost:5443/positronic-control:<tag>  — the executing image
+#   (currently foundationbot/phantom-cuda retagged for the local registry).
 #
-# Models are loaded via initContainer + emptyDir copy rather than the
-# native image: volume because k0s 1.35.3's containerd has only partial
-# image-volume support (fails with `mkdir ""` at OCI spec generation).
-# When/if k0s catches up, switch back to the image: volume — the manifest
-# diff is small.
+# Models are NOT loaded per-pod anymore (FIR-467). The model tree is
+# extracted ONCE onto the host at /root/models by bootstrap's
+# extract-models phase (scripts/extract-models-to-host.sh, driven from the
+# phantom-models image ref in host-config.yaml). This pod read-only
+# bind-mounts that host dir at /root/models. No initContainer, no emptyDir
+# copy on every pod start — the same /root/models the phantomos-api-server
+# already serves to the operator-ui policy picker. Models are
+# self-versioned (the image tag changes when content changes), so the host
+# dir is a flat, overwritten-in-place tree.
 #
 # Default mode: PHANTOM_CMD empty → `sleep infinity`. Operator execs in
 # for interactive ROS work. Set PHANTOM_CMD in the ConfigMap to flip
@@ -68,36 +69,6 @@ spec:
       # /dev mount) but the userspace driver libs are missing — anything
       # touching libcuda fails with "NVIDIA Driver was not detected".
       runtimeClassName: nvidia
-      initContainers:
-        # Copy /models from the phantom-models image into the shared
-        # emptyDir, which the main container then mounts at /root/models.
-        # busybox provides sh + cp; phantom-models is built FROM busybox
-        # for exactly this purpose. The init image's tag is rewritten
-        # per-robot by the same Kustomize `images:` transformer that
-        # handles the main container.
-        - name: load-models
-          image: localhost:5443/phantom-models:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              set -eu
-              echo "==> copying /models -> /shared"
-              cp -a /models/. /shared/
-              echo "==> done; /shared contents:"
-              ls -la /shared | head
-          volumeMounts:
-            - name: models
-              mountPath: /shared
-          resources:
-            # requests == limits so this container is Guaranteed; without
-            # that, the whole pod's QoS drops to Burstable and we lose CPU
-            # Manager pinning on the main container. The init runs once
-            # for ~10–30 s during pod start, so over-allocating briefly
-            # is fine.
-            requests: { cpu: "1", memory: "1Gi" }
-            limits:   { cpu: "1", memory: "1Gi" }
       containers:
         - name: positronic-control
           image: localhost:5443/positronic-control:PLACEHOLDER
@@ -154,7 +125,8 @@ spec:
             - { name: shm,            mountPath: /dev/shm }
             - { name: dev,            mountPath: /dev }
             - { name: tmp,            mountPath: /tmp }
-            # Models — populated by the load-models initContainer.
+            # Models — host's /root/models bind-mounted read-only. Populated
+            # once by bootstrap's extract-models phase, not per-pod.
             - { name: models,         mountPath: /root/models, readOnly: true }
           resources:
             # 8 CPU / 16Gi as a starting point (plan §3.7). Guaranteed
@@ -183,10 +155,14 @@ spec:
           hostPath: { path: /dev,     type: Directory }
         - name: tmp
           hostPath: { path: /tmp,     type: Directory }
-        # Models — emptyDir populated by the load-models initContainer
-        # which copies /models from the phantom-models image. emptyDir
-        # lives on the kubelet's pod-volumes disk so it disappears with
-        # the pod; that's fine here because the source-of-truth is the
-        # registry-pinned image and re-population is fast.
+        # Models — host's /root/models bind-mounted in (FIR-467). The tree
+        # is extracted once by bootstrap's extract-models phase from the
+        # phantom-models image; the main container mounts it read-only.
+        # DirectoryOrCreate so a freshly-imaged host with no models yet
+        # still schedules (the pod CrashLoops until the extract populates
+        # it, then self-recovers). Same /root/models the phantomos-api-server
+        # serves to the operator-ui policy picker.
         - name: models
-          emptyDir: {}
+          hostPath:
+            path: /root/models
+            type: DirectoryOrCreate
