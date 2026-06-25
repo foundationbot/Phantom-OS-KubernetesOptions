@@ -1329,17 +1329,21 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "manifest_image": "foundationbot/positronic-control",
     },
     "phantom-models": {
-        # Consumed by positronic-control's load-models initContainer.
-        # Larger bundle (model weights, configs).
+        # Source image for bootstrap's extract-models phase (FIR-467):
+        # its /models tree is extracted once onto the host at /root/models,
+        # which positronic-control then read-only bind-mounts. Larger
+        # bundle (model weights, configs). NOT an in-pod initContainer ref.
         "stack": "core",
         "manifest_image": "foundationbot/phantom-models",
     },
     "phantom-policies": {
-        # Consumed by phantom-locomotion's load-policies initContainer.
-        # Slim image (~MB) — only ONNX policies, mapped to /models/policies.
-        # Built from the same scripts/phantom-models/build.py with
-        # `--image phantom-policies` and a manifest pointing entries at
-        # dest: policies/<name>.
+        # Source image for bootstrap's extract-models phase (FIR-467):
+        # its /models/policies subtree is extracted once onto the host at
+        # /root/models/policies, which phantom-locomotion then read-only
+        # bind-mounts. Slim image (~MB) — only ONNX policies. Built from the
+        # same scripts/phantom-models/build.py with `--image phantom-policies`
+        # and a manifest pointing entries at dest: policies/<name>. NOT an
+        # in-pod initContainer ref.
         "stack": "core",
         "manifest_image": "foundationbot/phantom-policies",
     },

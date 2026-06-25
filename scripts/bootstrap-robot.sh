@@ -91,6 +91,14 @@
 #                        any path not given). Runs between gitops and
 #                        image-overrides so the unchanged image-overrides
 #                        phase injects the new tag. See operations.md §3.13.
+#   --extract-models     extract the phantom-models / phantom-policies
+#                        image trees ONCE onto the host at /root/models
+#                        (read-only bind-mounted by positronic-control,
+#                        phantom-locomotion, phantomos-api-server). Resolves
+#                        the refs from host-config.yaml's images: block.
+#                        Idempotent via a .extracted-ref marker. Runs right
+#                        after load-image-tars so the model images are
+#                        available to docker. FIR-467.
 #   --image-overrides    inject host-config.yaml's images list into
 #                        the live Application
 #   --deployments        inject host-config.yaml's deployments: patches
@@ -106,6 +114,7 @@
 #   --skip-ecat-interface skip the phase 9 ecat-interface setup
 #   --skip-cpu-isolation skip the phase 10 cpu-isolation setup
 #   --skip-log-management skip the phase 11 log-management setup
+#   --skip-extract-models skip the phase 14c extract-models setup
 #   --skip-validate      skip the final validate-local-registry.sh run
 #   --no-tailscale       ignore Tailscale when resolving the cluster API
 #                        address; bind spec.api.address to the
@@ -380,6 +389,7 @@ SKIP_PSI_CONFIG=0
 SKIP_GITOPS=0
 SKIP_ARGOCD_ADMIN=0
 SKIP_LOAD_IMAGE_TARS=0
+SKIP_EXTRACT_MODELS=0
 SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
 SKIP_VALIDATE=0
@@ -446,6 +456,7 @@ while [ $# -gt 0 ]; do
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --load-image-tars)   SELECTED_PHASES+=(load-image-tars); shift ;;
+    --extract-models)    SELECTED_PHASES+=(extract-models); shift ;;
     --image-overrides)   SELECTED_PHASES+=(image-overrides); shift ;;
     --deployments|--dev-mounts)
                          SELECTED_PHASES+=(dev-mounts); shift ;;
@@ -456,6 +467,8 @@ while [ $# -gt 0 ]; do
     # Targeted overrides that compose with both modes.
     --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
     --skip-validate)     SKIP_VALIDATE=1; shift ;;
+    --skip-extract-models)
+                         SKIP_EXTRACT_MODELS=1; shift ;;
     --no-tailscale)      NO_TAILSCALE=1; shift ;;
     --skip-purge-pods)   SKIP_PURGE_PODS=1; shift ;;
     --skip-docker-stop)  SKIP_DOCKER_STOP=1; shift ;;
@@ -679,6 +692,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_LOAD_IMAGE_TARS=1
+  SKIP_EXTRACT_MODELS=1
   SKIP_IMAGE_OVERRIDES=1
   SKIP_DEV_MOUNTS=1
   SKIP_VALIDATE=1
@@ -708,6 +722,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       load-image-tars)   SKIP_LOAD_IMAGE_TARS=0 ;;
+      extract-models)    SKIP_EXTRACT_MODELS=0 ;;
       image-overrides)   SKIP_IMAGE_OVERRIDES=0 ;;
       dev-mounts)        SKIP_DEV_MOUNTS=0 ;;
       install-dma-ethercat) SKIP_INSTALL_DMA_ETHERCAT=0 ;;
@@ -726,7 +741,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|ecat-interface|load-image-tars) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|ecat-interface|load-image-tars|extract-models) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -5129,6 +5144,90 @@ load_image_tars() {
   fi
 }
 
+# ---- phase 14c: extract models/policies to host (FIR-467) --------------
+#
+# Extract the model + policy trees baked into the phantom-models /
+# phantom-policies carrier images ONCE onto the host at /root/models, so
+# the consumer pods (positronic-control, phantom-locomotion) and the
+# phantomos-api-server policy picker read them via a read-only hostPath
+# bind-mount instead of a per-pod initContainer copy.
+#
+# Runs immediately AFTER load_image_tars: that phase makes the model
+# images available to docker (loaded from the bundle tars, or pullable
+# from the now-up local registry), which scripts/extract-models-to-host.sh
+# needs to `docker create` an ephemeral container per ref. The extractor
+# is idempotent (its .extracted-ref marker makes an unchanged-ref re-run a
+# true no-op), so re-bootstraps are cheap.
+extract_models() {
+  if [ "$SKIP_EXTRACT_MODELS" = 1 ]; then
+    phase "phase 14c: extract-models  (skipped)"
+    return
+  fi
+  phase "phase 14c: extract-models (model/policy trees -> host /root/models)"
+
+  local extractor="$REPO_ROOT/scripts/extract-models-to-host.sh"
+  if [ ! -f "$extractor" ]; then
+    fail "scripts/extract-models-to-host.sh not found"
+    return
+  fi
+
+  # Resolve the source host-config (canonical, or the --host-config input
+  # in dry-run before the canonical file is written). Mirrors the
+  # install-dma-ethercat phase's resolution.
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+  if [ ! -r "$hc" ]; then
+    fail "$HOST_CONFIG_FILE missing — cannot resolve phantom-models/phantom-policies refs"
+    return
+  fi
+
+  # Resolve the two image refs via the same container-keyed getter the
+  # dma-ethercat phase uses. A ref that is empty or a leftover PLACEHOLDER
+  # tag means the operator hasn't wired that image (e.g. a robot that runs
+  # only locomotion) — warn + skip that ref rather than fail.
+  local models_ref policies_ref
+  models_ref="$(python3 "$HOST_CONFIG_HELPER" "$hc" \
+                  get-image-for-container phantom-models 2>/dev/null || true)"
+  policies_ref="$(python3 "$HOST_CONFIG_HELPER" "$hc" \
+                  get-image-for-container phantom-policies 2>/dev/null || true)"
+
+  local -a args=(--dest /root/models)
+  if [ -z "$models_ref" ] || [ "${models_ref##*:}" = "PLACEHOLDER" ]; then
+    info "phantom-models ref unset/PLACEHOLDER — skipping models extract"
+  else
+    pass "resolved phantom-models image: $models_ref"
+    args+=(--models-ref "$models_ref")
+  fi
+  if [ -z "$policies_ref" ] || [ "${policies_ref##*:}" = "PLACEHOLDER" ]; then
+    info "phantom-policies ref unset/PLACEHOLDER — skipping policies extract"
+  else
+    pass "resolved phantom-policies image: $policies_ref"
+    args+=(--policies-ref "$policies_ref")
+  fi
+
+  # Nothing wired: soft no-op (a freshly-imaged host with neither image is
+  # legitimate — the hostPath mounts are DirectoryOrCreate).
+  if [ "${#args[@]}" -eq 2 ]; then
+    skip "no phantom-models / phantom-policies refs in host-config — nothing to extract"
+    return
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    args+=(--dry-run)
+    info "DRY-RUN  bash $extractor ${args[*]}"
+  fi
+
+  # The extractor's exit code is its failure count. Surface a failure but
+  # do NOT crash bootstrap — guard() handles bailing per --keep-going.
+  if bash "$extractor" "${args[@]}"; then
+    pass "model/policy trees extracted to /root/models"
+  else
+    fail "extract-models reported one or more failed extractions"
+  fi
+}
+
 # ---- phase 15: kustomize image overrides (per-host, per-stack) ---------
 
 # Each entry in host-config's images: list belongs to exactly one stack.
@@ -6022,6 +6121,7 @@ print_plan() {
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
   _step $([ "$SKIP_LOAD_IMAGE_TARS"      = 0 ] && echo 1 || echo 0) "phase 14b load-image-tars"                 "--load-image-tars not selected"
+  _step $([ "$SKIP_EXTRACT_MODELS"       = 0 ] && echo 1 || echo 0) "phase 14c extract-models"                  "--extract-models not selected"
   _step $([ "$SKIP_IMAGE_OVERRIDES"      = 0 ] && echo 1 || echo 0) "phase 15  image-overrides"                 "--image-overrides not selected"
   _step $([ "$SKIP_DEV_MOUNTS"           = 0 ] && echo 1 || echo 0) "phase 16  deployments"                     "--deployments not selected"
   _step "$SETUP_POSITRONIC"                                         "phase 17  setup-positronic"             "--setup-positronic not set"
@@ -6092,6 +6192,7 @@ install_dma_ethercat ; guard
 gitops             ; guard
 argocd_admin       ; guard
 load_image_tars    ; guard
+extract_models     ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
 gaia_host          ; guard

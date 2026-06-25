@@ -6,7 +6,7 @@
 # ref below is the canonical foundationbot/positronic-control:PLACEHOLDER; host-config
 # images.positronic-control swaps it to your per-branch/beta build (e.g.
 # foundationbot/phantom-cuda:<tag>), which MUST carry the code. Models stay a
-# hostPath (/root/phantom-models-merged); /data, /dev, /dev/shm etc. remain host mounts.
+# hostPath (/root/models); /data, /dev, /dev/shm etc. remain host mounts.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -106,7 +106,7 @@ spec:
       # NOTE: no `src` / `ihmc` hostPath — positronic_control code is baked into
       # the image (pulled), not bind-mounted from /root/foundation/positronic_control.
       - hostPath:
-          path: /root/phantom-models-merged
+          path: /root/models
           type: Directory
         name: models
       - hostPath:
