@@ -217,6 +217,7 @@
 #                    edit /etc/k0s/containerd.toml, which only exists after
 #                    k0s has started at least once.
 #    4. host config  configure-k0s-containerd-mirror.sh +
+#                    configure-usb-power.sh + configure-inotify-limits.sh +
 #                    configure-k0s-nvidia-runtime.sh (if a GPU is detected
 #                    via lspci or /dev/nvidia0). Restarts k0s; waits for
 #                    node Ready before returning so later phases don't race.
@@ -1389,6 +1390,20 @@ host_config() {
     pass "OAK USB autosuspend disabled (udev rule installed)"
   else
     fail "configure-usb-power.sh"
+  fi
+
+  # inotify limits — install a sysctl drop-in raising
+  # fs.inotify.max_user_instances/max_user_watches so the growing set of
+  # k8s workloads doesn't exhaust the stock 128-instance default (which
+  # crashed mediamtx with "too many open files" on mk11000020).
+  # Idempotent; host-wide; doesn't touch k0s, so it runs above the
+  # post-config Ready wait below.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  bash $REPO_ROOT/scripts/configure-inotify-limits.sh"
+  elif bash "$REPO_ROOT/scripts/configure-inotify-limits.sh"; then
+    pass "inotify limits raised (sysctl drop-in installed)"
+  else
+    fail "configure-inotify-limits.sh"
   fi
 
   # NVIDIA runtime — autodetect, override-able via --skip-nvidia
