@@ -1765,7 +1765,7 @@ DEPLOYMENT_TARGETS: dict[str, dict[str, str]] = {
     "dma-bridge": {
         "stack": "core",
         "kind": "DaemonSet",
-        "namespace": "phantom",
+        "namespace": "positronic",
         "container": "bridge",
     },
     # ik-mk2 DaemonSet — MK2 upper-body IK shim (positronic ns, default-off).
