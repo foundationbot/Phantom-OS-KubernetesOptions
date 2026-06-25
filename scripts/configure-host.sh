@@ -1538,11 +1538,10 @@ tmp="$(mktemp)"
   # re-config from a template — bootstrap then sees the block present and
   # does NOT re-prompt for the cores. The NIC selector is carried too;
   # bootstrap's ecat-interface phase re-resolves the NIC and its picker
-  # fires when the carried MAC doesn't match this robot. dmaEthercat and
-  # phantomPsi are intentionally NOT carried (dma config is prompted by
-  # bootstrap's phase-12 picker). Emits nothing when the seed has no
-  # cpuIsolation block (e.g. a fresh run off _template) — bootstrap then
-  # prompts to create it, as before.
+  # fires when the carried MAC doesn't match this robot. phantomPsi is
+  # intentionally NOT carried (it falls back to safe manifest defaults).
+  # Emits nothing when the seed has no cpuIsolation block (e.g. a fresh
+  # run off _template) — bootstrap then prompts to create it, as before.
   if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
     python3 - "$seed_path" <<'PY'
 import sys, re, yaml
@@ -1566,6 +1565,36 @@ if isinstance(ci, dict) and ci:
             nic.pop("selector", None)
     sys.stdout.write(
         yaml.safe_dump({"cpuIsolation": ci}, default_flow_style=False, sort_keys=False)
+    )
+PY
+  fi
+
+  # dmaEthercat: carry the seed/template block through verbatim (FIR-464).
+  # This block (configPath / configSet) tells bootstrap's phase-12
+  # dma-ethercat installer which per-robot SOEM JSON to land. The wizard
+  # rebuilds host-config.yaml from a fixed schema, so without an explicit
+  # carry it silently dropped a seeded dmaEthercat: block — phase 12 then
+  # fell through to its auto-detect / TTY-picker path and HARD-FAILED with
+  # "no dma-ethercat config for robot '<robot>'" on non-interactive robot
+  # deploys (found during the fork/sof-1167-keep-registry deploy on
+  # mk11000020). The picker only rescues a TTY run; an unattended bootstrap
+  # has no way to recover. Carrying the block keeps --from-template
+  # reconciles non-interactive. configSet is robot-agnostic (bootstrap
+  # appends /<robot>.json); a configPath naming another robot's JSON is the
+  # operator's choice in the seed and is validated against disk by phase 12.
+  # Emits nothing when the seed has no dmaEthercat block (e.g. a fresh run
+  # off _template) — bootstrap's phase-12 picker then prompts, as before.
+  if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
+    python3 - "$seed_path" <<'PY'
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    cfg = {}
+dma = cfg.get("dmaEthercat") if isinstance(cfg, dict) else None
+if isinstance(dma, dict) and dma:
+    sys.stdout.write(
+        yaml.safe_dump({"dmaEthercat": dma}, default_flow_style=False, sort_keys=False)
     )
 PY
   fi
