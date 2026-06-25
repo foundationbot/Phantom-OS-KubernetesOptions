@@ -88,7 +88,7 @@ spec:
         - name: recorder
           # Built and pushed by .circleci/config.yml under DMA.streams.
           # Bump the tag through host-config kustomize.images, not here.
-          image: foundationbot/dma-streams:SOF-1167-latest
+          image: foundationbot/dma-streams:beta-latest
           imagePullPolicy: IfNotPresent
           command: ["dma_recorder"]
           # NOTE (k0s health, SOF-1167 #4): intentionally NO liveness/readiness

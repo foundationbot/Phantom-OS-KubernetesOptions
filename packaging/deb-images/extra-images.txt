@@ -28,17 +28,17 @@
 # Job pulls from local containerd (already imported by k0s) instead
 # of DockerHub — works on robots without dockerhub-creds.
 #
-# Beta pin: SOF-1167. CI does NOT publish a bare `:SOF-1167` tag — it emits
-# per-arch builds with DIFFERENT names: `:SOF-1167-latest-aarch64` (arm64) and
-# `:SOF-1167-latest` (amd64). So the two arch lines carry different tags (not a
+# Beta pin: the `beta` branch. CI does NOT publish a bare `:beta` tag — it emits
+# per-arch builds with DIFFERENT names: `:beta-latest-aarch64` (arm64) and
+# `:beta-latest` (amd64). So the two arch lines carry different tags (not a
 # single shared one), and they MATCH images.dma-ethercat in the host-config
-# template. (verified present on DockerHub.)
-foundationbot/dma-ethercat:SOF-1167-latest-aarch64    # arch:arm64
-foundationbot/dma-ethercat:SOF-1167-latest            # arch:amd64
+# template. (built from the dma-ethercat beta branch.)
+foundationbot/dma-ethercat:beta-latest-aarch64    # arch:arm64
+foundationbot/dma-ethercat:beta-latest            # arch:amd64
 
-# dma.streams beta pin (SOF-1167). The dma-recorder / rerun-streamer manifests
+# dma.streams beta pin (`beta` branch). The dma-recorder / rerun-streamer manifests
 # still carry foundationbot/dma-streams:main-latest, so the manifest scan would
-# otherwise bundle main-latest; this ensures the SOF-1167 build the host-config
-# override deploys is in the bundle. `:SOF-1167-latest` is a MULTI-ARCH tag
+# otherwise bundle main-latest; this ensures the beta build the host-config
+# override deploys is in the bundle. `:beta-latest` is a MULTI-ARCH tag
 # (amd64+arm64), so no per-arch filter — and it matches images.dma-streams.
-foundationbot/dma-streams:SOF-1167-latest
+foundationbot/dma-streams:beta-latest

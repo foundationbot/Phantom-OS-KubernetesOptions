@@ -70,7 +70,7 @@ spec:
         requests: { cpu: "1", memory: "1Gi" }
         limits:   { cpu: "1", memory: "1Gi" }
     - name: seed-config
-      image: foundationbot/okvis2x:bharat-feat-custom-dma-indicies-260624.2.0
+      image: foundationbot/okvis2x:beta
       imagePullPolicy: IfNotPresent
       command:
         - sh
@@ -86,7 +86,7 @@ spec:
         limits:   { cpu: "1", memory: "256Mi" }
   containers:
     - name: okvis2x
-      image: foundationbot/okvis2x:bharat-feat-custom-dma-indicies-260624.2.0      
+      image: foundationbot/okvis2x:beta      
       imagePullPolicy: IfNotPresent
       # ENTRYPOINT is docker/entrypoint.sh (app dispatcher); args[0]=dma_live.
       # taskset -c 0-9 pins okvis + its OMP/worker threads to cores 0-9 (the k8s

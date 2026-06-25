@@ -21,7 +21,7 @@ spec:
         - name: dockerhub-creds
       containers:
         - name: eg-server
-          image: foundationbot/nimbus.s3_dynamo_athena:SOF-1167
+          image: foundationbot/nimbus.s3_dynamo_athena:beta
           imagePullPolicy: IfNotPresent
           env:
             # /api/clip reaches the node's gaia stack (hostNetwork: Tempo :10386 /

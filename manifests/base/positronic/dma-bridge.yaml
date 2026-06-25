@@ -1,7 +1,7 @@
 # dma-bridge — the teleop `dma_bridge` service brought into k0s, replacing the
 # old base/dma-bridge (foundationbot/dma_bridge:main). Mirrors
 # /root/foundation/teleop/docker-compose.yml `dma_bridge`:
-#   image  foundationbot/phantom-cuda:dma-bridge-SOF-1167-arm64  (typed 192-byte
+#   image  foundationbot/phantom-cuda:dma-bridge-beta-arm64  (typed 192-byte
 #          TaskspaceCommand build, otel baked — the correct taskspace bridge)
 #   network host + ipc host; ENTRYPOINT dma-bridge-server serves the FE on :9098
 #   mounts /src (positronic_control checkout), /dev/shm, /ai.inference (ro)
@@ -42,7 +42,7 @@ spec:
       containers:
         - name: bridge
           # ENTRYPOINT dma-bridge-server + CMD --host 0.0.0.0 --port 9098 baked in.
-          image: foundationbot/phantom-cuda:dma-bridge-SOF-1167-arm64
+          image: foundationbot/phantom-cuda:dma-bridge-beta-arm64
           imagePullPolicy: Always   # compose pull_policy: always
           env:
             - { name: PYTHONUNBUFFERED, value: "1" }

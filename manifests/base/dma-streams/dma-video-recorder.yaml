@@ -77,7 +77,7 @@ spec:
         - name: recorder
           # Same image as dma-recorder. Bump the tag through host-config
           # kustomize.images, not here.
-          image: foundationbot/dma-streams:SOF-1167-latest
+          image: foundationbot/dma-streams:beta-latest
           imagePullPolicy: IfNotPresent
           # ENTRYPOINT defaults to dma_recorder; override to the video sidecar.
           command: ["dma-video-recorder"]

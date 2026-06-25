@@ -52,7 +52,7 @@ spec:
         - configMapRef:
             name: positronic-config
             optional: true
-        image: foundationbot/phantom-cuda:SOF-1167-arm64
+        image: foundationbot/phantom-cuda:beta-arm64
         imagePullPolicy: IfNotPresent
         name: positronic-phantom
         resources:

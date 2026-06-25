@@ -217,7 +217,7 @@ spec:
               mountPath: /tls
       containers:
         - name: vr-web
-          image: foundationbot/argus.vr.web.react:SOF-1176-feat
+          image: foundationbot/argus.vr.web.react:beta
           imagePullPolicy: IfNotPresent
           ports:
             # hostPort:8010 maps the container's port directly onto

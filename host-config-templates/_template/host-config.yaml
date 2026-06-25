@@ -155,9 +155,9 @@ images:
   operator-ui:
     image: foundationbot/argus.operator-ui:qa
   dma-streams:
-    image: foundationbot/dma-streams:SOF-1167
+    image: foundationbot/dma-streams:beta-latest
   dma-ethercat:
-    image: foundationbot/dma-ethercat:SOF-1167
+    image: foundationbot/dma-ethercat:beta-latest-aarch64
   # ik-mk2 is default-off (nodeLabels has-ik-mk2: 'false'); uncomment and
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:

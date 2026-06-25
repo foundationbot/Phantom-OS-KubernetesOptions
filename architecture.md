@@ -69,8 +69,8 @@ isolated for the EtherCAT/control loop. This is node-level (kubepods cgroup /
 Every image is `docker pull` of a CI-published `foundationbot/*` (or public
 upstream); k0s's containerd pulls them (separate from docker's store). Notable:
 
-- positronic: `foundationbot/phantom-cuda:SOF-1167-arm64` (~22.5 GB) +
-  `:dma-bridge-SOF-1167-arm64` (the typed-taskspace bridge — NOT the legacy
+- positronic: `foundationbot/phantom-cuda:beta-arm64` (~22.5 GB) +
+  `:dma-bridge-beta-arm64` (the typed-taskspace bridge — NOT the legacy
   `foundationbot/dma_bridge:main`). The `positronic_control` code is **baked into**
   the image (`docker/phantom/production.Dockerfile` `COPY ./ /src`, per-branch/beta
   build) and **pulled** — the DaemonSet has no `/src` (or `.ihmc`) hostPath, so a

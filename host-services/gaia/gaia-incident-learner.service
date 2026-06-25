@@ -5,7 +5,7 @@ Requires=docker.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f gaia-incident-learner
-ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:gaia-llm-rag
+ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:beta
 ExecStart=/usr/bin/docker run --rm --name gaia-incident-learner --network host \
   -e OLLAMA_HOST=http://localhost:11434 \
   -e LOKI_URL=http://localhost:10310 \
@@ -13,7 +13,7 @@ ExecStart=/usr/bin/docker run --rm --name gaia-incident-learner --network host \
   -e VAULT_DB=/data/incidents/vault-index.db \
   -e EVENTS_ARCHIVE=/data/logs/boundary.jsonl \
   -v /data:/data \
-  foundationbot/gaia-tools:gaia-llm-rag python3 incident_learner.py
+  foundationbot/gaia-tools:beta python3 incident_learner.py
 ExecStop=/usr/bin/docker stop gaia-incident-learner
 Restart=always
 RestartSec=5
