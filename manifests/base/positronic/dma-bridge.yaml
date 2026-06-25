@@ -6,8 +6,10 @@
 #   network host + ipc host; ENTRYPOINT dma-bridge-server serves the FE on :9098
 #   mounts /src (positronic_control checkout), /dev/shm, /ai.inference (ro)
 #
-# Lives in the positronic stack (paired with positronic-phantom) and gates on
-# foundation.bot/has-positronic. CPU pinning to housekeeping cores is at the node
+# Lives in the positronic stack (paired with positronic-phantom) but gates on
+# foundation.bot/has-dma-bridge — a control-mode-independent teleop bridge, so it
+# runs on any robot with the bridge enabled, not only positronic (has-positronic
+# may be false). CPU pinning to housekeeping cores is at the node
 # level (compose used cpuset: "0-9"). Single :9098 owner — base/dma-bridge dropped.
 apiVersion: apps/v1
 kind: DaemonSet
@@ -27,7 +29,7 @@ spec:
         app.kubernetes.io/name: dma-bridge
     spec:
       nodeSelector:
-        foundation.bot/has-positronic: "true"
+        foundation.bot/has-dma-bridge: "true"
       tolerations:
         - operator: Exists
           effect: NoSchedule
