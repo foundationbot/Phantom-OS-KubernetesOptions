@@ -6,7 +6,14 @@
 #          foundationbot/phantom-cuda:dma-bridge-<tag> — the typed 192-byte
 #          TaskspaceCommand build, otel baked. Override-driven, like positronic-control.)
 #   network host + ipc host; ENTRYPOINT dma-bridge-server serves the FE on :9098
-#   mounts /src (positronic_control checkout), /dev/shm, /ai.inference (ro)
+#
+# The bridge code (/src) and its sibling deps (/ai.inference, phantom_runtime,
+# phantom_policies) are BAKED INTO the production image — the base manifest
+# mounts only /dev/shm (the genuine host IPC segment). It does NOT bind-mount any
+# host source: a production robot needs no on-disk checkout (FIR-469). For
+# development, re-add the source mounts per-host via host-config
+# `deployments.dma-bridge.mounts` (e.g. {name: src, host: /opt/positronic_control,
+# container: /src}); the dev-mount injector layers them onto this base.
 #
 # Lives in the positronic stack (paired with positronic-phantom) but gates on
 # foundation.bot/has-dma-bridge — a control-mode-independent teleop bridge, so it
@@ -64,14 +71,12 @@ spec:
             tcpSocket: { port: 9098 }
             initialDelaySeconds: 2
             periodSeconds: 10
+          # Only /dev/shm is mounted from the host; /src + /ai.inference come from
+          # the image (prod) or host-config deployments.dma-bridge.mounts (dev).
           volumeMounts:
-            - { name: src,          mountPath: /src }
-            - { name: shm,          mountPath: /dev/shm }
-            - { name: ai-inference, mountPath: /ai.inference, readOnly: true }
+            - { name: shm, mountPath: /dev/shm }
           resources:
             requests: { cpu: "200m",  memory: "256Mi" }
             limits:   { cpu: "2000m", memory: "2Gi" }
       volumes:
-        - { name: src,          hostPath: { path: /root/foundation/positronic_control, type: Directory } }
-        - { name: shm,          hostPath: { path: /dev/shm, type: Directory } }
-        - { name: ai-inference, hostPath: { path: /ai.inference, type: DirectoryOrCreate } }
+        - { name: shm, hostPath: { path: /dev/shm, type: Directory } }
