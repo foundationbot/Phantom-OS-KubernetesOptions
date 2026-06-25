@@ -9,7 +9,7 @@
 #
 # Reports:
 #   1. Pod status + recent events
-#   2. Image availability (containerd local store + dockerhub-creds)
+#   2. Registry catalog + tags for positronic-control / phantom-models
 #   3. Rendered overlay's image references
 #   4. Whether any :PLACEHOLDER strings survived the render
 #
@@ -20,7 +20,7 @@ set -u -o pipefail
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 NAMESPACE="${NAMESPACE:-positronic}"
 APP_LABEL="${APP_LABEL:-app=positronic-control}"
-PULL_SECRET="${PULL_SECRET:-dockerhub-creds}"
+REGISTRY="${REGISTRY:-localhost:5443}"
 
 # positronic-control lives in the `core` stack. The OVERLAY env var
 # can override (e.g. point at a custom kustomize tree) but the default
@@ -61,37 +61,24 @@ else
   echo "$events" | indent
 fi
 
-# --- 3. Image availability -------------------------------------------------
-# Images are pulled from DockerHub (foundationbot/*). Two things make a
-# pull succeed: the dockerhub-creds Secret is present in this namespace,
-# and (for offline/air-gapped robots) the image was pre-imported into
-# containerd's local store from a phantomos-k0s-images .deb.
+# --- 3. Registry inventory ------------------------------------------------
 
-bold "3. Pull-secret presence (${NAMESPACE}/${PULL_SECRET})"
-if $KUBECTL -n "$NAMESPACE" get secret "$PULL_SECRET" >/dev/null 2>&1; then
-  ok "${PULL_SECRET} present in ${NAMESPACE}"
+bold "3. Registry inventory @ ${REGISTRY}"
+if catalog=$(curl -fs "http://${REGISTRY}/v2/_catalog" 2>/dev/null); then
+  echo "$catalog" | indent
 else
-  fail "${PULL_SECRET} missing in ${NAMESPACE} — DockerHub pulls of foundationbot/* will fail"
-  problems+=("missing-pull-secret")
+  fail "registry at http://${REGISTRY}/v2/_catalog unreachable"
+  problems+=("registry-down")
 fi
 
-bold "Local containerd image store (foundationbot/positronic-control, phantom-models)"
-if command -v k0s >/dev/null 2>&1; then
-  if imgs=$(k0s ctr -n k8s.io images list -q 2>/dev/null); then
-    for img in positronic-control phantom-models; do
-      match=$(printf '%s\n' "$imgs" | grep -E "foundationbot/${img}(:|@)" || true)
-      if [ -n "$match" ]; then
-        printf '%s\n' "$match" | indent
-      else
-        warn "foundationbot/${img}: not in containerd store (will pull from DockerHub)"
-      fi
-    done
+for img in positronic-control phantom-models; do
+  if tags=$(curl -fs "http://${REGISTRY}/v2/${img}/tags/list" 2>/dev/null); then
+    printf '  %-22s %s\n' "${img}:" "$tags"
   else
-    warn "could not list containerd images (k0s ctr unavailable)"
+    fail "${img}: not in registry"
+    problems+=("missing-${img}")
   fi
-else
-  warn "k0s not on PATH — skipping containerd image-store check"
-fi
+done
 
 # --- 4. Render the overlay ------------------------------------------------
 
@@ -102,7 +89,7 @@ trap 'rm -f "$render"' EXIT
 if $KUBECTL kustomize "$OVERLAY" >"$render" 2>"${render}.err"; then
   ok "overlay renders cleanly"
   printf '  %s\n' "positronic-control container image:"
-  grep -E '^\s+image:\s*foundationbot/positronic-control' "$render" | indent || warn "    no positronic-control image: line found"
+  grep -E '^\s+image:\s*localhost:5443/positronic-control' "$render" | indent || warn "    no positronic-control image: line found"
   printf '  %s\n' "phantom-models volume reference:"
   awk '/name: models$/{flag=1} flag && /reference:/{print; flag=0}' "$render" | indent \
     || warn "    no phantom-models reference: line found"
@@ -130,19 +117,20 @@ fi
 bold "Diagnosis"
 
 placeholder_in_render=false
-missing_pull_secret=false
+missing_phantom_models=false
 for p in "${problems[@]:-}"; do
   case "$p" in
     placeholder-in-render) placeholder_in_render=true ;;
-    missing-pull-secret) missing_pull_secret=true ;;
+    missing-phantom-models) missing_phantom_models=true ;;
   esac
 done
 
-if [ "$missing_pull_secret" = true ]; then
-  fail "dockerhub-creds is missing in ${NAMESPACE}"
+if [ "$missing_phantom_models" = true ]; then
+  fail "phantom-models is not in the registry"
   echo
-  echo "  Seed it so foundationbot/* images can be pulled:"
-  echo "    sudo bash scripts/bootstrap-robot.sh --seed-pull-secrets"
+  echo "  Build + push it:"
+  echo "    sudo python3 scripts/phantom-models/build.py"
+  echo "    # interactive — picks today's date as the tag by default"
 fi
 
 if [ "$placeholder_in_render" = true ]; then
@@ -150,9 +138,9 @@ if [ "$placeholder_in_render" = true ]; then
   echo
   echo "  Likely fix: drop the patch and hardcode the tag in the base manifest."
   echo "  In manifests/base/positronic/positronic-control.yaml, change:"
-  echo "      reference: foundationbot/phantom-models:PLACEHOLDER"
+  echo "      reference: localhost:5443/phantom-models:PLACEHOLDER"
   echo "  to:"
-  echo "      reference: foundationbot/phantom-models:<your-tag>"
+  echo "      reference: localhost:5443/phantom-models:<your-tag>"
   echo
   echo "  Image tag overrides now come from /etc/phantomos/host-config.yaml's"
   echo "  images: list — bump the tag there and run:"

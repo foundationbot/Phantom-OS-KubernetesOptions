@@ -1,5 +1,5 @@
-# positronic-phantom DaemonSet — based on the live mk11test k0s deployment
-# (k0s kubectl -n positronic get ds positronic-phantom), sanitized of cluster-runtime
+# positronic-control DaemonSet — based on the live mk11test k0s deployment
+# (k0s kubectl -n positronic get ds positronic-control), sanitized of cluster-runtime
 # fields, with ONE change: positronic_control is PULLED — /src and /root/.ihmc come
 # from the image (built with the code baked in, e.g. docker/phantom/production.Dockerfile
 # `COPY ./ /src`), NOT bind-mounted from /root/foundation/positronic_control. So the
@@ -8,16 +8,16 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: positronic-phantom
+  name: positronic-control
   namespace: positronic
 spec:
   selector:
     matchLabels:
-      app: positronic-phantom
+      app: positronic-control
   template:
     metadata:
       labels:
-        app: positronic-phantom
+        app: positronic-control
     spec:
       containers:
       - args:
@@ -54,7 +54,7 @@ spec:
             optional: true
         image: foundationbot/phantom-cuda:SOF-1167-arm64
         imagePullPolicy: IfNotPresent
-        name: positronic-phantom
+        name: positronic-control
         resources:
           limits:
             cpu: '2'
@@ -77,8 +77,6 @@ spec:
           name: gradle
         - mountPath: /recordings
           name: recordings
-        - mountPath: /trainground
-          name: trainground
         - mountPath: /data
           name: data
         - mountPath: /data2
@@ -121,10 +119,6 @@ spec:
           path: /root/recordings
           type: DirectoryOrCreate
         name: recordings
-      - hostPath:
-          path: /root/trainground
-          type: DirectoryOrCreate
-        name: trainground
       - hostPath:
           path: /data
           type: Directory

@@ -28,17 +28,9 @@
 # Job pulls from local containerd (already imported by k0s) instead
 # of DockerHub — works on robots without dockerhub-creds.
 #
-# Beta pin: SOF-1167. CI does NOT publish a bare `:SOF-1167` tag — it emits
-# per-arch builds with DIFFERENT names: `:SOF-1167-latest-aarch64` (arm64) and
-# `:SOF-1167-latest` (amd64). So the two arch lines carry different tags (not a
-# single shared one), and they MATCH images.dma-ethercat in the host-config
-# template. (verified present on DockerHub.)
-foundationbot/dma-ethercat:SOF-1167-latest-aarch64    # arch:arm64
-foundationbot/dma-ethercat:SOF-1167-latest            # arch:amd64
-
-# dma.streams beta pin (SOF-1167). The dma-recorder / rerun-streamer manifests
-# still carry foundationbot/dma-streams:main-latest, so the manifest scan would
-# otherwise bundle main-latest; this ensures the SOF-1167 build the host-config
-# override deploys is in the bundle. `:SOF-1167-latest` is a MULTI-ARCH tag
-# (amd64+arm64), so no per-arch filter — and it matches images.dma-streams.
-foundationbot/dma-streams:SOF-1167-latest
+# NOTE: dma-ethercat and dma-streams are intentionally NOT pinned here.
+# Their image tags are driven solely by host-config.yaml
+# (images.dma-ethercat.image / images.dma-streams.image). The local registry
+# serves the operator-selected tag (primed via prime-registry-cache.sh)
+# rather than hardcoding a build tag in the deb creator. Add a line here only
+# if you must bundle a specific tag offline independent of host-config.

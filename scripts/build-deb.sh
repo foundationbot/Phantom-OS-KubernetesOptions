@@ -8,7 +8,7 @@
 #   DEB_MAINTAINER="X <x@y>" scripts/build-deb.sh   # override maintainer
 #   PKG_NAME=phantomos-k0s scripts/build-deb.sh     # override package name
 #
-# Requires: dpkg-deb, tar. No fakeroot/debhelper/rsync needed; we use
+# Requires: dpkg-deb, rsync. No fakeroot/debhelper needed; we use
 # `dpkg-deb --root-owner-group` to set root:root on packaged files.
 
 set -euo pipefail
@@ -23,10 +23,10 @@ ARCH="all"
 
 # ---- prerequisites ------------------------------------------------------
 
-for tool in dpkg-deb tar; do
+for tool in dpkg-deb rsync; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "build-deb.sh: required tool '$tool' not found in PATH" >&2
-    echo "  hint: sudo apt install dpkg tar" >&2
+    echo "  hint: sudo apt install dpkg rsync" >&2
     exit 1
   fi
 done
@@ -95,19 +95,19 @@ mkdir -p "$STAGE_DIR$INSTALL_PREFIX"
 # Copy repo contents into the staging tree, excluding VCS, build
 # artifacts, local working drafts, and the packaging/dist scaffolding
 # itself.
-tar -C . \
-  --exclude='./.git' \
-  --exclude='./.gitignore' \
-  --exclude='./dist' \
-  --exclude='./packaging' \
-  --exclude='./docs/internal' \
-  --exclude='./fix*.sh' \
-  --exclude='.claude' \
-  --exclude='.obsidian' \
-  --exclude='__pycache__' \
+rsync -a \
+  --exclude='.git/' \
+  --exclude='.gitignore' \
+  --exclude='dist/' \
+  --exclude='packaging/' \
+  --exclude='/docs/internal/' \
+  --exclude='/fix*.sh' \
+  --exclude='.claude/' \
+  --exclude='.obsidian/' \
+  --exclude='__pycache__/' \
   --exclude='*.pyc' \
   --exclude='*.swp' \
-  -cf - . | tar -C "$STAGE_DIR$INSTALL_PREFIX/" -xf -
+  ./ "$STAGE_DIR$INSTALL_PREFIX/"
 
 # Defensive: ensure shipped scripts are executable.
 find "$STAGE_DIR$INSTALL_PREFIX/scripts" \
@@ -121,24 +121,21 @@ find "$STAGE_DIR$INSTALL_PREFIX/scripts" \
 find "$STAGE_DIR$INSTALL_PREFIX" -type d -exec chmod 0755 {} +
 find "$STAGE_DIR$INSTALL_PREFIX" -type f ! -perm -u+x -exec chmod 0644 {} +
 
-# ---- (optional) embed git repo inside staged tree ----------------------
-# RFC 0006: ArgoCD's `gitSource: local` clones file:///opt/.../.git — that is
-# the ONLY consumer of this .git. Deploying WITHOUT ArgoCD (kubectl apply -k, or
-# the remote gitSource pointing at GitHub) doesn't use it, and it's >half the deb.
-# So it's OFF by default; set EMBED_GIT=1 to bake it for ArgoCD local-source robots.
-if [ "${EMBED_GIT:-0}" = 1 ]; then
-  echo "==> initializing git repo inside staged tree (EMBED_GIT=1)"
-  INSTALL_TREE="$STAGE_DIR$INSTALL_PREFIX"
-  git -C "$INSTALL_TREE" init -q -b main
-  git -C "$INSTALL_TREE" config user.email "phantomos@foundation.bot"
-  git -C "$INSTALL_TREE" config user.name "phantomos build"
-  git -C "$INSTALL_TREE" add -A
-  git -C "$INSTALL_TREE" commit -q -m "phantomos-k0s ${VERSION}"
-  git -C "$INSTALL_TREE" gc --aggressive --prune=now -q
-  echo "    .git/ size after gc: $(du -sh "$INSTALL_TREE/.git" | awk '{print $1}')"
-else
-  echo "==> skipping embedded git repo (.git) — set EMBED_GIT=1 for ArgoCD gitSource:local"
-fi
+# ---- embed git repo inside staged tree ---------------------------------
+# RFC 0006: the installed tree at /opt/Phantom-OS-KubernetesOptions is a
+# real git repo so ArgoCD can clone it via file:///opt/... . Init must
+# run AFTER all rsync/install/permission steps so the single commit
+# captures the final tree exactly as it'll land on the robot.
+echo "==> initializing git repo inside staged tree"
+INSTALL_TREE="$STAGE_DIR$INSTALL_PREFIX"
+git -C "$INSTALL_TREE" init -q -b main
+git -C "$INSTALL_TREE" config user.email "phantomos@foundation.bot"
+git -C "$INSTALL_TREE" config user.name "phantomos build"
+git -C "$INSTALL_TREE" add -A
+git -C "$INSTALL_TREE" commit -q -m "phantomos-k0s ${VERSION}"
+git -C "$INSTALL_TREE" gc --aggressive --prune=now -q
+PACKED_GIT_SIZE=$(du -sh "$INSTALL_TREE/.git" | awk '{print $1}')
+echo "    .git/ size after gc: $PACKED_GIT_SIZE"
 
 # ---- control + maintainer scripts --------------------------------------
 

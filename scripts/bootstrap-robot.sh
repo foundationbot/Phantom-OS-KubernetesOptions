@@ -390,6 +390,7 @@ SKIP_ETHERCAT_UNINSTALL=0
 SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
+SKIP_GAIA_HOST=0
 # dma-ethercat install runs by default. Combined with the default-on
 # uninstall pre-phase, a routine bootstrap re-run gives you a clean
 # reinstall of the realtime stack. Pass --skip-ethercat-install to
@@ -436,6 +437,7 @@ while [ $# -gt 0 ]; do
     --ecat-interface)    SELECTED_PHASES+=(ecat-interface); shift ;;
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
+    --gaia-host)         SELECTED_PHASES+=(gaia-host); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --load-image-tars)   SELECTED_PHASES+=(load-image-tars); shift ;;
@@ -467,6 +469,7 @@ while [ $# -gt 0 ]; do
                          SKIP_CPU_ISOLATION=1; shift ;;
     --skip-log-management)
                          SKIP_LOG_MANAGEMENT=1; shift ;;
+    --skip-gaia-host)    SKIP_GAIA_HOST=1; shift ;;
     --skip-operator-ui-config)
                          SKIP_OPERATOR_UI_CONFIG=1; shift ;;
     --skip-ethercat-install)
@@ -667,6 +670,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_ECAT_INTERFACE=1
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
+  SKIP_GAIA_HOST=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_LOAD_IMAGE_TARS=1
@@ -695,6 +699,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       ecat-interface)    SKIP_ECAT_INTERFACE=0 ;;
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
+      gaia-host)         SKIP_GAIA_HOST=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       load-image-tars)   SKIP_LOAD_IMAGE_TARS=0 ;;
@@ -716,7 +721,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|ecat-interface|load-image-tars) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|ecat-interface|load-image-tars) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -3688,6 +3693,30 @@ EOF
 DMA_ETHERCAT_TEMPLATE="${DMA_ETHERCAT_TEMPLATE:-$REPO_ROOT/manifests/installers/dma-ethercat/base/job.yaml}"
 DMA_ETHERCAT_RENDERED="${DMA_ETHERCAT_RENDERED:-/etc/phantomos/dma-ethercat-installer.yaml}"
 
+# ---- phase: gaia host services (outside k0s) --------------------------
+# The gaia RAG/incident services (docker run foundationbot/gaia-tools) and the
+# GPU/NVMAP node-exporter textfile collectors run as HOST systemd units — they
+# can't be ArgoCD/k8s workloads. install-gaia-host-services.sh drops the units +
+# scripts (host-services/gaia/) and enables them. Idempotent; runs after the
+# cluster/gitops phases so the gaia backend (Loki/Prometheus) it talks to is up.
+gaia_host() {
+  if [ "${SKIP_GAIA_HOST:-0}" = 1 ]; then
+    phase "phase: gaia host services  (skipped — --skip-gaia-host)"
+    return
+  fi
+  phase "phase: gaia host services"
+  local installer="$REPO_ROOT/scripts/install-gaia-host-services.sh"
+  if [ ! -f "$installer" ]; then
+    info "no $installer — skipping gaia host services"
+    return
+  fi
+  if DRY_RUN="$DRY_RUN" bash "$installer"; then
+    pass "gaia host services installed"
+  else
+    fail "install-gaia-host-services.sh"
+  fi
+}
+
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
     phase "phase 12: install dma-ethercat  (skipped — --skip-ethercat-install)"
@@ -5950,6 +5979,7 @@ print_plan() {
   _step $([ "$SKIP_ECAT_INTERFACE"       = 0 ] && echo 1 || echo 0) "phase  9  ecat-interface (gates 10)"       "--skip-ecat-interface"
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
+  _step $([ "${SKIP_GAIA_HOST:-0}"       = 0 ] && echo 1 || echo 0) "phase     gaia-host services (outside k0s)" "--skip-gaia-host"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
@@ -6026,6 +6056,7 @@ argocd_admin       ; guard
 load_image_tars    ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
+gaia_host          ; guard
 setup_positronic   ; guard
 validate
 
