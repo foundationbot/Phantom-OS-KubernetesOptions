@@ -2,8 +2,10 @@
 # (k0s kubectl -n positronic get ds positronic-control), sanitized of cluster-runtime
 # fields, with ONE change: positronic_control is PULLED — /src and /root/.ihmc come
 # from the image (built with the code baked in, e.g. docker/phantom/production.Dockerfile
-# `COPY ./ /src`), NOT bind-mounted from /root/foundation/positronic_control. So the
-# image tag below MUST carry the code (your per-branch/beta build). Models stay a
+# `COPY ./ /src`), NOT bind-mounted from /root/foundation/positronic_control. The base
+# ref below is the canonical foundationbot/positronic-control:PLACEHOLDER; host-config
+# images.positronic-control swaps it to your per-branch/beta build (e.g.
+# foundationbot/phantom-cuda:<tag>), which MUST carry the code. Models stay a
 # hostPath (/root/phantom-models-merged); /data, /dev, /dev/shm etc. remain host mounts.
 apiVersion: apps/v1
 kind: DaemonSet
@@ -52,7 +54,7 @@ spec:
         - configMapRef:
             name: positronic-config
             optional: true
-        image: foundationbot/phantom-cuda:SOF-1167-arm64
+        image: foundationbot/positronic-control:PLACEHOLDER
         imagePullPolicy: IfNotPresent
         name: positronic-control
         resources:
