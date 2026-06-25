@@ -61,6 +61,8 @@ production: false
 #   stacks.core      always required; cannot be disabled.
 #   stacks.operator  argus + nimbus (operator UI, episode storage).
 #                    Toggle the whole group with enabled: false.
+#   stacks.gaia      observability (grafana/prometheus/loki/tempo/otel/vector
+#                    + exporters). Toggle the whole group with enabled: false.
 #
 # Each stack's selfHeal: field is optional. When set, it overrides the
 # top-level production: flag for that stack only — useful when you want
@@ -71,6 +73,9 @@ stacks:
     # selfHeal: true        # uncomment to override production:
   operator:
     enabled: true
+    # selfHeal: false       # uncomment to leave drift alone
+  gaia:
+    enabled: true            # on-robot observability (grafana/prometheus/loki/tempo)
     # selfHeal: false       # uncomment to leave drift alone
 
 # Per-host image overrides. Container-keyed: each entry names a known

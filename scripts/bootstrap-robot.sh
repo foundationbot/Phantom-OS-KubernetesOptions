@@ -4809,7 +4809,7 @@ gitops() {
   if [ -z "$enabled_stacks" ]; then
     # No host-config — fall back to the 'all stacks default' (matches
     # cmd_get_enabled_stacks's behavior when stacks: is omitted).
-    enabled_stacks=$'core\noperator'
+    enabled_stacks=$'core\noperator\ngaia'
   fi
 
   # selfHeal resolution per stack: stacks.<name>.selfHeal (when set) >
@@ -4919,7 +4919,7 @@ PY
     rendered_stacks="${rendered_stacks} $stack"
   done <<< "$enabled_stacks"
 
-  for known_stack in core operator; do
+  for known_stack in core operator gaia; do
     case " $rendered_stacks " in
       *" $known_stack "*) continue ;;
     esac
@@ -5234,7 +5234,7 @@ image_overrides() {
   local enabled_stacks
   enabled_stacks="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-enabled-stacks 2>/dev/null || true)"
   if [ -z "$enabled_stacks" ]; then
-    enabled_stacks=$'core\noperator'
+    enabled_stacks=$'core\noperator\ngaia'
   fi
 
   # Build image -> stack map (kustomize-scan; cached). In dry-run on a

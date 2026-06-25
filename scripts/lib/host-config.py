@@ -63,7 +63,7 @@ except ModuleNotFoundError:
 # this order so `core` (registry, positronic, dma-video, ...) comes up
 # before `operator` (which doesn't depend on core but reads better when
 # core is already healthy).
-KNOWN_STACKS: tuple[str, ...] = ("core", "operator")
+KNOWN_STACKS: tuple[str, ...] = ("core", "operator", "gaia")
 # Stacks that cannot be disabled — robot is non-functional without them.
 REQUIRED_STACKS: frozenset[str] = frozenset({"core"})
 
