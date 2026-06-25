@@ -141,11 +141,15 @@ spec:
             limits:   { cpu: "4", memory: "2Gi" }
           securityContext:
             privileged: true
+            runAsUser: 0   # /dev/shm/{commands,phantom_*} are root-owned by dma_main
 
         # ── Teleop web UI (sidecar) ───────────────────────────────────────
         # Serves the joystick + e-stop + Enable-Motors + Record page on
-        # http://<robot-ip>:8090. Writes the velocity scratch the node reads, and
-        # sends ENABLE_MOTORS / RECORDING_* opcodes (needs the shared /dev/shm).
+        # http://<robot-ip>:8090. Writes the velocity scratch the node reads;
+        # Enable Motors / E-STOP run the baked `dma_cmd_client` (enable-motors /
+        # disable-motors / estop / estop-clear), Record sends the RECORDING_*
+        # opcode — all over the shared /dev/shm (runAsUser:0 + hostIPC required,
+        # since /dev/shm/commands is root-owned by dma_main).
         # Bound 0.0.0.0:8090 with NO auth token for easiest operator access —
         # tighten with --token (from a Secret) if the robot is on an open network.
         # PORT 8090: 8080 is already taken on the host by yovariable-server (admin)
@@ -177,6 +181,7 @@ spec:
             limits:   { cpu: "500m", memory: "256Mi" }
           securityContext:
             privileged: true
+            runAsUser: 0   # /dev/shm/{commands,phantom_*} are root-owned by dma_main
 
       volumes:
         - name: shm
