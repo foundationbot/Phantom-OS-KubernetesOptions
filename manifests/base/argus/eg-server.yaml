@@ -44,12 +44,20 @@ spec:
             - { containerPort: 80 }
           volumeMounts:
             - { name: recordings, mountPath: /root/recordings, readOnly: true }
+            # /api/clip?save=1 (and ?features=1, which implies save) writes the
+            # incident bundle to CLIP_DIR (= /root/recordings/incidents). The
+            # recordings mount above is read-only, so nest a WRITABLE mount for
+            # just the incidents subdir: .rrd are read RO from /root/recordings,
+            # bundles + computed rrd_features are written here.
+            - { name: clip-incidents, mountPath: /root/recordings/incidents }
           resources:
             requests: { cpu: "50m",  memory: "128Mi" }
             limits:   { cpu: "1",    memory: "1Gi" }
       volumes:
         - name: recordings
           hostPath: { path: /root/recordings, type: DirectoryOrCreate }
+        - name: clip-incidents
+          hostPath: { path: /root/recordings/incidents, type: DirectoryOrCreate }
 ---
 apiVersion: v1
 kind: Service
