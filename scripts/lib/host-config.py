@@ -1362,6 +1362,27 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "operator",
         "manifest_image": "foundationbot/argus.voice-server",
     },
+    "argus-gateway": {
+        # argus API gateway (host-network :9100). CI publishes
+        # foundationbot/argus.gateway:<branch> from the argus.gateway repo.
+        "stack": "operator",
+        "manifest_image": "foundationbot/argus.gateway",
+    },
+    "eg-server": {
+        # Embodied-gaze backend (S3 / DynamoDB / Athena), argus namespace.
+        # CI publishes foundationbot/nimbus.s3_dynamo_athena:<branch> from
+        # the nimbus.s3_dynamo_athena repo.
+        "stack": "operator",
+        "manifest_image": "foundationbot/nimbus.s3_dynamo_athena",
+    },
+    "gaia-vector": {
+        # Vector log/metric shipper for the gaia stack. CI publishes
+        # foundationbot/gaia-vector:<branch> from the gaia repo. (gaia-tools,
+        # the host-side RAG/incident image, is NOT here — it runs as host
+        # systemd docker-run units, not a k8s workload.)
+        "stack": "gaia",
+        "manifest_image": "foundationbot/gaia-vector",
+    },
     "yovariable-server": {
         # DaemonSet bridging DMA shm IPC to network-accessible variable
         # endpoints. CI publishes foundationbot/yovariable-server:V-<x.y.z>-<ts>.
