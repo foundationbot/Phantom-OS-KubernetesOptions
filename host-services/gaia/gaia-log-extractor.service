@@ -5,7 +5,7 @@ Requires=docker.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f gaia-log-extractor
-ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:gaia-llm-rag
+ExecStartPre=/usr/bin/docker pull foundationbot/gaia-tools:beta
 ExecStart=/usr/bin/docker run --rm --name gaia-log-extractor --network host \
   -e OLLAMA_HOST=http://localhost:11434 \
   -e LOKI_URL=http://localhost:10310 \
@@ -13,7 +13,7 @@ ExecStart=/usr/bin/docker run --rm --name gaia-log-extractor --network host \
   -e VAULT_DB=/data/incidents/vault-index.db \
   -e EVENTS_ARCHIVE=/data/logs/boundary.jsonl \
   -v /data:/data \
-  foundationbot/gaia-tools:gaia-llm-rag python3 log_event_extractor.py --archive /data/logs/boundary.jsonl
+  foundationbot/gaia-tools:beta python3 log_event_extractor.py --archive /data/logs/boundary.jsonl
 ExecStop=/usr/bin/docker stop gaia-log-extractor
 Restart=always
 RestartSec=5
