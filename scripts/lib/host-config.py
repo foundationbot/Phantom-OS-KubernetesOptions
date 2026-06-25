@@ -127,6 +127,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-dma-bridge",
      "true",
      "dma-bridge DaemonSet (FE WebSocket bridge :9098)"),
+    ("foundation.bot/has-gaia",
+     "true",
+     "gaia observability stack (otel-collector, prometheus, tempo, loki, "
+     "grafana, vector, node/process/tegra exporters, shm-stats); default-on, "
+     "opt out per host with 'false'"),
     ("foundation.bot/has-ik-mk2",
      "false",
      "ik-mk2 DaemonSet (MK2 upper-body IK shim, positronic ns)"),

@@ -734,6 +734,9 @@ nodeLabels:
   # every run. Edit a value to (de)schedule the workload on this host.
   # dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)
   foundation.bot/has-cameras: 'true'
+  # gaia observability stack (otel-collector, prometheus, tempo, loki, grafana,
+  # vector, node/process/tegra exporters, shm-stats); default-on, set 'false' to opt out
+  foundation.bot/has-gaia: 'true'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
   # okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM; GPU + DMA shm)
