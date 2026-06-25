@@ -26,25 +26,25 @@
       "id": 2,
       "title": "",
       "gridPos": {
-        "h": 1,
+        "h": 2,
         "w": 24,
         "x": 0,
         "y": 0
       },
       "options": {
         "mode": "markdown",
-        "content": "**SHM queue fabric** \u2014 live `/dev/shm` ring topology from `dma_shmq_*` (WI-3). Nodes = services (producer identity stamped in the ShmHeader; consumers resolved from `/proc/*/maps`). Edges = `producer \u2192 queue \u2192 consumer`, weight = write rate (Hz)."
+        "content": "### SHM queue fabric \u2014 live `/dev/shm` ring topology (`dma_shmq_*`, WI-3)\nThree node columns: **producer \u2192 queue \u2192 consumer**. Producer identity is stamped in the ShmHeader; consumers are resolved from `/proc/*/maps`. Edge = a real data flow. The table below lists every queue with its producer, consumer(s), write rate, throughput, staleness and reader count \u2014 sort by any column."
       }
     },
     {
       "id": 1,
       "type": "nodeGraph",
-      "title": "SHM fabric \u2014 producer \u2192 queue \u2192 consumer",
+      "title": "Topology \u2014 producer \u2192 queue \u2192 consumer",
       "gridPos": {
-        "h": 18,
+        "h": 16,
         "w": 24,
         "x": 0,
-        "y": 1
+        "y": 2
       },
       "datasource": {
         "type": "prometheus",
@@ -52,27 +52,287 @@
       },
       "targets": [
         {
-          "refId": "Edges",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (source,target,id) (label_join(label_replace(label_replace(dma_shmq_write_rate_hz,\"source\",\"$1\",\"producer\",\"(.+)\"),\"target\",\"$1\",\"consumer\",\"(.+)\"),\"id\",\" \u2192 \",\"source\",\"queue\",\"target\"))",
-          "instant": true,
-          "format": "table"
-        },
-        {
           "refId": "Nodes",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "count by (id,title) (label_join(label_join((label_replace(dma_shmq_write_rate_hz,\"svc\",\"$1\",\"producer\",\"(.+)\") or label_replace(dma_shmq_write_rate_hz,\"svc\",\"$1\",\"consumer\",\"(.+)\")),\"id\",\"\",\"svc\"),\"title\",\"\",\"svc\"))",
           "instant": true,
-          "format": "table"
+          "format": "table",
+          "expr": "count by (id,title,subtitle) (\n  label_replace(label_replace(label_replace(dma_shmq_write_rate_hz, \"id\", \"queue:$1\", \"queue\", \"(.+)\"), \"title\", \"$1\", \"queue\", \"(.+)\"), \"subtitle\", \"queue\", \"queue\", \"(.+)\")\n  or label_replace(label_replace(label_replace(dma_shmq_write_rate_hz, \"id\", \"prod:$1\", \"producer\", \"(.+)\"), \"title\", \"$1\", \"producer\", \"(.+)\"), \"subtitle\", \"producer\", \"producer\", \"(.+)\")\n  or label_replace(label_replace(label_replace(dma_shmq_write_rate_hz, \"id\", \"cons:$1\", \"consumer\", \"(.+)\"), \"title\", \"$1\", \"consumer\", \"(.+)\"), \"subtitle\", \"consumer\", \"consumer\", \"(.+)\")\n)"
+        },
+        {
+          "refId": "Edges",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (id,source,target,mainstat) (\n  label_join(label_replace(label_replace(label_replace(dma_shmq_write_rate_hz, \"source\", \"prod:$1\", \"producer\", \"(.+)\"), \"target\", \"queue:$1\", \"queue\", \"(.+)\"), \"mainstat\", \"$1 Hz\", \"queue\", \"(.+)\"), \"id\", \"__\", \"source\", \"target\")\n  or label_join(label_replace(label_replace(dma_shmq_write_rate_hz, \"source\", \"queue:$1\", \"queue\", \"(.+)\"), \"target\", \"cons:$1\", \"consumer\", \"(.+)\"), \"id\", \"__\", \"source\", \"target\")\n)"
         }
       ],
       "options": {}
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Queues \u2014 detail",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (queue,producer,consumer) (dma_shmq_write_rate_hz)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (queue,producer,consumer) (dma_shmq_bytes_per_sec)"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (queue,producer,consumer) (dma_shmq_staleness_ms)"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (queue,producer,consumer) (dma_shmq_readers)"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (queue,producer,consumer) (dma_shmq_live)"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true
+            },
+            "renameByName": {
+              "queue": "Queue",
+              "producer": "Producer",
+              "consumer": "Consumer",
+              "Value #A": "Rate (Hz)",
+              "Value #B": "Bytes/s",
+              "Value #C": "Staleness (ms)",
+              "Value #D": "Readers",
+              "Value #E": "Live"
+            },
+            "indexByName": {
+              "queue": 0,
+              "producer": 1,
+              "consumer": 2,
+              "Value #A": 3,
+              "Value #B": 4,
+              "Value #C": 5,
+              "Value #D": 6,
+              "Value #E": 7
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Staleness (ms)"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 500
+                    },
+                    {
+                      "color": "red",
+                      "value": 2000
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Live"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "down"
+                      },
+                      "1": {
+                        "text": "live"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Queue"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open ${__value.text} \u2014 channel detail",
+                    "url": "/d/dma-shm-queues/gaia-dma-shm-queues?var-queue=${__value.text}&${__url_time_range}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Rate (Hz)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "hertz"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bytes/s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Bps"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Staleness (ms)",
+            "desc": true
+          }
+        ]
+      }
     }
   ]
 }
