@@ -89,7 +89,7 @@ spec:
           # Built and pushed by .circleci/config.yml under DMA.streams.
           # Bump the tag through host-config kustomize.images, not here.
           image: foundationbot/dma-streams:SOF-1167-latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command: ["dma_recorder"]
           # NOTE (k0s health, SOF-1167 #4): intentionally NO liveness/readiness
           # probe. dma_recorder is PID 1, so a crash already exits the container
