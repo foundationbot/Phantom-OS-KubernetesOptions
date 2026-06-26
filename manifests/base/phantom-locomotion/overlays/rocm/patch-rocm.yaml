@@ -1,0 +1,31 @@
+# ROCm GPU-plumbing patch for the phantom-locomotion DaemonSet (AMD APU node).
+# Removes the NVIDIA runtime + env, adds the AMD KFD/DRI device nodes + ROCm env.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: phantom-locomotion
+  namespace: positronic
+spec:
+  template:
+    spec:
+      # ROCm needs no container runtime — drop the nvidia RuntimeClass (the null
+      # value tells the strategic-merge patch to delete the field).
+      runtimeClassName: null
+      containers:
+        - name: phantom-locomotion
+          env:
+            # Drop the NVIDIA hook env (merge key = name).
+            - { name: NVIDIA_VISIBLE_DEVICES,     $patch: delete }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, $patch: delete }
+            # AMD iGPU (gfx1151) runtime env + ONNX execution provider.
+            - { name: HSA_OVERRIDE_GFX_VERSION, value: "11.5.1" }
+            - { name: HIP_VISIBLE_DEVICES,      value: "0" }
+            - { name: ONNX_EP,                  value: "migraphx" }
+          volumeMounts:
+            - { name: kfd, mountPath: /dev/kfd }
+            - { name: dri, mountPath: /dev/dri }
+      volumes:
+        - name: kfd
+          hostPath: { path: /dev/kfd,  type: CharDevice }
+        - name: dri
+          hostPath: { path: /dev/dri,  type: Directory }

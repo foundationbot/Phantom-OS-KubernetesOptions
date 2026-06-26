@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# AMD Ryzen AI APU (ROCm) overlay for phantom-locomotion.
+#
+# Select this path instead of ../../base/phantom-locomotion in the robot's core
+# stack (or point the per-host Argo Application at it) for robots whose compute
+# module is an AMD APU rather than an NVIDIA Jetson. The NVIDIA base is left
+# untouched, so Jetson robots are unaffected.
+#
+# The only delta vs the base is GPU plumbing: ROCm needs NO container runtime
+# (unlike NVIDIA), so we drop runtimeClassName: nvidia and instead expose
+# /dev/kfd + /dev/dri and set the ROCm/iGPU env. The pod is already privileged,
+# so it can open those device nodes without per-host render/video GID juggling.
+#
+# Image: keep the foundationbot/phantom-dma-inference name so per-host tag
+# injection from host-config.yaml still applies — the AMD robot's host-config
+# should set that entry to the ROCm/amd64 build the phantom-locomotion repo
+# publishes.
+resources:
+  - ../../
+
+patches:
+  - path: patch-rocm.yaml
+    target:
+      kind: DaemonSet
+      name: phantom-locomotion

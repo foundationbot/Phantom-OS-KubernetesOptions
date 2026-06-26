@@ -87,6 +87,7 @@
 #
 # Targeted overrides (compose with both modes):
 #   --skip-nvidia        force-skip nvidia runtime config
+#   --skip-rocm          force-skip AMD ROCm host check
 #   --skip-ecat-interface skip the phase 9 ecat-interface setup
 #   --skip-cpu-isolation skip the phase 10 cpu-isolation setup
 #   --skip-log-management skip the phase 11 log-management setup
@@ -333,6 +334,7 @@ SKIP_IMAGE_OVERRIDES=0
 SKIP_DEV_MOUNTS=0
 SKIP_VALIDATE=0
 SKIP_NVIDIA=0
+SKIP_ROCM=0
 NO_TAILSCALE=0
 
 # Pre-phase + dma-ethercat skip flags (default-on phases, hence the
@@ -400,6 +402,7 @@ while [ $# -gt 0 ]; do
 
     # Targeted overrides that compose with both modes.
     --skip-nvidia)       SKIP_NVIDIA=1; shift ;;
+    --skip-rocm)         SKIP_ROCM=1; shift ;;
     --skip-validate)     SKIP_VALIDATE=1; shift ;;
     --no-tailscale)      NO_TAILSCALE=1; shift ;;
     --skip-purge-pods)   SKIP_PURGE_PODS=1; shift ;;
@@ -1290,6 +1293,15 @@ nvidia_runtime_already_configured() {
     || grep -rqs 'runtime_type.*nvidia\|nvidia-container-runtime' /etc/k0s/containerd.d 2>/dev/null
 }
 
+amd_gpu_present() {
+  # AMD ROCm needs no special container runtime (unlike NVIDIA) — the userspace
+  # ships in the image. We only detect the host kernel driver + KFD device node.
+  { command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -Eqi 'VGA|Display|3D' \
+      && lspci 2>/dev/null | grep -Eqi 'amd|ati'; } && return 0
+  [ -e /dev/kfd ] && return 0
+  return 1
+}
+
 host_config() {
   if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
   phase "phase 4: host config"
@@ -1339,6 +1351,27 @@ host_config() {
       pass "nvidia runtime configured"
     else
       fail "configure-k0s-nvidia-runtime.sh"
+    fi
+  fi
+
+  # AMD ROCm — autodetect, override-able via --skip-rocm. Unlike NVIDIA there is
+  # no containerd runtime to register: ROCm pods get GPU access by mounting
+  # /dev/kfd + /dev/dri and joining the render/video groups (see the AMD-node
+  # manifest overlay). Here we only verify the host prerequisites are present.
+  if [ "$SKIP_ROCM" = 1 ]; then
+    skip "rocm host check  (--skip-rocm)"
+  elif ! amd_gpu_present; then
+    skip "rocm host check — no AMD GPU detected"
+  else
+    rocm_ok=1
+    [ -e /dev/kfd ] || { note "ROCm: /dev/kfd missing — amdgpu/amdkfd kernel driver not loaded"; rocm_ok=0; }
+    ls /dev/dri/renderD* >/dev/null 2>&1 || { note "ROCm: no /dev/dri/renderD* render node found"; rocm_ok=0; }
+    getent group render >/dev/null 2>&1 || note "ROCm: 'render' group missing on host"
+    getent group video  >/dev/null 2>&1 || note "ROCm: 'video' group missing on host"
+    if [ "$rocm_ok" = 1 ]; then
+      pass "rocm host check — /dev/kfd + /dev/dri present (no containerd runtime needed)"
+    else
+      note "rocm host check — install the amdgpu/ROCm kernel stack before scheduling AMD pods"
     fi
   fi
 
