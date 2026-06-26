@@ -3763,10 +3763,24 @@ gaia_host() {
     info "no $installer — skipping gaia host services"
     return
   fi
-  if DRY_RUN="$DRY_RUN" bash "$installer"; then
-    pass "gaia host services installed"
+
+  # The host units only make sense when the gaia STACK is enabled (they
+  # feed / are fed by in-cluster prometheus/loki). Track the toggle:
+  # install+enable when gaia is enabled, stop+disable when it isn't — so a
+  # robot without gaia isn't left running orphaned collectors/servers.
+  local action=install
+  if [ -r "$HOST_CONFIG_FILE" ] && [ -f "$HOST_CONFIG_HELPER" ]; then
+    if ! python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" get-enabled-stacks 2>/dev/null \
+         | grep -qx gaia; then
+      action=disable
+      info "gaia stack not enabled — disabling gaia host services"
+    fi
+  fi
+
+  if DRY_RUN="$DRY_RUN" bash "$installer" "$action"; then
+    pass "gaia host services $action"
   else
-    fail "install-gaia-host-services.sh"
+    fail "install-gaia-host-services.sh $action"
   fi
 }
 
