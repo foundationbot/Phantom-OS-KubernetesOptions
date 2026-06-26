@@ -1,0 +1,84 @@
+{
+  "uid": "dma-motor-diag",
+  "title": "DMA Motor Diagnostics (SOF-1216)",
+  "tags": ["dma", "motor", "sof-1216", "boundary"],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Motor fault/warning events by code (per min)",
+      "type": "timeseries",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 40, "stacking": { "mode": "normal" } }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (code) (count_over_time({service_name=\"dma.control\"} |= \"code=motor_\" | logfmt [1m]))",
+          "queryType": "range",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Motor temperature by motor (°C)",
+      "type": "timeseries",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "pointSize": 4 }, "unit": "celsius" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "max by (key) (last_over_time({service_name=\"dma.control\"} |~ \"code=motor_(thermal_warning|over_temperature)\" | logfmt | unwrap obs [1m]))",
+          "queryType": "range",
+          "legendFormat": "{{key}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Motor events by severity (per min)",
+      "type": "timeseries",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 50, "stacking": { "mode": "normal" } }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (sev) (count_over_time({service_name=\"dma.control\"} |= \"code=motor_\" | logfmt [1m]))",
+          "queryType": "range",
+          "legendFormat": "sev={{sev}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Recent motor boundary events",
+      "type": "logs",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service_name=\"dma.control\"} |= \"code=motor_\"",
+          "queryType": "range"
+        }
+      ]
+    }
+  ]
+}
