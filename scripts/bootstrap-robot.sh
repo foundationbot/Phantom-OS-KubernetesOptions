@@ -3203,7 +3203,7 @@ cpu_isolation() {
     info "DRY-RUN  render $CPUSETS_CONF from cpuIsolation.partitions[]"
     info "DRY-RUN  apply cpuset partitions (cgroup-v2) covering cpus $isolcpus"
     info "DRY-RUN  install cpusets.service for boot persistence"
-    info "DRY-RUN  migrate-cmdline --add-rt-flags  (adds isolcpus=managed_irq,$isolcpus,"
+    info "DRY-RUN  migrate-cmdline --add-rt-flags  (adds isolcpus=domain,managed_irq,$isolcpus,"
     info "DRY-RUN    nohz_full=$_ci_dma_rt, rcu_nocbs=$isolcpus, rcu_nocb_poll,"
     info "DRY-RUN    skew_tick=1, irqaffinity=<housekeeping>)"
     info "DRY-RUN  write systemd CPUAffinity drop-in (online − partitions − {0})"
@@ -3359,10 +3359,10 @@ cpu_isolation() {
   fi
 
   # Clear stale reboot marker if the live cmdline already matches. Check
-  # the new form (isolcpus=managed_irq,<cpus>) since that's what
+  # the new form (isolcpus=domain,managed_irq,<cpus>) since that's what
   # migrate-cmdline emits now.
   if [ -f "$CPU_ISOLATION_REBOOT_MARKER" ] && \
-     grep -q "isolcpus=managed_irq,$isolcpus" /proc/cmdline 2>/dev/null && \
+     grep -q "isolcpus=domain,managed_irq,$isolcpus" /proc/cmdline 2>/dev/null && \
      grep -q "nohz_full=$_ci_dma_rt" /proc/cmdline 2>/dev/null; then
     rm -f "$CPU_ISOLATION_REBOOT_MARKER"
     info "cleared stale reboot marker — cmdline already migrated"

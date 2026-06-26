@@ -1155,13 +1155,18 @@ cmd_migrate_cmdline() {
         hk=$(compute_housekeeping_list)
         managed=$(compute_managed_irq_list)
         local need=("rcu_nocb_poll" "skew_tick=1" "irqaffinity=$hk")
-        # Only add isolcpus=managed_irq,<list> when partitions exist.
-        # On a host with no partitions there's nothing to exclude.
-        # Without managed_irq, PCIe/MSI-X managed vectors (NVMe, modern
-        # NICs) ignore runtime smp_affinity writes and may land on
-        # isolated cores at driver probe time.
+        # Only add isolcpus=domain,managed_irq,<list> when partitions
+        # exist. On a host with no partitions there's nothing to exclude.
+        # - domain: removes the cpus from the scheduler load-balancing
+        #   domains, so the kernel stops migrating unbound kthreads and
+        #   workqueue rescuers onto them (without it, isolation relies on
+        #   the cpuset partition alone and threads like kswapd/ksmd leak
+        #   onto the RT cores).
+        # - managed_irq: without it, PCIe/MSI-X managed vectors (NVMe,
+        #   modern NICs) ignore runtime smp_affinity writes and may land
+        #   on isolated cores at driver probe time.
         if [[ -n "$managed" ]]; then
-            need+=("isolcpus=managed_irq,$managed")
+            need+=("isolcpus=domain,managed_irq,$managed")
         fi
         local flag
         for flag in "${need[@]}"; do
