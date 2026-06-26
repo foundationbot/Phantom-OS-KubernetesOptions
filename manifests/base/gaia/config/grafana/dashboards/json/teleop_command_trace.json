@@ -1,0 +1,123 @@
+{
+  "uid": "teleop-command-trace",
+  "title": "gaia — Teleop command path (FE → motors)",
+  "tags": ["teleop", "tracing", "command-path", "tempo"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to read this",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "# Teleop command path: FE → dma_bridge → supervisor → dma.ethercat\n\nEach row in **\"Full command-path traces\"** is **one stitched trace** spanning every hop. Click the **Trace ID** to open the tree:\n\n```\ndma_bridge          bridge.taskspace      (FE / bridge origin)\n  phantom_runtime   supervisor.taskspace  (IK)\n  phantom_runtime   control_tick → write  (policy → /desired)\n  dma-ethercat      dma.apply_command     (EtherCAT terminal hop)\n```\n\n**Only a *fresh-frame*, sampled (~1/s) command merges into one trace** (it is parented onto the bridge's frame span). Latched / idle `control_tick`s stay separate and carry a *link* back to the most-recent frame — that is by design, so do not be alarmed by lone `control_tick` roots when you run a raw `{ name=\"control_tick\" }` search in Explore.\n\nDatasource: **Tempo**. The panels below are just saved TraceQL — see `gaia/transport.md` for how this dashboard was built and how to extend it."
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Full command-path traces (FE → EtherCAT)   ·   { name=\"bridge.taskspace\" } && { name=\"dma.apply_command\" }",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 7 },
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "query": "{ name = \"bridge.taskspace\" } && { name = \"dma.apply_command\" }",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Supervisor merged with bridge   ·   { name=\"control_tick\" } && { name=\"bridge.taskspace\" }",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 18 },
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "query": "{ name = \"control_tick\" } && { name = \"bridge.taskspace\" }",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "text",
+      "title": "Service graph (traced command path)",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 28 },
+      "options": {
+        "mode": "markdown",
+        "content": "Node graph of the **traced** command path, from the OTel collector's `servicegraph` connector. Edges = `client → server` from parent/child span pairs across services; only the traced request path appears (not the 500 Hz streaming queues). NOTE: the collector's Prometheus exporter prefixes metrics with `dma_debug_`, so Grafana's built-in Tempo *Service Graph* tab (which expects the unprefixed name) stays empty — these panels query the prefixed `dma_debug_traces_service_graph_request_total` directly. Empty until command-path traces flow (run the supervisor + move a Quest frame)."
+      }
+    },
+    {
+      "id": 5,
+      "type": "nodeGraph",
+      "title": "Service graph — traced edges (client → server)",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "Edges",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (source,target,id) (label_join(label_replace(label_replace(dma_debug_traces_service_graph_request_total,\"source\",\"$1\",\"client\",\"(.+)\"),\"target\",\"$1\",\"server\",\"(.+)\"),\"id\",\" \\u2192 \",\"source\",\"target\"))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "Nodes",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "count by (id,title) (label_join(label_join((label_replace(dma_debug_traces_service_graph_request_total,\"svc\",\"$1\",\"client\",\"(.+)\") or label_replace(dma_debug_traces_service_graph_request_total,\"svc\",\"$1\",\"server\",\"(.+)\")),\"id\",\"\",\"svc\"),\"title\",\"\",\"svc\"))",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Service-graph edges (request counts) — reliable companion to the node graph",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dma_debug_traces_service_graph_request_total",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": { "client": "from (client)", "server": "to (server)", "Value": "requests" },
+            "excludeByName": { "Time": true, "__name__": true, "connection_type": true, "deployment_environment": true, "host_name": true, "os_type": true, "service_namespace": true, "failed": true, "job": true, "instance": true }
+          }
+        }
+      ],
+      "options": { "showHeader": true }
+    }
+  ]
+}
