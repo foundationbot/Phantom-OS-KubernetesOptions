@@ -1,0 +1,49 @@
+# =============================================================================
+# gaia alerting rules. Loaded by prometheus.yml `rule_files:` (mounted read-only
+# into the prometheus container). No Alertmanager is configured yet — alerts show
+# up under Prometheus → Alerts and in Grafana; routing/paging is a follow-up.
+# =============================================================================
+groups:
+  - name: gaia_bridge_health
+    interval: 15s
+    rules:
+      # The dma-side bridges (boundary_bridge, loop_event_bridge) are the single
+      # point of failure for the whole control-event pipeline — if one hangs,
+      # boundary events just stop and nothing else says so. Each bridge pushes
+      # `dma_bridge_heartbeat_timestamp_seconds` (wall-clock of its last beat,
+      # every ~10 s) via OTLP → collector → Prometheus (namespace dma_debug). We
+      # alert on the AGE of that gauge: `time() - last_beat`. This push-gauge
+      # pattern is robust vs. absent_over_time temporality quirks, and `max by
+      # (bridge)` keeps it per-bridge.
+      - alert: BridgeHeartbeatStale
+        expr: time() - max by (bridge) (dma_debug_dma_bridge_heartbeat_timestamp_seconds) > 30
+        for: 1m
+        labels:
+          severity: critical
+          subsystem: system
+        annotations:
+          summary: "Bridge {{ $labels.bridge }} heartbeat is stale"
+          description: >
+            No heartbeat from bridge "{{ $labels.bridge }}" for
+            {{ $value | humanizeDuration }} (threshold 30s). The control-event
+            pipeline may be silently stalled — boundary/loop events are not being
+            drained. Check `docker logs` for that bridge container and that the
+            producer's /dev/shm rings still exist (a dma-ethercat restart orphans
+            them; the bridges must restart to re-attach).
+
+      # The whole bridge metric series disappearing (container gone, not just a
+      # missed beat) — absent() catches what the age expr can't (it needs the
+      # series to exist). Warning: the series is absent for the first ~10s after a
+      # cold start too, so `for: 2m` avoids boot-time noise.
+      - alert: BridgeHeartbeatAbsent
+        expr: absent(dma_debug_dma_bridge_heartbeat_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: critical
+          subsystem: system
+        annotations:
+          summary: "No bridge heartbeat metric at all"
+          description: >
+            dma_debug_dma_bridge_heartbeat_timestamp_seconds is absent for >2m —
+            no bridge is reporting liveness (all bridges down, or the collector is
+            not receiving their OTLP metrics).

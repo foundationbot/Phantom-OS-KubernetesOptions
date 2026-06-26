@@ -30,7 +30,7 @@ APP_LABEL="${APP_LABEL:-app=positronic-control}"
 CONFIGMAP_NAME="${CONFIGMAP_NAME:-positronic-config}"
 CONTAINER_NAME="${CONTAINER_NAME:-positronic-control}"
 INIT_CONTAINER_NAME="${INIT_CONTAINER_NAME:-load-models}"
-IMAGE_NAME="${IMAGE_NAME:-localhost:5443/positronic-control}"
+IMAGE_NAME="${IMAGE_NAME:-foundationbot/positronic-control}"
 
 # phantom-sonic DaemonSet (Walking ↔ SONIC) — a single pod with four
 # containers in the positronic namespace. The `sonic` subcommand group
@@ -1323,7 +1323,7 @@ cmd_push_image() {
     ok "$source -> $target"
 
     bold "Pushing $target"
-    docker push "$target" || die "docker push failed (registry up? insecure-registries set?)"
+    docker push "$target" || die "docker push failed (run 'docker login' for DockerHub push access?)"
     ok "pushed"
 
     bold "Updating $kfile"

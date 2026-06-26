@@ -1,0 +1,78 @@
+{
+  "uid": "shm-fabric-graph",
+  "title": "SHM Queue Fabric",
+  "tags": [
+    "dma",
+    "shm",
+    "fabric"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "refresh": "10s",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "text",
+      "id": 2,
+      "title": "",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**SHM queue fabric** \u2014 live `/dev/shm` ring topology from `dma_shmq_*` (WI-3). Nodes = services (producer identity stamped in the ShmHeader; consumers resolved from `/proc/*/maps`). Edges = `producer \u2192 queue \u2192 consumer`, weight = write rate (Hz)."
+      }
+    },
+    {
+      "id": 1,
+      "type": "nodeGraph",
+      "title": "SHM fabric \u2014 producer \u2192 queue \u2192 consumer",
+      "gridPos": {
+        "h": 18,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "Edges",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (source,target,id) (label_join(label_replace(label_replace(dma_shmq_write_rate_hz,\"source\",\"$1\",\"producer\",\"(.+)\"),\"target\",\"$1\",\"consumer\",\"(.+)\"),\"id\",\" \u2192 \",\"source\",\"queue\",\"target\"))",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "Nodes",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "count by (id,title) (label_join(label_join((label_replace(dma_shmq_write_rate_hz,\"svc\",\"$1\",\"producer\",\"(.+)\") or label_replace(dma_shmq_write_rate_hz,\"svc\",\"$1\",\"consumer\",\"(.+)\")),\"id\",\"\",\"svc\"),\"title\",\"\",\"svc\"))",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "options": {}
+    }
+  ]
+}

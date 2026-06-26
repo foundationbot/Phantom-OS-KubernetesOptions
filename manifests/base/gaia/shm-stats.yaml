@@ -1,0 +1,65 @@
+# shm-stats-exporter — dma-side shm-queue metrics (dma_shmq_*). Runs from the
+# dma-common image, samples every /dev/shm queue header read-only, serves :9300
+# (prometheus scrapes localhost:9300). hostPID so the readers /proc scan sees host
+# producers/consumers; mounts host /dev/shm. Translated from compose `shm-stats-exporter`.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: shm-stats
+  namespace: gaia
+spec:
+  selector:
+    matchLabels:
+      app: shm-stats
+  template:
+    metadata:
+      labels:
+        app: shm-stats
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      containers:
+        - name: shm-stats
+          image: foundationbot/dma-common:SOF-1167-latest-aarch64
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "dma_common.shm_stats_exporter", "--metrics-port", "9300"]
+          # hostPID lets the /proc scan SEE every PID, but attributing consumers by
+          # reading another container's /proc/<pid>/maps needs BOTH: CAP_SYS_PTRACE
+          # (host yama ptrace_scope=1 blocks uid 0 without it) AND an Unconfined
+          # AppArmor profile (the default profile denies the cross-process /proc
+          # read even with the cap). Verified: with only SYS_PTRACE the exporter
+          # still got EACCES on dma-recorder/bridge maps; Unconfined+SYS_PTRACE
+          # resolves them (narrower than privileged: true, which also works).
+          securityContext:
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              add: ["SYS_PTRACE"]
+          ports:
+            - { name: metrics, containerPort: 9300 }
+          # /metrics doubles as the health endpoint; failure → "Unhealthy" Event.
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9300 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9300 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "50m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }

@@ -171,13 +171,15 @@ sudo bash positronic.sh logs -c load-models
 
 ### Test a new policy build end-to-end
 
-1. **On the build host** (or your laptop): build + tag the
-   positronic-control image with a new tag, then push to the robot's
-   local registry through `positronic.sh push-image`:
+1. **On the build host** (or your laptop): build the positronic-control
+   image with a new tag and `docker push` it to DockerHub under
+   `foundationbot/positronic-control` (or the `foundationbot/phantom-cuda`
+   ref the manifest points at). Then point the robot at the new tag:
    ```bash
-   sudo bash positronic.sh push-image foundationbot/phantom-cuda:0.2.46-dev.3
+   sudo bash positronic.sh redeploy foundationbot/phantom-cuda:0.2.46-dev.3
    ```
-   This re-tags + pushes + restarts the pod under the new image.
+   This restarts the pod under the new image (pulled from DockerHub via
+   the `dockerhub-creds` pull secret).
 2. **On the robot**: pod restarts under the new image. By default it's
    in sleep-infinity. Either:
    - exec in and run the policy interactively (Path 1).
@@ -228,7 +230,7 @@ exec [-- <cmd>]        bash into the pod, or run <cmd> non-interactively
 logs [-f] [-c <cont>]  show / follow pod logs (optionally for init containers)
 set-cmd <command...>   set PHANTOM_CMD in the ConfigMap, rollout the pod
 clear-cmd              clear PHANTOM_CMD, rollout the pod back to sleep-infinity
-push-image <ref>       tag a local image as localhost:5443/positronic-control, push, rollout
+push-image <ref>       tag + docker push to foundationbot/positronic-control on DockerHub, rollout
 redeploy               rollout restart with no image change
 track-branch <branch>  flip Argo Application targetRevision (remote-git mode only — see RFC 0006)
 argo-pause             pause Argo auto-sync on the core stack

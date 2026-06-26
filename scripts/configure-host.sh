@@ -755,7 +755,7 @@ ok "production = $production"
 # --- stacks ---
 heading "stack toggles"
 hint "Each stack is a group of related Applications:"
-hint "  core      registry, dma-video, positronic, phantomos-api-server,"
+hint "  core      dma-video, positronic, phantomos-api-server,"
 hint "            yovariable-server. ALWAYS ON — robot won't function without it."
 hint "  operator  argus + nimbus (operator-ui, eg-server, mongodb, redis,"
 hint "            postgres). Toggle off to remove the operator-facing surface."
@@ -998,9 +998,9 @@ if [ "$inject_images" = 1 ]; then
 
   # Auto-clear seed entries that carry a REPLACE-WITH-* placeholder
   # tag. These were previously written by configure-host.sh itself (a
-  # bug — see docs/image-flow-and-registry-bootstrap.md), but they
-  # would never resolve at pull time. Treat them as if the seed had
-  # no entry, so the bundle / section-A defaults can fill the gap.
+  # bug), but they would never resolve at pull time. Treat them as if
+  # the seed had no entry, so the bundle / section-A defaults can fill
+  # the gap.
   #
   # MUST run before bundle resolution: clearing turns the seed entry
   # back into an empty row, letting the bundle-fill step below give
@@ -1106,11 +1106,10 @@ if [ "$inject_images" = 1 ]; then
   #
   # Empty default tag = the prompt is offered with no preloaded value,
   # press-Enter skips the override entirely, and the base manifest's
-  # in-tree image:tag wins. This is the right default for containers
-  # the operator must build locally (positronic-control,
+  # in-tree image:tag wins. This is the right default for the
+  # foundationbot/* images the operator pins per build (positronic-control,
   # phantom-models): an unfilled placeholder used to be silently
-  # injected into Argo as a non-resolving tag. See
-  # docs/image-flow-and-registry-bootstrap.md for the post-mortem.
+  # injected into Argo as a non-resolving tag.
   declare -a canonical_containers=(
     "positronic-control"
     "phantom-models"
@@ -1118,14 +1117,14 @@ if [ "$inject_images" = 1 ]; then
     "dma-ethercat"
   )
   declare -a canonical_default_repos=(
-    "localhost:5443/positronic-control"
-    "localhost:5443/phantom-models"
+    "foundationbot/positronic-control"
+    "foundationbot/phantom-models"
     "foundationbot/argus.operator-ui"
     "foundationbot/dma-ethercat"
   )
   declare -a canonical_default_tags=(
-    ""                              # positronic-control: must be local build
-    ""                              # phantom-models:     must be local build
+    ""                              # positronic-control: pin per build
+    ""                              # phantom-models:     pin per build
     "$operator_ui_default_tag"      # operator-ui:        from .deb if installed
     "$dma_ethercat_default_tag"     # dma-ethercat:       arch-derived
   )
@@ -1244,9 +1243,9 @@ if [ "$inject_images" = 1 ]; then
     hint "Press enter to keep the shown default; an empty default means"
     hint "no override (the manifest's in-tree image:tag will apply)."
     hint "Swapping repos is fine — bootstrap renames+retags in one step."
-    example "localhost:5443/positronic-control:0.2.44-production-cu130"
+    example "foundationbot/positronic-control:0.2.44-production-cu130"
     example "foundationbot/phantom-cuda:0.2.46-dev.1-production-cu130 (swap repo)"
-    example "localhost:5443/phantom-models:2026-04-30                  (date-stamped)"
+    example "foundationbot/phantom-models:2026-04-30                  (date-stamped)"
     example "foundationbot/argus.operator-ui:<git-sha>"
     example "foundationbot/dma-ethercat:main-latest-aarch64            (arm64)"
     example "foundationbot/dma-ethercat:main-latest-amd64              (x86)"
@@ -1538,11 +1537,10 @@ tmp="$(mktemp)"
   # re-config from a template — bootstrap then sees the block present and
   # does NOT re-prompt for the cores. The NIC selector is carried too;
   # bootstrap's ecat-interface phase re-resolves the NIC and its picker
-  # fires when the carried MAC doesn't match this robot. dmaEthercat and
-  # phantomPsi are intentionally NOT carried (dma config is prompted by
-  # bootstrap's phase-12 picker). Emits nothing when the seed has no
-  # cpuIsolation block (e.g. a fresh run off _template) — bootstrap then
-  # prompts to create it, as before.
+  # fires when the carried MAC doesn't match this robot. phantomPsi is
+  # intentionally NOT carried (it falls back to safe manifest defaults).
+  # Emits nothing when the seed has no cpuIsolation block (e.g. a fresh
+  # run off _template) — bootstrap then prompts to create it, as before.
   if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
     python3 - "$seed_path" <<'PY'
 import sys, re, yaml
@@ -1566,6 +1564,36 @@ if isinstance(ci, dict) and ci:
             nic.pop("selector", None)
     sys.stdout.write(
         yaml.safe_dump({"cpuIsolation": ci}, default_flow_style=False, sort_keys=False)
+    )
+PY
+  fi
+
+  # dmaEthercat: carry the seed/template block through verbatim (FIR-464).
+  # This block (configPath / configSet) tells bootstrap's phase-12
+  # dma-ethercat installer which per-robot SOEM JSON to land. The wizard
+  # rebuilds host-config.yaml from a fixed schema, so without an explicit
+  # carry it silently dropped a seeded dmaEthercat: block — phase 12 then
+  # fell through to its auto-detect / TTY-picker path and HARD-FAILED with
+  # "no dma-ethercat config for robot '<robot>'" on non-interactive robot
+  # deploys (found during the fork/sof-1167-keep-registry deploy on
+  # mk11000020). The picker only rescues a TTY run; an unattended bootstrap
+  # has no way to recover. Carrying the block keeps --from-template
+  # reconciles non-interactive. configSet is robot-agnostic (bootstrap
+  # appends /<robot>.json); a configPath naming another robot's JSON is the
+  # operator's choice in the seed and is validated against disk by phase 12.
+  # Emits nothing when the seed has no dmaEthercat block (e.g. a fresh run
+  # off _template) — bootstrap's phase-12 picker then prompts, as before.
+  if [ -n "$seed_path" ] && [ -r "$seed_path" ]; then
+    python3 - "$seed_path" <<'PY'
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    cfg = {}
+dma = cfg.get("dmaEthercat") if isinstance(cfg, dict) else None
+if isinstance(dma, dict) and dma:
+    sys.stdout.write(
+        yaml.safe_dump({"dmaEthercat": dma}, default_flow_style=False, sort_keys=False)
     )
 PY
   fi

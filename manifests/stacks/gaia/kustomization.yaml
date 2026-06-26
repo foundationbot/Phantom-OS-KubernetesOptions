@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Gaia stack — on-robot observability (otel-collector, prometheus, tempo,
+# loki, grafana, vector, node/process/tegra exporters, shm-stats). Per-robot
+# but non-essential: turning this off does not stop the robot from running,
+# it only removes the observability surface. Toggle the whole group with
+# stacks.gaia.enabled in /etc/phantomos/host-config.yaml. Individual workloads
+# additionally gate on the foundation.bot/has-gaia node label (default 'true'),
+# so a host can stay in the gaia stack but drop the pods per-node.
+#
+# Image tag and dev-mount overrides come from the host's
+# /etc/phantomos/host-config.yaml at bringup; bootstrap injects them into the
+# live phantomos-<robot>-gaia Argo Application's
+# spec.source.kustomize.{images,patches}. Nothing per-host lives here.
+# Labels go onto every resource's metadata, but NOT into selectors.
+# Selectors on existing Deployments / StatefulSets are immutable; using
+# `commonLabels` (or labels with includeSelectors: true) would block the
+# umbrella -> per-stack migration.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: phantomos
+      phantomos.foundation.bot/stack: gaia
+    includeSelectors: false
+resources:
+  - ../../base/gaia

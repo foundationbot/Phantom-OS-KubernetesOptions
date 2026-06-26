@@ -1,0 +1,82 @@
+# dma-bridge — the teleop `dma_bridge` service brought into k0s, replacing the
+# old base/dma-bridge (foundationbot/dma_bridge:main). Mirrors
+# /root/foundation/teleop/docker-compose.yml `dma_bridge`:
+#   image  foundationbot/dma_bridge:PLACEHOLDER  (canonical name; host-config
+#          images.dma-bridge swaps it to the actual build, e.g.
+#          foundationbot/phantom-cuda:dma-bridge-<tag> — the typed 192-byte
+#          TaskspaceCommand build, otel baked. Override-driven, like positronic-control.)
+#   network host + ipc host; ENTRYPOINT dma-bridge-server serves the FE on :9098
+#
+# The bridge code (/src) and its sibling deps (/ai.inference, phantom_runtime,
+# phantom_policies) are BAKED INTO the production image — the base manifest
+# mounts only /dev/shm (the genuine host IPC segment). It does NOT bind-mount any
+# host source: a production robot needs no on-disk checkout (FIR-469). For
+# development, re-add the source mounts per-host via host-config
+# `deployments.dma-bridge.mounts` (e.g. {name: src, host: /opt/positronic_control,
+# container: /src}); the dev-mount injector layers them onto this base.
+#
+# Lives in the positronic stack (paired with positronic-phantom) but gates on
+# foundation.bot/has-dma-bridge — a control-mode-independent teleop bridge, so it
+# runs on any robot with the bridge enabled, not only positronic (has-positronic
+# may be false). CPU pinning to housekeeping cores is at the node
+# level (compose used cpuset: "0-9"). Single :9098 owner — base/dma-bridge dropped.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dma-bridge
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: dma-bridge
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dma-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dma-bridge
+    spec:
+      nodeSelector:
+        foundation.bot/has-dma-bridge: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      # FE dials :9098 on the robot IP; share host net + IPC so the bridge mmaps
+      # the same /dev/shm POSIX segments DMA.ethercat / DMA.video / phantom_runtime publish.
+      hostNetwork: true
+      hostIPC: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 10
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: bridge
+          # ENTRYPOINT dma-bridge-server + CMD --host 0.0.0.0 --port 9098 baked in.
+          image: foundationbot/dma_bridge:PLACEHOLDER
+          imagePullPolicy: Always   # compose pull_policy: always
+          env:
+            - { name: PYTHONUNBUFFERED, value: "1" }
+          ports:
+            - { name: ws, containerPort: 9098, hostPort: 9098 }
+          securityContext:
+            runAsUser: 0      # /dev/shm segments are root-owned on the host
+            privileged: true  # cross-IPC-namespace shm mmap
+          livenessProbe:
+            tcpSocket: { port: 9098 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket: { port: 9098 }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          # Only /dev/shm is mounted from the host; /src + /ai.inference come from
+          # the image (prod) or host-config deployments.dma-bridge.mounts (dev).
+          volumeMounts:
+            - { name: shm, mountPath: /dev/shm }
+          resources:
+            requests: { cpu: "200m",  memory: "256Mi" }
+            limits:   { cpu: "2000m", memory: "2Gi" }
+      volumes:
+        - { name: shm, hostPath: { path: /dev/shm, type: Directory } }

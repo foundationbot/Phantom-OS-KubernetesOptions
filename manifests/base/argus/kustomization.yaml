@@ -12,3 +12,40 @@ resources:
   - voice-server.yaml
   - vr-web.yaml
   - nginx.yaml
+  - eg-db.yaml
+  - eg-server.yaml
+
+# Run the argus services on the host network (like the operator_ui compose
+# published every service on host ports), so they bind their compose ports
+# directly: auth :9000, user :9001, company :9002, gateway :9100, mongo :27017,
+# redis :6379, operator-ui :8004, vr-web :8010. dnsPolicy ClusterFirstWithHostNet
+# keeps cross-service DNS (http://argus-auth:9000, mongodb:27017, eg-server:80).
+# Recreate strategy avoids host-port conflicts during rollouts.
+# NOT host-networked (kept ClusterIP, internal-only as in compose): eg-server
+# (its :80 would collide with nginx) + eg-db. nginx stays NodePort :30080.
+# NOTE: gaia node-exporter was moved off :9100 to :9101 so argus-gateway can own :9100.
+patches:
+  - target:
+      kind: Deployment
+      name: "^(argus-auth|argus-user|argus-company|argus-gateway|operator-ui|vr-web)$"
+    patch: |-
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+      - op: add
+        path: /spec/template/spec/dnsPolicy
+        value: ClusterFirstWithHostNet
+      - op: replace
+        path: /spec/strategy
+        value:
+          type: Recreate
+  - target:
+      kind: StatefulSet
+      name: "^(mongodb|redis)$"
+    patch: |-
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+      - op: add
+        path: /spec/template/spec/dnsPolicy
+        value: ClusterFirstWithHostNet

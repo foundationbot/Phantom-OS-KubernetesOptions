@@ -4,3 +4,4 @@ resources:
   - namespace.yaml
   - configmap.yaml
   - positronic-control.yaml
+  - dma-bridge.yaml

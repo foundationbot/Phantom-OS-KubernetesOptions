@@ -1,0 +1,85 @@
+# node-exporter — host system metrics. DaemonSet, privileged + hostPID + rootfs
+# mounts so it reports the real host. Jetson-safe collector allowlist (the default
+# set hangs the scrape — see compose comments). Serves :9100 (prometheus scrapes
+# localhost:9100). Tegra temps/power come via the textfile dir, written by the
+# tegra-metrics sidecar + host GPU/NVMAP collectors. Translated from compose.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: gaia
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.8.2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --collector.disable-defaults
+            - --collector.cpu
+            - --collector.meminfo
+            - --collector.loadavg
+            - --collector.stat
+            - --collector.vmstat
+            - --collector.netdev
+            - --collector.diskstats
+            - --collector.filefd
+            - --collector.uname
+            - --collector.time
+            - --collector.pressure
+            - --collector.cpufreq
+            - --collector.schedstat
+            - --collector.interrupts
+            - --collector.softnet
+            - --collector.netstat
+            - --collector.sockstat
+            - --collector.textfile
+            - --collector.textfile.directory=/textfile
+            # Moved off :9100 — argus-gateway (hostNetwork) owns host :9100 (its
+            # compose port). node-exporter is internal (prometheus scrapes localhost).
+            - --web.listen-address=:9101
+          ports:
+            - { name: metrics, containerPort: 9101 }
+          # /metrics doubles as the health endpoint; failure → "Unhealthy" Event.
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9101 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9101 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: proc,     mountPath: /host/proc, readOnly: true }
+            - { name: sys,      mountPath: /host/sys,  readOnly: true }
+            - { name: textfile, mountPath: /textfile,  readOnly: true }
+          resources:
+            requests: { cpu: "50m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+      volumes:
+        - name: proc
+          hostPath: { path: /proc, type: Directory }
+        - name: sys
+          hostPath: { path: /sys, type: Directory }
+        - name: textfile
+          hostPath: { path: /var/lib/gaia/node-textfile, type: DirectoryOrCreate }

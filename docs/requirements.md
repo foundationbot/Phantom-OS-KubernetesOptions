@@ -19,7 +19,7 @@ For installation steps once requirements are met, see
 | Architecture | x86-64 or arm64 (Jetson Thor) | Image bundle is per-arch; match the `.deb` to the host. |
 | CPU cores | 14 minimum, 20 recommended | Manifests sized for 20-core robots; smaller hosts need overlay tweaks. |
 | RAM | 16 GiB minimum | k0s + workloads + ArgoCD. |
-| Disk | 200 GiB free on `/` | ~150 GiB for the local registry PV + ~50 GiB for cluster runtime + the bundled image set (~15-18 GiB after extraction). |
+| Disk | 200 GiB free on `/` | ~50 GiB for cluster runtime + the bundled image set (~15-18 GiB after extraction); headroom for image layers + recordings. |
 | Network | Reachable from operator's machine | SSH for bring-up; outbound internet **only** during initial k0s install. After bootstrap, air-gapped operation is supported (RFC 0006 — Argo tracks the local `/opt/.../.git/`, no GitHub round-trip). |
 
 ### **NVIDIA GPU — required for positronic-control**
@@ -28,7 +28,7 @@ The positronic-control container is **CUDA-only**. Without an NVIDIA
 GPU and the matching software stack, the `positronic-control` pod will
 either fail to schedule (no `nvidia` runtimeClass on the host) or
 crash on startup (CUDA libraries missing). Other workloads (argus,
-dma-video, nimbus, registry, operator-ui) do not require a GPU.
+dma-video, nimbus, operator-ui) do not require a GPU.
 
 **On the host, before running `bootstrap-robot.sh`:**
 

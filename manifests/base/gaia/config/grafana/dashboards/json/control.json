@@ -1,0 +1,225 @@
+{
+  "uid": "gaia-control",
+  "title": "gaia — DMA Control-Event Spine",
+  "tags": [
+    "gaia",
+    "control",
+    "dma"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "text",
+      "title": "",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "### DMA control-event spine\nBoundary events (L2) drain dma-side via `dma_common.boundary_bridge` → `boundary.jsonl` + OTLP→**Loki**. The by-code / by-severity panels count the Loki events (the count-connector→Prometheus path is bypassed: count emits delta, the prom exporter wants cumulative — contrib #30203). Loop-cycle RED is span-derived (`dma_debug_dma_tracing_*`) via `loop_event_bridge`. **L1 effective-drive gauges** (`effective_kp/kd`, `command_age`) need the deferred L5 `dma_main` emission to `/metric_events` — that panel reads *No data* until then."
+      }
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Boundary events by severity (count/interval)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "queryType": "range",
+          "editorMode": "code",
+          "expr": "sum by (severity_text) (count_over_time({service_name=\"dma.control\"} | code != \"\" [$__auto]))",
+          "legendFormat": "{{severity_text}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Boundary events by code (count/interval)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "right", "values": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "queryType": "range",
+          "editorMode": "code",
+          "expr": "sum by (code) (count_over_time({service_name=\"dma.control\"} | code != \"\" [$__auto]))",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Loop-cycle rate (spanmetrics) by span",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by(span_name) (rate(dma_debug_dma_tracing_calls_total[1m]))",
+          "legendFormat": "{{span_name}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Loop-cycle p99 latency (spanmetrics)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by(le, span_name) (rate(dma_debug_dma_tracing_duration_seconds_bucket[1m])))",
+          "legendFormat": "p99 {{span_name}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "L1 effective drive — awaiting L5 (No data expected)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "dma_debug_command_age_ms",
+          "legendFormat": "command_age_ms (pending L5)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "Recent boundary events",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 19 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service_name=\"dma.control\"}"
+        }
+      ]
+    }
+  ]
+}

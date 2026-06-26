@@ -1,0 +1,71 @@
+# eg-server — Encyclopedia Galactica server (foundationbot/nimbus.s3_dynamo_athena).
+# argus-gateway proxies EG_SERVER_URL=http://eg-server:80 here. Internal
+# (ClusterIP) — :80 would collide with argus-nginx on host, and it had no
+# published port in the operator_ui compose. Auth middleware/proxy disabled.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eg-server
+  namespace: argus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eg-server
+  template:
+    metadata:
+      labels:
+        app: eg-server
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      containers:
+        - name: eg-server
+          image: foundationbot/nimbus.s3_dynamo_athena:SOF-1167
+          imagePullPolicy: IfNotPresent
+          env:
+            # /api/clip reaches the node's gaia stack (hostNetwork: Tempo :10386 /
+            # Loki :10310) via the node IP. Downward API (status.hostIP) keeps it
+            # portable across robots; $(NODE_IP) substitutes from the entry above.
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - { name: TEMPO_URL,              value: "http://$(NODE_IP):10386" }
+            - { name: LOKI_URL,               value: "http://$(NODE_IP):10310" }
+            - { name: BACKEND,                value: postgres }
+            - { name: DATABASE_URL,           value: "postgresql://episodes:episodes@eg-db:5432/episodes" }
+            - { name: PORT,                   value: "80" }
+            - { name: ARGUS_GATEWAY_URL,      value: "http://argus-gateway:9100" }
+            - { name: EG_API_KEY,             value: "" }
+            - { name: ENABLE_AUTH_MIDDLEWARE, value: "false" }
+            - { name: ENABLE_AUTH_PROXY,      value: "false" }
+          ports:
+            - { containerPort: 80 }
+          volumeMounts:
+            - { name: recordings, mountPath: /root/recordings, readOnly: true }
+            # /api/clip?save=1 (and ?features=1, which implies save) writes the
+            # incident bundle to CLIP_DIR (= /root/recordings/incidents). The
+            # recordings mount above is read-only, so nest a WRITABLE mount for
+            # just the incidents subdir: .rrd are read RO from /root/recordings,
+            # bundles + computed rrd_features are written here.
+            - { name: clip-incidents, mountPath: /root/recordings/incidents }
+          resources:
+            requests: { cpu: "50m",  memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+      volumes:
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }
+        - name: clip-incidents
+          hostPath: { path: /root/recordings/incidents, type: DirectoryOrCreate }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eg-server
+  namespace: argus
+spec:
+  selector:
+    app: eg-server
+  ports:
+    - { port: 80, targetPort: 80 }

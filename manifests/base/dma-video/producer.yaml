@@ -28,7 +28,7 @@ spec:
           # No entrypoint override → image ENTRYPOINT runs, these are CMD args
           args:
             - "--fps"
-            - "25"
+            - "15"
             - "--camera-config"
             - "/opt/configs/cameras.json"
           securityContext:

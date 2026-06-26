@@ -61,6 +61,8 @@ production: false
 #   stacks.core      always required; cannot be disabled.
 #   stacks.operator  argus + nimbus (operator UI, episode storage).
 #                    Toggle the whole group with enabled: false.
+#   stacks.gaia      observability (grafana/prometheus/loki/tempo/otel/vector
+#                    + exporters). Toggle the whole group with enabled: false.
 #
 # Each stack's selfHeal: field is optional. When set, it overrides the
 # top-level production: flag for that stack only — useful when you want
@@ -72,6 +74,9 @@ stacks:
   operator:
     enabled: true
     # selfHeal: false       # uncomment to leave drift alone
+  gaia:
+    enabled: true            # on-robot observability (grafana/prometheus/loki/tempo)
+    # selfHeal: false       # uncomment to leave drift alone
 
 # Per-host image overrides. Container-keyed: each entry names a known
 # container and supplies the full image ref (repo:tag) it should run.
@@ -81,8 +86,8 @@ stacks:
 # rewrites every reference to that image in the rendered manifests.
 #
 #   - if your `image:` keeps the same repo as the base manifest, only
-#     the tag changes (typical for a local-registry build).
-#   - if your `image:` swaps the repo (e.g. localhost:5443/positronic-control
+#     the tag changes (typical for a routine version bump).
+#   - if your `image:` swaps the repo (e.g. foundationbot/positronic-control
 #     -> foundationbot/phantom-cuda), bootstrap emits a
 #     "<base>=<your-image>" kustomize entry that renames AND retags in
 #     one step. No special host-config field needed — just write the
@@ -90,15 +95,15 @@ stacks:
 #
 # Known containers (others are rejected at validate-time):
 #   positronic-control   core stack — manifest uses
-#                          localhost:5443/positronic-control
+#                          foundationbot/positronic-control
 #   phantom-models       core stack — positronic-control's load-models init.
-#                          manifest uses localhost:5443/phantom-models.
+#                          manifest uses foundationbot/phantom-models.
 #                          Bundles model weights / configs (~GB).
 #                          NOTE: phantomos-api-server no longer consumes this
 #                          image — it bind-mounts /root/models off the host
 #                          directly. Only positronic-control still pulls it.
 #   phantom-policies     core stack — phantom-locomotion's load-policies init.
-#                          manifest uses localhost:5443/phantom-policies.
+#                          manifest uses foundationbot/phantom-policies.
 #                          Slim image with ONNX files at /models/policies/.
 #                          Build with `scripts/phantom-models/build.py
 #                          --image phantom-policies --manifest <yaml>`.
@@ -185,13 +190,15 @@ stacks:
 #                          override each to the shared repo + its prefixed tag.
 images:
   positronic-control:
-    image: localhost:5443/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
+    image: foundationbot/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
   phantom-models:
-    image: localhost:5443/phantom-models:REPLACE-WITH-MODEL-BUILD-DATE
+    image: foundationbot/phantom-models:REPLACE-WITH-MODEL-BUILD-DATE
   operator-ui:
-    image: foundationbot/argus.operator-ui:REPLACE-WITH-OPERATOR-UI-COMMIT-SHA
+    image: foundationbot/argus.operator-ui:qa
+  dma-streams:
+    image: foundationbot/dma-streams:SOF-1167
   dma-ethercat:
-    image: foundationbot/dma-ethercat:main-latest-aarch64
+    image: foundationbot/dma-ethercat:SOF-1167
   # ik-mk2 is default-off (nodeLabels has-ik-mk2: 'false'); uncomment and
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
@@ -732,6 +739,9 @@ nodeLabels:
   # every run. Edit a value to (de)schedule the workload on this host.
   # dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)
   foundation.bot/has-cameras: 'true'
+  # gaia observability stack (otel-collector, prometheus, tempo, loki, grafana,
+  # vector, node/process/tegra exporters, shm-stats); default-on, set 'false' to opt out
+  foundation.bot/has-gaia: 'true'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
   # okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM; GPU + DMA shm)

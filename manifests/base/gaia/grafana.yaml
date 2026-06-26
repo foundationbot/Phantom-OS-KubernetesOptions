@@ -1,0 +1,66 @@
+# grafana — dashboards over Prometheus + Jaeger + Loki (datasources + dashboards
+# provisioned from ConfigMaps). UI on host :10300. Translated from compose `grafana`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-creds
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        foundation.bot/has-gaia: "true"
+      # root so it can own the hostPath state dir (compose used a named volume).
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: GF_AUTH_ANONYMOUS_ENABLED,  value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: "Viewer" }
+            - { name: GF_SERVER_HTTP_PORT,         value: "10300" }
+          ports:
+            - { name: web, containerPort: 10300 }
+          livenessProbe:
+            httpGet: { path: /api/health, port: 10300 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: ds,           mountPath: /etc/grafana/provisioning/datasources }
+            - { name: dashboards,   mountPath: /etc/grafana/provisioning/dashboards }
+            - { name: dashboards-json, mountPath: /gaia-dashboards-json }
+            - { name: data,         mountPath: /var/lib/grafana }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "1Gi" }
+      volumes:
+        - name: ds
+          configMap:
+            name: gaia-grafana-datasources
+        - name: dashboards
+          configMap:
+            name: gaia-grafana-dashboards
+        - name: dashboards-json
+          configMap:
+            name: gaia-grafana-dashboards-json
+        - name: data
+          hostPath:
+            path: /data/gaia/grafana
+            type: DirectoryOrCreate

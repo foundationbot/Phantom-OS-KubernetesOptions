@@ -1,0 +1,24 @@
+# gaia — host-side per-process GPU memory via NVMAP debugfs (jetson-nvmap-mem-textfile.sh)
+# Complements gaia-gpu-metrics (nvidia-smi): NVMAP reads the iovmm clients table
+# in debugfs, which catches GPU-mapped memory per process that compute-apps may
+# miss. Best-effort — the debugfs format varies by JetPack; validate on device
+# (set NVMAP_CLIENTS if the path differs). Install per robot (from collectors/):
+#   install -m0755 jetson-nvmap-mem-textfile.sh /usr/local/bin/
+#   install -m0644 gaia-nvmap-metrics.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now gaia-nvmap-metrics
+[Unit]
+Description=gaia per-process GPU memory (NVMAP) -> node-exporter textfile
+After=docker.service
+
+[Service]
+Environment=TEXTFILE_DIR=/var/lib/gaia/node-textfile
+Environment=INTERVAL_S=5
+ExecStart=/usr/local/bin/jetson-nvmap-mem-textfile.sh
+Restart=always
+RestartSec=5
+Nice=10
+CPUAffinity=0-9
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

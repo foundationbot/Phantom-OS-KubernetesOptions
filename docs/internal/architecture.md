@@ -127,19 +127,17 @@ with the host-specific overrides. ArgoCD takes it from there.
 
 | Path | Purpose |
 | --- | --- |
-| `scripts/bootstrap-robot.sh` | Orchestrator. Drives every phase from preflight through validate. Idempotent; phases can be selected via `--<phase>` flags. |
+| `scripts/bootstrap-robot.sh` | Orchestrator. Drives every phase from preflight through deployments. Idempotent; phases can be selected via `--<phase>` flags. |
 | `scripts/configure-host.sh` | Interactive wizard that produces `/etc/phantomos/host-config.yaml`. Pre-fills from existing host-config when re-run. |
 | `scripts/lib/host-config.py` | Parser/validator. Exposes `get`, `get-images-json`, `get-deployment-patches-json`, `get-enabled-stacks`, `get-stack-selfheal`, `validate` subcommands. Holds `KNOWN_STACKS`, `REQUIRED_STACKS`, `DEPLOYMENT_TARGETS`. |
 | `scripts/lib/robot-id.sh` | Robot identity resolution helper. Sourced by bootstrap and `positronic.sh`. Resolution order: `--robot` flag, `/etc/phantomos/robot`, `host-config.yaml:robot`, `$(hostname)`. |
-| `scripts/configure-k0s-containerd-mirror.sh` | Configures `/etc/k0s/containerd.toml` to mirror DockerHub through the local registry. Run during phase 4 (host). |
 | `scripts/configure-k0s-nvidia-runtime.sh` | Adds the nvidia container runtime to k0s containerd config. Skipped on hosts without a GPU. |
-| `scripts/positronic.sh` | Operator helper for pushing positronic-control + phantom-models images to the local registry; not part of the bringup path. |
-| `scripts/validate-local-registry.sh` | Final phase smoke test: registry reachable, expected tags present. |
+| `scripts/positronic.sh` | Operator helper for inspecting + driving the positronic-control pod (status, exec, logs, set-cmd, redeploy); not part of the bringup path. |
 | `host-config-templates/_template/host-config.yaml` | Annotated schema reference. Operators copy + edit, or `configure-host.sh` derives from it. |
 | `host-config-templates/_template/phantomos-app.yaml.tpl` | ArgoCD Application CR template. Substitutions: `{{ROBOT}}`, `{{STACK}}`, `{{REPO_URL}}`, `{{TARGET_REVISION}}`, `{{SELF_HEAL}}`. |
 | `host-config-templates/_template/operator-ui-pairing.yaml` | Reference for the operator-ui pairing ConfigMap (AI_PC_URL). |
 | `manifests/base/<workload>/` | Universal workload manifests. Deployments/DaemonSets here carry only kernel/runtime mounts (`/dev`, `/dev/shm`, `/tmp`); EVERY other host path is host-injected. |
-| `manifests/stacks/core/kustomization.yaml` | Required stack. Bundles `runtime-classes`, `registry`, `dma-video`, `positronic`, `phantomos-api-server`, `yovariable-server`, `dma-streams`, `dma-bridge`, `phantom-locomotion`, `cpp-robot-state-estimator`. |
+| `manifests/stacks/core/kustomization.yaml` | Required stack. Bundles `runtime-classes`, `dma-video`, `positronic`, `phantomos-api-server`, `yovariable-server`, `dma-streams`, `dma-bridge`, `phantom-locomotion`, `cpp-robot-state-estimator`. |
 | `manifests/stacks/operator/kustomization.yaml` | Toggleable stack. Bundles `argus`, `nimbus` (operator UI + episode storage). |
 | `terraform/main.tf` | Installs the argocd Helm chart. Does NOT apply Application CRs — those are rendered + applied by bootstrap from the per-host template. |
 | `docs/rfcs/0001-fleet-control-plane.md` | Long-term destination: fleet control plane queried by serial. |
@@ -224,7 +222,7 @@ List of mappings; each is a kustomize image override.
 
 | Sub-field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | string | yes | The image reference declared in the base manifest (e.g. `localhost:5443/positronic-control`). |
+| `name` | string | yes | The image reference declared in the base manifest (e.g. `foundationbot/positronic-control`). |
 | `newTag` | string | yes | The tag this robot should pull. |
 | `newName` | string | optional | Replacement image name. When omitted, only the tag changes. |
 
@@ -307,9 +305,9 @@ stacks:
     # selfHeal: false       # uncomment to leave operator-ui drift alone
 
 images:
-  - name: localhost:5443/positronic-control    # routed to core stack (kustomize-scan)
+  - name: foundationbot/positronic-control     # routed to core stack (kustomize-scan)
     newTag: 0.2.44-cu130
-  - name: localhost:5443/phantom-models
+  - name: foundationbot/phantom-models
     newTag: 2026-04-30
   - name: foundationbot/argus.operator-ui      # routed to operator stack
     newTag: 7af9c2b
@@ -338,7 +336,7 @@ deployments:
 `scripts/bootstrap-robot.sh` runs phases in order. With no `--<phase>` flags
 on the command line, every phase runs (full bootstrap). With one or more
 `--<phase>` flags, only those phases run (selected-phases mode); selected
-mode implies `-y`. Targeted overrides (`--skip-nvidia`, `--skip-validate`)
+mode implies `-y`. Targeted overrides (`--skip-nvidia`)
 compose with both modes.
 
 | # | Name | Reads | Writes | Flag |
@@ -347,7 +345,7 @@ compose with both modes.
 | 1 | `preflight` | OS / arch / kernel / disk / sudo / port collisions | nothing | always (no skip flag) |
 | 2 | `deps` | apt / network | `/usr/local/bin/{k0s,terraform}`; apt packages | `--deps` |
 | 3 | `cluster` | `/etc/k0s/k0s.yaml` (skip if present) | installs k0s controller, starts `k0scontroller`, writes `/root/.kube/config` | `--cluster` |
-| 4 | `host` | `lspci`, `/dev/nvidia0` | `/etc/k0s/containerd.toml` (mirror + nvidia runtime); restarts k0s | `--host` |
+| 4 | `host` | `lspci`, `/dev/nvidia0` | `/etc/k0s/containerd.toml` (nvidia runtime); restarts k0s | `--host` |
 | 5 | `seed-pull-secrets` | `--dockerhub-secret-file`, `~/.docker/config.json`, existing `phantom/dockerhub-creds` | creates `dockerhub-creds` Secret in `argus`, `dma-video`, `nimbus`, `phantom` | `--seed-pull-secrets` |
 | 6 | `operator-ui-config` | `--ai-pc-url` or existing `/etc/phantomos/operator-ui-pairing.yaml` | `/etc/phantomos/operator-ui-pairing.yaml`; ConfigMap `argus/operator-ui-pairing`; rolls operator-ui if changed | `--operator-ui-config` |
 | 7 | `install-dma-ethercat` | `host-config.yaml:images` for `foundationbot/dma-ethercat`; `manifests/installers/dma-ethercat/base/job.yaml` | renders `/etc/phantomos/dma-ethercat-installer.yaml` (sed PLACEHOLDER → tag); `kubectl apply -f` (Job, NOT ArgoCD-managed); waits `Complete`; `dpkg -i /var/lib/dma-ethercat-installer/dma-ethercat-*.deb`; `systemctl enable --now dma-ethercat.service`. Failure halts bootstrap with `DMA-ETHERCAT FAILURE` banner — gitops does NOT run | `--install-dma-ethercat` (skip with `--skip-ethercat-install`) |
@@ -355,8 +353,6 @@ compose with both modes.
 | 9 | `argocd-admin` | argocd CLI | installs `argocd` to `/usr/local/bin/`; resets admin password to `1984` (bcrypt patched into `argocd-secret`); deletes `argocd-initial-admin-secret` | `--argocd-admin` |
 | 10 | `image-overrides` | `host-config.yaml:images`; runs kustomize on each enabled stack to map image -> stack | patches each Application's `spec.source.kustomize.images`; triggers sync | `--image-overrides` |
 | 11 | `deployments` | `host-config.yaml:deployments`; `DEPLOYMENT_TARGETS` map | patches each Application's `spec.source.kustomize.patches` (one per owning stack); empty `[]` clears prior injection | `--deployments` (legacy alias `--dev-mounts`) |
-| 12 | `setup-positronic` (optional) | `--positronic-image`, local Docker | pushes positronic-control image; builds phantom-models; redeploys pod | `--setup-positronic` |
-| 13 | `validate` | local registry | nothing (smoke test) | `--validate` |
 
 ### Why phase 12 gates phase 13
 
@@ -440,12 +436,6 @@ image-overrides      --[reads]-> host-config.yaml:images
 deployments          --[reads]-> host-config.yaml:deployments
                      --[render]-> strategic-merge patch per deployment
                      --[patch]-> Application.spec.source.kustomize.patches (per stack)
-   |
-   v
-setup-positronic (optional)
-   |
-   v
-validate
 ```
 
 ## 7. Per-stack Application model
@@ -475,7 +465,6 @@ argocd namespace
   |
   |     reconciles ->
   |       runtime-classes/  (RuntimeClass: nvidia, ...)
-  |       registry/         (Deployment + PV/PVC for localhost:5443)
   |       dma-video/        (DaemonSet)
   |       positronic/       (Deployment positronic-control)
   |       phantomos-api-server/ (DaemonSet api)
@@ -555,8 +544,6 @@ operator                  configure-host.sh         /etc/phantomos/        boots
    |                            |                          |                       |    deployment, group    |
    |                            |                          |                       |    by owning stack      |
    |                            |                          |                       |--- kubectl patch app -->| Application.spec.source.kustomize.patches
-   |                            |                          |                       |                         |
-   |                            |                          |                       |--- phase 18: validate -->|
 ```
 
 ArgoCD then re-runs `kustomize build manifests/stacks/<stack>/` against the
@@ -643,14 +630,13 @@ way to apply host-config changes. Each phase self-skips on prior state:
 
 - **deps**: `command -v k0s` and `command -v terraform`. Skipped if both binaries are present.
 - **cluster**: `[ -e /etc/k0s/k0s.yaml ] && systemctl is-active k0scontroller`. Skipped if both true.
-- **host**: `containerd_mirror_already_configured` and `nvidia_runtime_already_configured` greps in `/etc/k0s/containerd.toml`.
+- **host**: `nvidia_runtime_already_configured` grep in `/etc/k0s/containerd.toml`.
 - **seed-pull-secrets**: `kubectl get secret dockerhub-creds -n <ns>` for each target namespace.
 - **operator-ui-config**: skipped if no `--ai-pc-url` and no existing pairing file (and no `host-config.yaml` to derive from).
 - **gitops**: `terraform plan` no-op when chart is current; `kubectl apply` is server-side-merged, so re-applying the same Application is a no-op except for the timestamp.
 - **argocd-admin**: always re-patches the bcrypt hash — cheap and ensures the password is whatever `1984` resolves to with current bcrypt cost.
 - **image-overrides**: `kubectl patch` is a JSON-merge; an unchanged patch is a no-op; the post-patch `sync` is harmless if nothing changed.
 - **deployments**: same as image-overrides; explicitly clearing on every run is intentional so dropping a key in host-config drops the mount.
-- **validate**: read-only.
 
 `selfHeal` defaults to `false`. Setting `production: true` (or
 `--production`) flips it to `true`, which makes ArgoCD auto-revert any
@@ -675,7 +661,7 @@ Worked for two devices, broke for ten — every robot needed a PR to land.
 **Stage B — ArgoCD app-of-apps.**
 Replaced the ad-hoc `kubectl apply -k` with an ArgoCD root Application
 (`gitops/apps/<robot>/root.yaml`) that fanned out to a child Application per
-workload (positronic, dma-video, registry, ...). Sync became automated; per-robot
+workload (positronic, dma-video, ...). Sync became automated; per-robot
 config was still in git, still per-robot directories.
 
 **Stage C — host-config.yaml introduced.**
