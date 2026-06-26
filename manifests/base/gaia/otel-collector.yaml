@@ -104,7 +104,7 @@ spec:
             - { name: archive, mountPath: /var/log/dma-debug }
           resources:
             requests: { cpu: "200m", memory: "256Mi" }
-            limits:   { cpu: "2",    memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "1280Mi" }
       volumes:
         - name: otel-config
           configMap:
