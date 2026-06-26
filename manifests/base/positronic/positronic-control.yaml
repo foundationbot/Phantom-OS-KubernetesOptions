@@ -55,7 +55,7 @@ spec:
             name: positronic-config
             optional: true
         image: foundationbot/positronic-control:PLACEHOLDER
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         name: positronic-control
         resources:
           limits:

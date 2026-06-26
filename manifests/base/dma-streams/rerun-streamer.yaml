@@ -116,7 +116,7 @@ spec:
       initContainers:
         - name: server
           image: foundationbot/dma-streams:main-latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           restartPolicy: Always
           # `rerun --serve-web` hosts BOTH the browser HTTP viewer
           # (--web-viewer-port) and the gRPC ingest socket (--port).
@@ -215,7 +215,7 @@ spec:
         # ── rerun-streamer — /dev/shm reader → gRPC publisher ───────
         - name: streamer
           image: foundationbot/dma-streams:main-latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           # Default ENTRYPOINT is dma_recorder — override here.
           command: ["rerun_streamer"]
           # rerun_streamer's argv parser is space-separated: `--flag value`.
