@@ -45,7 +45,8 @@ fi
 #   3. Pin them to the chosen isolated core
 #   4. Apply ethtool NIC tuning
 #   5. Lock performance governor on all isolated cores
-#   6. Restrict unbound workqueues to housekeeping cores
+#   6. Restrict unbound workqueues (global + per-workqueue I/O overrides) to
+#      housekeeping cores
 #
 # Arguments: nic, core, [service_path], [script_path]
 write_ethercat_rt_service() {
@@ -182,6 +183,22 @@ if [[ -n "\$PRESENT" && -n "\$ISOLATED_LIST" ]]; then
         printf "%x" "\$HK_MASK" > /sys/devices/virtual/workqueue/cpumask 2>/dev/null \\
           && echo "Set unbound workqueue cpumask to \$(printf '0x%x' \$HK_MASK)" \\
           || echo "Failed to set workqueue cpumask"
+    fi
+    # The global mask only applies to NEWLY created unbound workqueues. I/O
+    # workqueues (writeback, nvme-*, blkcg_punt_bio) are created early with
+    # their own all-CPUs mask and ignore it, so their workers keep landing on
+    # the isolated cores — ms-scale jitter on a box that logs to NVMe. Re-pin
+    # every per-workqueue mask that still differs from housekeeping.
+    if [[ "\$HK_MASK" -gt 0 ]]; then
+        HK_HEX=\$(printf "%x" "\$HK_MASK")
+        for WQF in /sys/bus/workqueue/devices/*/cpumask; do
+            [[ -e "\$WQF" ]] || continue
+            CUR=\$(cat "\$WQF" 2>/dev/null | tr -d ',') || continue
+            [[ -z "\$CUR" ]] && continue
+            [[ \$((16#\$CUR)) -eq "\$HK_MASK" ]] && continue
+            printf "%s" "\$HK_HEX" > "\$WQF" 2>/dev/null \\
+              && echo "Re-pinned workqueue \$(basename \$(dirname \$WQF)) cpumask to 0x\$HK_HEX"
+        done
     fi
 fi
 
