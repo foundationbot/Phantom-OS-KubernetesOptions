@@ -5,6 +5,7 @@
 # Units managed here:
 #   - /etc/systemd/system/ethercat-irq-affinity.service   (NIC IRQ + NIC tune)
 #   - /etc/systemd/system/cpusets.service                  (cpuset partitions)
+#   - /etc/systemd/system/cpusets-reassert.service         (re-apply After=k0s)
 #   - /etc/systemd/system.conf.d/cpuaffinity.conf          (default CPUAffinity)
 #
 # Design note: generated boot scripts are self-contained (no runtime source
@@ -379,14 +380,42 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 SERVICE_EOF
 
+    # Companion unit: re-assert partitions AFTER k0s starts. cpusets.service
+    # (above) runs Before=k0s and activates the partition before kubepods
+    # exists; kubelet then creates the kubepods cgroup covering ALL cpus,
+    # which re-invalidates the isolated partition (sibling overlap). This
+    # companion re-runs the same apply After=k0s, so kubepods is shrunk back
+    # to housekeeping and the partition becomes valid again. Kubelet's own
+    # reservedSystemCPUs/static-policy cannot do this on Jetson Thor — its
+    # topology reports all logical cpus as a single physical core, so the
+    # static policy reserves every cpu (see RFC 0003 implementation findings).
+    local reassert_path="${service_path%.service}-reassert.service"
+    $SUDO tee "$reassert_path" > /dev/null <<REASSERT_EOF
+[Unit]
+Description=Re-assert cpuset partitions after kubelet (k0s) expands kubepods
+After=k0scontroller.service k0sworker.service
+Wants=k0scontroller.service
+ConditionPathExists=$wrapper_path
+
+[Service]
+Type=oneshot
+ExecStart=$wrapper_path
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+REASSERT_EOF
+
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable "$(basename "$service_path")"
+    $SUDO systemctl enable "$(basename "$reassert_path")"
     echo -e "${GREEN}  Installed $install_dir/manage_cpusets.sh${NC}"
     echo -e "${GREEN}  Installed $install_dir/lib/*.sh${NC}"
     echo -e "${GREEN}  Installed $etc_config${NC}"
     echo -e "${GREEN}  Installed $wrapper_path${NC}"
     echo -e "${GREEN}  Installed $service_path${NC}"
-    echo -e "${GREEN}  Enabled $(basename "$service_path")${NC}"
+    echo -e "${GREEN}  Installed $reassert_path${NC}"
+    echo -e "${GREEN}  Enabled $(basename "$service_path") + $(basename "$reassert_path")${NC}"
 }
 
 remove_cpusets_service() {
@@ -398,6 +427,13 @@ remove_cpusets_service() {
     service_name=$(basename "$service_path")
 
     echo -e "${BLUE}Removing cpusets service...${NC}"
+
+    local reassert_path="${service_path%.service}-reassert.service"
+    if [[ -f "$reassert_path" ]]; then
+        $SUDO systemctl disable "$(basename "$reassert_path")" 2>/dev/null || true
+        $SUDO rm -f "$reassert_path"
+        echo -e "${GREEN}  Removed $reassert_path${NC}"
+    fi
 
     if [[ -f "$service_path" ]]; then
         $SUDO systemctl disable "$service_name" 2>/dev/null || true
