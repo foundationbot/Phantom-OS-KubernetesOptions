@@ -53,7 +53,7 @@ spec:
             name: positronic-config
             optional: true
         image: foundationbot/phantom-cuda:SOF-1167-arm64
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         name: positronic-phantom
         resources:
           limits:
