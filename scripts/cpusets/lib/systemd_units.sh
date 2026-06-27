@@ -5,7 +5,8 @@
 # Units managed here:
 #   - /etc/systemd/system/ethercat-irq-affinity.service   (NIC IRQ + NIC tune)
 #   - /etc/systemd/system/cpusets.service                  (cpuset partitions)
-#   - /etc/systemd/system/cpusets-reassert.service         (re-apply After=k0s)
+#   - /etc/systemd/system/cpusets-reassert.service         (poll guard: re-apply
+#                                                            when kubelet expands kubepods)
 #   - /etc/systemd/system.conf.d/cpuaffinity.conf          (default CPUAffinity)
 #
 # Design note: generated boot scripts are self-contained (no runtime source
@@ -380,27 +381,52 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 SERVICE_EOF
 
-    # Companion unit: re-assert partitions AFTER k0s starts. cpusets.service
-    # (above) runs Before=k0s and activates the partition before kubepods
-    # exists; kubelet then creates the kubepods cgroup covering ALL cpus,
-    # which re-invalidates the isolated partition (sibling overlap). This
-    # companion re-runs the same apply After=k0s, so kubepods is shrunk back
-    # to housekeeping and the partition becomes valid again. Kubelet's own
-    # reservedSystemCPUs/static-policy cannot do this on Jetson Thor — its
-    # topology reports all logical cpus as a single physical core, so the
+    # Companion guard: kubelet (re)creates the kubepods cgroup covering ALL
+    # cpus *asynchronously* — well after k0scontroller.service is "active"
+    # (observed ~18s later on boot) and again on every `systemctl restart
+    # k0scontroller` — which overlaps the isolated partition's exclusive cpus
+    # and flips it to "isolated invalid", un-protecting the RT cores.
+    #
+    # A one-shot ordered After=k0s does NOT fix this: kubepods usually doesn't
+    # exist yet when it runs. cgroupfs doesn't emit reliable inotify either, so
+    # a lightweight poll guard is the dependable mechanism — it re-applies the
+    # partition config whenever any managed partition reports "isolated
+    # invalid", healing the boot race and later expansions alike (silent when
+    # healthy). Kubelet's own reservedSystemCPUs/static-policy can't help on
+    # Jetson Thor — its topology reports all cpus as one physical core, so the
     # static policy reserves every cpu (see RFC 0003 implementation findings).
+    local guard_path="$(dirname "$wrapper_path")/cpusets-reassert-guard"
     local reassert_path="${service_path%.service}-reassert.service"
+    $SUDO tee "$guard_path" > /dev/null <<GUARD_EOF
+#!/bin/bash
+# cpuset partition guard — see cpusets-reassert.service. Re-applies the
+# partition config whenever a managed partition goes "isolated invalid"
+# (kubelet expanding kubepods over the RT cores). Silent when healthy.
+set -u
+WRAP="\${APPLY_WRAPPER:-$wrapper_path}"
+POLL="\${POLL:-10}"
+while :; do
+    if grep -Rqs 'isolated invalid' /sys/fs/cgroup/*/cpuset.cpus.partition 2>/dev/null; then
+        echo "cpuset-guard: a partition is 'isolated invalid' (sibling cgroup stole CPUs) — re-applying"
+        "\$WRAP" >/dev/null 2>&1 || echo "cpuset-guard: apply-cpusets failed (will retry)"
+    fi
+    sleep "\$POLL"
+done
+GUARD_EOF
+    $SUDO chmod +x "$guard_path"
+
     $SUDO tee "$reassert_path" > /dev/null <<REASSERT_EOF
 [Unit]
-Description=Re-assert cpuset partitions after kubelet (k0s) expands kubepods
+Description=Guard cpuset partitions: re-assert when kubelet expands kubepods
 After=k0scontroller.service k0sworker.service
 Wants=k0scontroller.service
 ConditionPathExists=$wrapper_path
 
 [Service]
-Type=oneshot
-ExecStart=$wrapper_path
-RemainAfterExit=yes
+Type=simple
+ExecStart=$guard_path
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -413,6 +439,7 @@ REASSERT_EOF
     echo -e "${GREEN}  Installed $install_dir/lib/*.sh${NC}"
     echo -e "${GREEN}  Installed $etc_config${NC}"
     echo -e "${GREEN}  Installed $wrapper_path${NC}"
+    echo -e "${GREEN}  Installed $guard_path${NC}"
     echo -e "${GREEN}  Installed $service_path${NC}"
     echo -e "${GREEN}  Installed $reassert_path${NC}"
     echo -e "${GREEN}  Enabled $(basename "$service_path") + $(basename "$reassert_path")${NC}"
@@ -429,10 +456,15 @@ remove_cpusets_service() {
     echo -e "${BLUE}Removing cpusets service...${NC}"
 
     local reassert_path="${service_path%.service}-reassert.service"
+    local guard_path="$(dirname "$wrapper_path")/cpusets-reassert-guard"
     if [[ -f "$reassert_path" ]]; then
-        $SUDO systemctl disable "$(basename "$reassert_path")" 2>/dev/null || true
+        $SUDO systemctl disable --now "$(basename "$reassert_path")" 2>/dev/null || true
         $SUDO rm -f "$reassert_path"
         echo -e "${GREEN}  Removed $reassert_path${NC}"
+    fi
+    if [[ -f "$guard_path" ]]; then
+        $SUDO rm -f "$guard_path"
+        echo -e "${GREEN}  Removed $guard_path${NC}"
     fi
 
     if [[ -f "$service_path" ]]; then
