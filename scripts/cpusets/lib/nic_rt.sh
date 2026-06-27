@@ -732,4 +732,23 @@ restrict_workqueue_mask() {
     else
         echo -e "${YELLOW}  Write to $mask_file failed (may require kernel arg workqueue.unbound_cpus=)${NC}"
     fi
+
+    # The GLOBAL mask above is only the default for NEWLY created unbound
+    # workqueues. Several I/O workqueues (writeback, nvme-*, blkcg_punt_bio)
+    # are created early with their own all-CPUs mask and ignore that default,
+    # so their workers keep landing on the isolated cores — a real source of
+    # ms-scale jitter on a box whose RT control loop logs to NVMe. Re-pin each
+    # per-workqueue mask that differs from housekeeping.
+    local mask_dec wqf wq cur
+    mask_dec=$((16#$mask))
+    for wqf in /sys/bus/workqueue/devices/*/cpumask; do
+        [[ -e "$wqf" ]] || continue
+        cur=$(cat "$wqf" 2>/dev/null | tr -d ',') || continue
+        [[ -z "$cur" ]] && continue
+        [[ $((16#$cur)) -eq "$mask_dec" ]] && continue
+        wq=$(basename "$(dirname "$wqf")")
+        if echo "$mask" | $SUDO tee "$wqf" > /dev/null 2>&1; then
+            echo -e "${GREEN}  workqueue '$wq'.cpumask -> 0x$mask${NC}"
+        fi
+    done
 }
