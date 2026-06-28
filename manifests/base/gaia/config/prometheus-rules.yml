@@ -47,3 +47,39 @@ groups:
             dma_debug_dma_bridge_heartbeat_timestamp_seconds is absent for >2m —
             no bridge is reporting liveness (all bridges down, or the collector is
             not receiving their OTLP metrics).
+
+  # RT-preemption attribution (rtpreemptionalertdesign.md). The rt_attributor emits
+  # `rt_preempted_by` over OTLP when a task/IRQ stole an isolated core and caused an
+  # RT cycle overrun; the collector `count` connector surfaces it as a log-derived
+  # metric keyed by `code`. The event itself (Loki) names the offender + cause_class;
+  # these alerts just flag that it is happening / recurring.
+  - name: gaia_rt_preemption
+    interval: 15s
+    rules:
+      - alert: RTPreemption
+        expr: sum(rate(dma_debug_dma_log_records_total{code="rt_preempted_by"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+          subsystem: control
+        annotations:
+          summary: "An isolated RT core is being preempted"
+          description: >
+            rt_preempted_by events are firing — a task/IRQ stole an isolated core and
+            an RT cycle overran. Open Loki ({code="rt_preempted_by"}) for the
+            offender_comm / cause_class / stolen_us, or the "top RT preemptors" panel
+            on DMA RT / Jitter (S4). cause_class HARDWARE/BUS means no task thief
+            (firmware latency or a long ec_receive — check the receive-phase span).
+      # Sustained preemption is a determinism problem, not a one-off blip.
+      - alert: RTPreemptionSustained
+        expr: sum(rate(dma_debug_dma_log_records_total{code="rt_preempted_by"}[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: high
+          subsystem: control
+        annotations:
+          summary: "Sustained RT-core preemption (>1 overrun/5s for 5m)"
+          description: >
+            rt_preempted_by has been firing steadily for 5m — an isolated core is
+            repeatedly being stolen. Identify the offender (Loki / the dashboard
+            panel) and move it off the isolated cores (cpuset / IRQ affinity).
