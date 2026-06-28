@@ -15,14 +15,21 @@
 # host-config image override binds to (and is skipped by the manifest scan).
 #
 # ── Container entry ──────────────────────────────────────────────────────
-# Image ENTRYPOINT is /entrypoint.sh (sources ROS jazzy, then exec "$@");
-# we set command=[/entrypoint.sh] + args=[policy-diagnostic-launch] to make
-# the entry explicit. policy-diagnostic-launch is the env-driven launcher
-# (the DIAG_* contract — analogue of phantom-locomotion's dma_launch.sh): it
-# builds the dma_diagnostic_node CLI from DIAG_* env, runs the node
-# DIAG_ITERATIONS times, then exits. The DaemonSet's restartPolicy is
-# Always, so while a node is opted in the sweep re-runs on each exit — keep
-# this in mind, it actively drives /desired joints (see gating below).
+# Image ENTRYPOINT is /entrypoint.sh (a passthrough `exec "$@"` — no ROS);
+# command=[/entrypoint.sh] + args=[policy-diagnostic-launch] makes the entry
+# explicit. policy-diagnostic-launch is the env-driven launcher (the DIAG_*
+# contract — analogue of phantom-locomotion's dma_launch.sh): it builds the
+# dma_diagnostic_node CLI from DIAG_* env, runs the node DIAG_ITERATIONS
+# times, then exits. The DaemonSet restartPolicy is Always, so while a node
+# is opted in the sweep re-runs on each exit — it actively drives /desired
+# joints (see gating below).
+#
+# ── Joystick (no ROS) ────────────────────────────────────────────────────
+# The --wait-for-start (X) and stop (Square+Triangle) gates arrive over the
+# /velocity_cmd DMA channel (VelocityCommandData.start_count/stop_count, read
+# via DmaIpcClient.read_velocity_command()), NOT ROS. The joystick-publisher
+# sidecar below reads /dev/input and produces that channel; the diagnostic
+# reads it over shared /dev/shm (hostIPC). No DDS, so no hostNetwork.
 #
 # ── Gating ───────────────────────────────────────────────────────────────
 # Default-OFF, opt-in per host via foundation.bot/has-policy-diagnostics
@@ -61,15 +68,12 @@ spec:
         - operator: Exists
           effect: NoSchedule
 
-      # hostIPC + /dev/shm: the diagnostic talks to the live DMA master over
-      # IPC shared-memory queues (DmaIpcClient), so it must share the host's
-      # IPC namespace and shm medium. hostNetwork keeps DDS discovery on the
-      # host net so the optional --wait-for-start joystick gate and the
-      # stop-policy publisher see the same ROS_DOMAIN_ID as the rest of the
-      # robot. No GPU, so no runtimeClassName.
-      hostNetwork: true
+      # hostIPC + /dev/shm: the diagnostic and the joystick-publisher sidecar
+      # talk to the DMA master (and each other, via /velocity_cmd) over
+      # iceoryx shared-memory queues (DmaIpcClient), so they must share the
+      # host IPC namespace and shm medium. iceoryx is shm-based, NOT network —
+      # no hostNetwork/DDS. No GPU, so no runtimeClassName.
       hostIPC: true
-      dnsPolicy: ClusterFirstWithHostNet
       imagePullSecrets:
         - name: dockerhub-creds
       terminationGracePeriodSeconds: 15
@@ -78,38 +82,29 @@ spec:
         - name: policy-diagnostics
           image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
           imagePullPolicy: IfNotPresent
-          # /entrypoint.sh sources ROS jazzy then exec's its args. The
-          # launcher reads the DIAG_* env from the optional ConfigMap below;
-          # with no ConfigMap present the launcher's built-in defaults apply
-          # so the pod still starts (and can be driven via `kubectl exec`).
+          # /entrypoint.sh is a passthrough (exec "$@"). The launcher reads the
+          # DIAG_* env from the optional ConfigMap below; with no ConfigMap
+          # present the launcher's built-in defaults apply so the pod still
+          # starts (and can be driven via `kubectl exec`).
           command:
             - /entrypoint.sh
           args:
             - policy-diagnostic-launch
-          # The diagnostic's --wait-for-start gate and any interactive run
-          # benefit from a TTY so an operator can `kubectl exec -it` in and
-          # drive a sweep directly. Mirrors phantom-locomotion.
+          # --wait-for-start blocks on the joystick X gate over /velocity_cmd;
+          # a TTY also lets an operator `kubectl exec -it` in and drive a sweep.
           stdin: true
           tty: true
           envFrom:
             # Per-host DIAG_* selection (test mode, robot, naming, iterations,
-            # out path, joint bias overrides, wait-for-start, …). Created by an
-            # operator / a future bootstrap phase, NOT in the GitOps tree so
-            # ArgoCD doesn't reset per-host edits. optional: true means kubelet
-            # doesn't block on it — the launcher's defaults kick in instead.
+            # out path, joint bias overrides, gains, wait-for-start, …). Created
+            # by bootstrap's policy-diagnostics-config phase, NOT in the GitOps
+            # tree so ArgoCD doesn't reset per-host edits. optional: true means
+            # kubelet doesn't block on it — the launcher's defaults kick in.
             - configMapRef:
                 name: policy-diagnostics-config
                 optional: true
-          env:
-            # Match phantom-locomotion's DDS domain so the joystick start-gate
-            # and stop-policy topics line up with the rest of the robot.
-            - { name: ROS_DOMAIN_ID,   value: "129" }
-            # pygame (interactive modes) needs a video driver even headless.
-            - { name: SDL_VIDEODRIVER, value: "dummy" }
           volumeMounts:
             - { name: shm,       mountPath: /dev/shm }
-            # Joystick for the --wait-for-start gate.
-            - { name: dev-input, mountPath: /dev/input }
             # Robot tables (mj_order.json / imu_roles.json). Optional: IMU
             # tests are skipped when imu_roles.json is absent; mj naming
             # falls back to /config when mj_order.json is absent.
@@ -125,8 +120,35 @@ spec:
             requests: { cpu: "1", memory: "1Gi" }
             limits:   { cpu: "2", memory: "2Gi" }
           securityContext:
-            # Cross-IPC-namespace /dev/shm access + /dev/input, matching the
+            # Cross-IPC-namespace /dev/shm access, matching the
             # phantom-locomotion / dma-bridge posture.
+            privileged: true
+
+        # ── joystick-publisher sidecar ───────────────────────────────────
+        # Same image, different entry: reads the gamepad at /dev/input and
+        # publishes VelocityCommandData on /velocity_cmd (create=True owner).
+        # The diagnostic container reads start_count/stop_count from it over
+        # shared /dev/shm. Long-running (the diagnostic launcher exits +
+        # restarts per sweep; this stays up). Replaces the ROS joystick node.
+        - name: joystick-publisher
+          image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command:
+            - /entrypoint.sh
+          args:
+            - policy-diagnostic-joystick
+          env:
+            # pygame needs a video driver even headless. (The module also sets
+            # this itself; kept explicit for clarity.)
+            - { name: SDL_VIDEODRIVER, value: "dummy" }
+          volumeMounts:
+            - { name: shm,       mountPath: /dev/shm }
+            - { name: dev-input, mountPath: /dev/input }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          securityContext:
+            # /dev/input device access + cross-IPC /dev/shm.
             privileged: true
 
       volumes:
