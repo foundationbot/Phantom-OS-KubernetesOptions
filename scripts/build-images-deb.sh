@@ -450,6 +450,7 @@ canonical_container_for_repo() {
     foundationbot/dma-ethercat)           printf 'dma-ethercat' ;;
     foundationbot/dma-streams)            printf 'dma-streams' ;;
     foundationbot/phantom-dma-inference)  printf 'phantom-locomotion' ;;
+    foundationbot/policy-diagnostics-tools) printf 'policy-diagnostics' ;;
     foundationbot/phantom-motion-replay)  printf 'phantom-motion-replay' ;;
     foundationbot/cpp-robot-state-estimator) printf 'cpp-robot-state-estimator' ;;
     foundationbot/yovariable-server)      printf 'yovariable-server' ;;

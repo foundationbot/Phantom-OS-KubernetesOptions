@@ -22,6 +22,7 @@ Usage:
   host-config.py <path> get-phantom-locomotion-config-kv
   host-config.py <path> get-phantom-sonic-config-kv
   host-config.py <path> get-phantom-psi-config-kv
+  host-config.py <path> get-policy-diagnostics-config-kv
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -141,6 +142,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-okvis",
      "false",
      "okvis2x DaemonSet (OKVIS2-X live dense-stereo SLAM, GPU + DMA shm)"),
+    ("foundation.bot/has-policy-diagnostics",
+     "false",
+     "policy-diagnostics DaemonSet (standalone dma_diagnostic_node sweep, "
+     "core stack; drives /desired but is operator-triggered, so NOT in the "
+     "has-positronic/locomotion/sonic exclusion group)"),
     ("foundation.bot/has-positronic",
      "true",
      "positronic-control Deployment"),
@@ -810,6 +816,30 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     # full joint sweep at each Kd multiplier rung. Inert when
     # `testMode: joint-sweep`.
     "positionKdMultipliers":   "1.0",
+    # ── Per-joint motor-gain override (gain-contract.md). Seven gains
+    # (position kp/ki/kd, velocity kp/ki/kd, torque kp), each with a
+    # GLOBAL knob (applied to every joint when non-zero) and a per-joint
+    # OVERRIDE knob (comma list of NAME=VALUE; override wins for named
+    # joints). The dma-ethercat master merges per field, where a 0.0 slot
+    # means "keep the CSP value" — so every global defaults to "0.0"
+    # (inherit CSP) and every *Overrides list defaults to "" (empty).
+    # These are inert in the locomotion render (no LOCOMOTION_DIAGNOSTIC_*
+    # mapping in DIAGNOSTIC_FIELD_TO_ENV); the policy-diagnostics render
+    # consumes them via DIAG_FIELD_TO_ENV (DIAG_POSITION_KP, …).
+    "positionKp":          "0.0",
+    "positionKi":          "0.0",
+    "positionKd":          "0.0",
+    "velocityKp":          "0.0",
+    "velocityKi":          "0.0",
+    "velocityKd":          "0.0",
+    "torqueKp":            "0.0",
+    "positionKpOverrides": "",
+    "positionKiOverrides": "",
+    "positionKdOverrides": "",
+    "velocityKpOverrides": "",
+    "velocityKiOverrides": "",
+    "velocityKdOverrides": "",
+    "torqueKpOverrides":   "",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -1186,8 +1216,204 @@ def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
                 lines.append(f"{lo_env}={1.0 - tol:g}")
                 lines.append(f"{hi_env}={1.0 + tol:g}")
                 continue
-            env_name = DIAGNOSTIC_FIELD_TO_ENV[field]
+            # Fields that exist in the shared diagnostic defaults but have
+            # no LOCOMOTION_DIAGNOSTIC_* mapping (e.g. the per-joint
+            # motor-gain knobs, consumed only by the policy-diagnostics
+            # render) are simply not emitted here. Skipping them keeps the
+            # shared defaults dict additive without polluting the
+            # locomotion ConfigMap or raising on the lookup below.
+            env_name = DIAGNOSTIC_FIELD_TO_ENV.get(field)
+            if env_name is None:
+                continue
             lines.append(f"{env_name}={value}")
+
+    print("\n".join(lines))
+    return 0
+
+
+# ── policy-diagnostics (standalone DIAG_* workload) ─────────────────────────
+# Per-host knobs for the policy-diagnostics DaemonSet
+# (manifests/base/policy-diagnostics/policy-diagnostics.yaml), rendered into
+# the policy-diagnostics-config ConfigMap that the pod's launcher reads via
+# envFrom (optional:true). The AUTHORITATIVE consumer is policy-diagnostics-
+# tools' launch.py, which reads the generic DIAG_* namespace and does its OWN
+# tolerance->band expansion + CSV splitting. So — UNLIKE the locomotion render
+# (LOCOMOTION_DIAGNOSTIC_*, which PRE-EXPANDS the tol fields into BAND_LO/
+# BAND_HI pairs for dma_launch.sh) — this render is a straight field->DIAG_env
+# map with NO band math: the tol fields emit a single raw DIAG_*_TOL value.
+#
+# The field schema is the phantomLocomotion.diagnostic schema PLUS the 14
+# per-joint motor-gain fields (gain-contract.md) PLUS three runtime joint-
+# order/IMU-role file knobs that launch.py consumes (mjOrderFromConfig /
+# mjOrderFile / imuRolesFile). The locomotion-only `chirpRrdDir` field is
+# omitted — launch.py has no DIAG_CHIRP_RRD_DIR knob. Defaults mirror
+# launch.py's _PASSTHROUGH / _TOL_TO_BAND / file defaults exactly so a bare
+# (or absent) phantomPolicyDiagnostics block renders a working ConfigMap.
+DEFAULT_POLICY_DIAGNOSTICS: dict[str, str] = {
+    # The shared diagnostic defaults (bias/holds/IMU tols/chirp/gains/…)
+    # minus chirpRrdDir, which the policy-diagnostics launcher does not
+    # consume. Spreading DEFAULT_LOCOMOTION_DIAGNOSTIC keeps the two
+    # renders' shared knobs (and their default values) in lock-step.
+    **{k: v for k, v in DEFAULT_LOCOMOTION_DIAGNOSTIC.items()
+       if k != "chirpRrdDir"},
+    # Runtime joint-order / IMU-role derivation (launch.py build_diag_args).
+    # When mjOrderFromConfig is set (non-empty), launch.py derives joint
+    # order + IMU roles from the named config queue at runtime and ignores
+    # the file knobs; default "" leaves it unset so the file paths apply.
+    "mjOrderFromConfig": "",
+    "mjOrderFile":       "/etc/policy-diagnostics-tools/mj_order.json",
+    "imuRolesFile":      "/etc/policy-diagnostics-tools/imu_roles.json",
+}
+
+# Map host-config camelCase field names -> the DIAG_* environment-variable
+# name consumed by policy-diagnostics-tools' launch.py. Every name below is
+# cross-checked against launch.py (_PASSTHROUGH keys, _TOL_TO_BAND keys
+# emitted RAW as DIAG_*_TOL, the per-joint override loop, the file/optional
+# knobs, and DIAG_ITERATIONS/DIAG_OUT_PATH/DIAG_WAIT_FOR_START in main()).
+DIAG_FIELD_TO_ENV: dict[str, str] = {
+    "robot":        "DIAG_ROBOT",
+    "naming":       "DIAG_NAMING",
+    "bias":         "DIAG_BIAS",
+    "masterGain":   "DIAG_MASTER_GAIN",
+    "holdBiasS":    "DIAG_HOLD_BIAS_S",
+    "holdHomeS":    "DIAG_HOLD_HOME_S",
+    "joints":       "DIAG_JOINTS",
+    "outPath":      "DIAG_OUT_PATH",
+    "waitForStart": "DIAG_WAIT_FOR_START",
+    "jointBiasOverrides": "DIAG_JOINT_BIAS_OVERRIDES",
+    "iterations":         "DIAG_ITERATIONS",
+    # Ramp + velocity tracking. The launcher expands DIAG_VEL_TRACKING_
+    # RATIO_TOL into a band itself, so emit the RAW tolerance here.
+    "rampS":               "DIAG_RAMP_S",
+    "returnRampS":         "DIAG_RETURN_RAMP_S",
+    "velTrackingRatioTol": "DIAG_VEL_TRACKING_RATIO_TOL",
+    "velTrackingLagMaxMs": "DIAG_VEL_TRACKING_LAG_MAX_MS",
+    # IMU integrity tests. gravityMagTol / imuPitchRatioTol are RAW tols
+    # here too (the launcher does the band math), NOT BAND_LO/BAND_HI.
+    "skipImuTests":      "DIAG_SKIP_IMU_TESTS",
+    "gravityTol":        "DIAG_GRAVITY_TOL",
+    "gravityMagTol":     "DIAG_GRAVITY_MAG_TOL",
+    "gravityDriftTol":   "DIAG_GRAVITY_DRIFT_TOL",
+    "imuProjGXyTol":     "DIAG_IMU_PROJ_G_XY_TOL",
+    "imuPelvisYawTol":   "DIAG_IMU_PELVIS_YAW_TOL",
+    "imuQuatDeltaTol":   "DIAG_IMU_QUAT_DELTA_TOL",
+    "imuGyroNoiseFloor": "DIAG_IMU_GYRO_NOISE_FLOOR",
+    "imuIdleGyroTol":    "DIAG_IMU_IDLE_GYRO_TOL",
+    "imuIdleProjGTol":   "DIAG_IMU_IDLE_PROJ_G_TOL",
+    "imuPitchRatioTol":  "DIAG_IMU_PITCH_RATIO_TOL",
+    "imuPairDeltaTol":   "DIAG_IMU_PAIR_DELTA_TOL",
+    # Chirp test mode. Forwarded by launch.py to the node's argparse.
+    "testMode":                 "DIAG_TEST_MODE",
+    "chirpAmplitudeRad":        "DIAG_CHIRP_AMPLITUDE_RAD",
+    "chirpAmplitudeHardCapRad": "DIAG_CHIRP_AMPLITUDE_HARD_CAP_RAD",
+    "chirpFreqMinHz":           "DIAG_CHIRP_FREQ_MIN_HZ",
+    "chirpFreqMaxHz":           "DIAG_CHIRP_FREQ_MAX_HZ",
+    "cycleRateHz":              "DIAG_CYCLE_RATE_HZ",
+    "chirpDurationS":           "DIAG_CHIRP_DURATION_S",
+    "chirpEnvelopeS":           "DIAG_CHIRP_ENVELOPE_S",
+    "chirpGainMultipliers":     "DIAG_CHIRP_GAIN_MULTIPLIERS",
+    "chirpSettleVelTolRadS":    "DIAG_CHIRP_SETTLE_VEL_TOL_RAD_S",
+    "chirpSettleQuietS":        "DIAG_CHIRP_SETTLE_QUIET_S",
+    "chirpSettleMaxS":          "DIAG_CHIRP_SETTLE_MAX_S",
+    "chirpAmplitudeOverrides":  "DIAG_CHIRP_AMPLITUDE_OVERRIDES",
+    "positionKdMultipliers":    "DIAG_POSITION_KD_MULTIPLIERS",
+    # Runtime joint-order / IMU-role derivation (launch.py).
+    "mjOrderFromConfig": "DIAG_MJ_ORDER_FROM_CONFIG",
+    "mjOrderFile":       "DIAG_MJ_ORDER_FILE",
+    "imuRolesFile":      "DIAG_IMU_ROLES_FILE",
+    # Per-joint motor-gain override (gain-contract.md). Seven globals +
+    # seven NAME=VALUE override lists; the launcher splits the override
+    # CSVs into one --<gain>-override flag per entry.
+    "positionKp":          "DIAG_POSITION_KP",
+    "positionKi":          "DIAG_POSITION_KI",
+    "positionKd":          "DIAG_POSITION_KD",
+    "velocityKp":          "DIAG_VELOCITY_KP",
+    "velocityKi":          "DIAG_VELOCITY_KI",
+    "velocityKd":          "DIAG_VELOCITY_KD",
+    "torqueKp":            "DIAG_TORQUE_KP",
+    "positionKpOverrides": "DIAG_POSITION_KP_OVERRIDES",
+    "positionKiOverrides": "DIAG_POSITION_KI_OVERRIDES",
+    "positionKdOverrides": "DIAG_POSITION_KD_OVERRIDES",
+    "velocityKpOverrides": "DIAG_VELOCITY_KP_OVERRIDES",
+    "velocityKiOverrides": "DIAG_VELOCITY_KI_OVERRIDES",
+    "velocityKdOverrides": "DIAG_VELOCITY_KD_OVERRIDES",
+    "torqueKpOverrides":   "DIAG_TORQUE_KP_OVERRIDES",
+}
+
+# Policy-diagnostics fields whose rendered value should be omitted when
+# empty (the launcher treats "missing" and "empty" identically — see
+# build_diag_args, which guards each on a non-empty env). Keeps the
+# ConfigMap tidy in the common no-override case.
+DIAG_OMIT_IF_EMPTY: frozenset[str] = frozenset({
+    "jointBiasOverrides",
+    "chirpAmplitudeOverrides",
+    "returnRampS",
+    "mjOrderFromConfig",
+    "positionKpOverrides",
+    "positionKiOverrides",
+    "positionKdOverrides",
+    "velocityKpOverrides",
+    "velocityKiOverrides",
+    "velocityKdOverrides",
+    "torqueKpOverrides",
+})
+
+# Policy-diagnostics bool fields. launch.py compares DIAG_SKIP_IMU_TESTS /
+# DIAG_WAIT_FOR_START to the literal string "true", so a YAML scalar
+# true/false (Python bool) must render lowercase, not "True"/"False".
+DIAG_BOOL_FIELDS: frozenset[str] = frozenset({
+    "waitForStart",
+    "skipImuTests",
+})
+
+
+def cmd_get_policy_diagnostics_config_kv(cfg: dict) -> int:
+    """Emit DIAG_KEY=VALUE lines for the policy-diagnostics-config ConfigMap.
+
+    Operator overrides from the phantomPolicyDiagnostics block are layered
+    on top of DEFAULT_POLICY_DIAGNOSTICS so the pod always has a complete
+    set of knobs. Emitted in the stable order of DEFAULT_POLICY_DIAGNOSTICS
+    so the rendered ConfigMap diffs cleanly when one field changes.
+
+    Unlike the locomotion render this does NO tolerance->band expansion and
+    NO CSV splitting — those live in policy-diagnostics-tools' launch.py, so
+    every field maps straight to its DIAG_* env (raw tols, raw CSV lists).
+
+    Output is ASCII, no shell quoting, no comments — bootstrap's
+    policy-diagnostics-config phase drops each line into a YAML-quoted
+    `KEY: "VALUE"` entry.
+    """
+    block = cfg.get("phantomPolicyDiagnostics") or {}
+    if not isinstance(block, dict):
+        print(
+            "error: 'phantomPolicyDiagnostics' must be a mapping",
+            file=sys.stderr,
+        )
+        return 2
+
+    merged: dict[str, object] = dict(DEFAULT_POLICY_DIAGNOSTICS)
+    for k, v in block.items():
+        if k not in DEFAULT_POLICY_DIAGNOSTICS:
+            print(
+                f"error: phantomPolicyDiagnostics: unknown field {k!r} "
+                f"(permitted: {sorted(DEFAULT_POLICY_DIAGNOSTICS.keys())})",
+                file=sys.stderr,
+            )
+            return 2
+        merged[k] = v
+
+    lines: list[str] = []
+    for field in DEFAULT_POLICY_DIAGNOSTICS.keys():
+        raw = merged[field]
+        # YAML bool -> lowercase "true"/"false" for the bash-equality knobs;
+        # all other scalar types pass through str().
+        if field in DIAG_BOOL_FIELDS and isinstance(raw, bool):
+            value = "true" if raw else "false"
+        else:
+            value = str(raw)
+        if field in DIAG_OMIT_IF_EMPTY and value == "":
+            continue
+        lines.append(f"{DIAG_FIELD_TO_ENV[field]}={value}")
 
     print("\n".join(lines))
     return 0
@@ -1414,6 +1640,19 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # CI publishes a -aarch64 variant for Jetson.
         "stack": "core",
         "manifest_image": "foundationbot/phantom-dma-inference",
+    },
+    "policy-diagnostics": {
+        # policy-diagnostics DaemonSet (foundation.bot/has-policy-diagnostics
+        # gated, core stack). Standalone dma_diagnostic_node extracted from
+        # phantom-locomotion's mode=diagnostic path into its own image. Key
+        # matches the DaemonSet + has-policy-diagnostics label and the
+        # published image repo (no key/image indirection). The base manifest
+        # pins foundationbot/policy-diagnostics-tools:PLACEHOLDER; the host
+        # overrides via images.policy-diagnostics to a runnable tag (the
+        # repo's wheels-<tag> tags are NOT runnable — use the diagnostic
+        # node tag namespace, e.g. diagnostic-<ver>-aarch64).
+        "stack": "core",
+        "manifest_image": "foundationbot/policy-diagnostics-tools",
     },
     "cpp-robot-state-estimator": {
         # State-estimator DaemonSet (foundation.bot/has-state-estimator).
@@ -3393,6 +3632,33 @@ def cmd_validate(cfg: dict) -> int:
                         f"got {type(v).__name__}"
                     )
 
+    # phantomPolicyDiagnostics is optional; every field is optional and
+    # falls back to DEFAULT_POLICY_DIAGNOSTICS. Reject unknown fields (typo
+    # guard) and non-scalars (can't render into a ConfigMap data: entry).
+    # Same shape as the merge in cmd_get_policy_diagnostics_config_kv, and
+    # mirrors the phantomLocomotion.diagnostic scalar/bool acceptance.
+    ppd = cfg.get("phantomPolicyDiagnostics")
+    if ppd is not None:
+        if not isinstance(ppd, dict):
+            errors.append("'phantomPolicyDiagnostics' must be a mapping")
+        else:
+            permitted = sorted(DEFAULT_POLICY_DIAGNOSTICS.keys())
+            for k, v in ppd.items():
+                if k not in DEFAULT_POLICY_DIAGNOSTICS:
+                    errors.append(
+                        f"phantomPolicyDiagnostics: unknown field {k!r} "
+                        f"(permitted: {permitted})"
+                    )
+                    continue
+                # Scalars only — dict / list / None can't render cleanly
+                # into a ConfigMap data: entry.
+                if isinstance(v, bool) or isinstance(v, (str, int, float)):
+                    continue
+                errors.append(
+                    f"phantomPolicyDiagnostics.{k}: must be a scalar "
+                    f"(str/int/float/bool), got {type(v).__name__}"
+                )
+
     # Notes are purely informational (e.g. host-config drift from bundle
     # sidecar). They're printed regardless of error/success — operators
     # want to see expected overrides whether or not validation passed —
@@ -3434,6 +3700,8 @@ def main() -> int:
         return cmd_get_phantom_sonic_config_kv(cfg)
     if cmd == "get-phantom-psi-config-kv":
         return cmd_get_phantom_psi_config_kv(cfg)
+    if cmd == "get-policy-diagnostics-config-kv":
+        return cmd_get_policy_diagnostics_config_kv(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":
