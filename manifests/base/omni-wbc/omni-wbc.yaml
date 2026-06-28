@@ -1,0 +1,169 @@
+# omni-wbc — DaemonSet running the whole-body controller (WBC) locomotion
+# policy from the omni-wbc repo (the C++ 1 kHz DLT inference node). Gated on
+# foundation.bot/has-omni-wbc. This is the hardware-test deployment of the
+# C++ node documented at omni-wbc cpp/README.md.
+#
+# ── Image ────────────────────────────────────────────────────────────────
+# foundationbot/wolverine-dma-inference-cpp (the published artifact name;
+# the workload + node label are standardized as omni-wbc). omni-wbc
+# bin/release.sh builds + publishes it under the docker-versioning standard;
+# the runtime binary + libonnxruntime .so are arm64 (Thor Jetson), so a real
+# release is linux/arm64. SINGLE self-contained image: the 1 kHz C++ node +
+# libonnxruntime + the baked policy.onnx and drive_pack.npz (staged into
+# /artifacts at build). There is NO separate models image and NO
+# load-policies initContainer (unlike phantom-locomotion) — the
+# (binary, policy, drive-pack) triple ships as one SHA-paired artifact, so
+# the image tag alone names a known deployment. Per-robot tag is rewritten
+# by Kustomize from host-config.yaml's images.omni-wbc entry.
+#
+# ── CPU-only, no GPU ───────────────────────────────────────────────────────
+# The C++ node links onnxruntime's CPU provider (p50 0.074 ms / 1 kHz exact
+# on Thor) — it needs NO CUDA, so there is NO runtimeClassName: nvidia and
+# NO NVIDIA_* env. Posture mirrors cpp-robot-state-estimator: SYS_NICE (the
+# 1 kHz loop runs SCHED_FIFO) + IPC_LOCK (mlock), NOT full privileged — it
+# touches no /dev/input, no GPU, only POSIX SHM.
+#
+# ── SHM contract ───────────────────────────────────────────────────────────
+# Reads /dev/shm/actuals, writes /dev/shm/desired (positions-only; the DMA
+# master owns the tuned PD), plus a /config handshake — the same queues
+# DMA.ethercat's dma_main owns. hostIPC + the /dev/shm hostPath mirror the
+# `docker run --ipc host -v /dev/shm:/dev/shm` contract the node is built
+# against. dma_main itself runs as a bare-metal host systemd service, never
+# in k0s. The node speaks only SHM to the master; the OPTIONAL web console
+# sidecar (WEB_ENABLED=1) adds one TCP port, so the pod uses hostNetwork +
+# the containerPort below — reach it at http://<robot-ip>:8088. With no
+# WEB_TOKEN the console is observe-only (telemetry + e-stop, no arming).
+#
+# ── Mutual exclusion with the other /desired drivers ──────────────────────
+# positronic-control, phantom-locomotion, phantom-sonic, and omni-wbc all
+# drive /desired, so the host-config validator rejects has-omni-wbc together
+# with any of has-locomotion, has-sonic, or default-on has-positronic.
+# Operators migrating a robot to omni-wbc MUST set has-positronic: "false"
+# (and has-locomotion / has-sonic "false" if they were on) in nodeLabels.
+#
+# ── Hardware-test safety posture (Phase 1: OBSERVE-ONLY) ───────────────────
+# This manifest is the Phase-1 bring-up profile from omni-wbc
+# docs/plans/hw-experiment-1-safety-plan.md. Three invariants are baked as
+# explicit `env` (they intentionally OVERRIDE the optional ConfigMap so a
+# bench operator cannot silently hand a sub-converged policy authority over
+# the real robot):
+#   OBSERVE_ONLY=1   inference + black-box log run every cycle, but the node
+#                    writes NOTHING to /desired — the master never sees a
+#                    command. This is the safe default for a first hardware
+#                    test. Promoting to commanding (-observe-only off) is a
+#                    DELIBERATE, reviewed manifest edit, not a per-host CM
+#                    toggle — that is the moment the policy gains authority
+#                    over a physical robot.
+#   IMU_MOUNT=mk2-pelvis  mandatory on the real robot — undoes the IMU
+#                    site→body mount rotation (matches the C++ node's
+#                    --imu-mount mk2-pelvis). Wrong/absent here = OOD obs.
+#   ENABLE_GATE=/dev/shm/wolverine_enable  operator `touch`es this file on
+#                    the host (shared /dev/shm) to engage the loop, `rm`s it
+#                    to kill. The node blocks at startup until it exists.
+#                    (Path matches omni-wbc cpp/README's documented gate.)
+# Per-host / per-experiment knobs that do NOT grant authority (clip id,
+# rate, master-gain ceiling, authority ramp, log paths, joint unwrap) come
+# from the optional omni-wbc-config ConfigMap via envFrom; launch.sh carries
+# shell-defaults so the pod still starts before the CM is applied.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: omni-wbc
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: omni-wbc
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omni-wbc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omni-wbc
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-omni-wbc: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # Share the host IPC namespace + /dev/shm (mirrors `docker run --ipc host`).
+      hostIPC: true
+      # The web console binds a TCP port on the robot; hostNetwork puts it on the
+      # node's IP (http://<robot-ip>:8088) — no Service/ingress needed.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        - name: omni-wbc
+          image: foundationbot/wolverine-dma-inference-cpp:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT is /launch.sh (docker/dma_policy_cpp/launch.sh).
+          # It is env-driven — do NOT override command. LOCOMOTION_MODE=policy
+          # exec's the native node; =smoke runs the artifact-only self-test.
+          stdin: true
+          tty: true
+          ports:
+            # Web console (wolverine_web). hostNetwork → reachable at the node IP.
+            - { name: web, containerPort: 8088, hostPort: 8088 }
+          envFrom:
+            # Per-host knobs (clip id, rate, master gain, authority ramp, log
+            # paths, joint unwrap). bootstrap's omni-wbc-config phase renders
+            # this CM from host-config.yaml's omniWbc block; NOT in the
+            # GitOps tree, so ArgoCD doesn't reset per-host edits. optional:
+            # true → kubelet doesn't fail when it's missing (launch.sh
+            # shell-defaults kick in). NB: keys here CANNOT override the
+            # explicit safety env below (k8s `env` wins over `envFrom`) — by
+            # design for OBSERVE_ONLY / IMU_MOUNT / ENABLE_GATE.
+            - configMapRef:
+                name: omni-wbc-config
+                optional: true
+          env:
+            - { name: LOCOMOTION_MODE, value: "policy" }
+            # ── Phase-1 hardware-test safety invariants (see header) ──
+            - { name: OBSERVE_ONLY, value: "1" }
+            - { name: IMU_MOUNT,    value: "mk2-pelvis" }
+            - { name: ENABLE_GATE,  value: "/dev/shm/wolverine_enable" }
+            # ── web console: observe-only telemetry until WEB_TOKEN is set ──
+            - { name: WEB_ENABLED, value: "1" }
+            - { name: WEB_PORT,    value: "8088" }
+            - { name: LOG_DIR,     value: "/recordings" }
+            # WEB_TOKEN: set via the omni-wbc-config ConfigMap to unlock the
+            # arming/authority controls. Unset here ⇒ the console is read-only.
+          volumeMounts:
+            # /dev/shm carries the DMA queues (actuals/desired/config) AND
+            # the operator enable-gate file.
+            - { name: shm,        mountPath: /dev/shm }
+            # Black-box per-cycle CSV (LOG_CSV) + any artifacts the operator
+            # wants to `kubectl cp` off the robot. Same host tree the
+            # dma-recorder writes .rrd files to.
+            - { name: recordings, mountPath: /recordings }
+          resources:
+            # Guaranteed QoS (requests == limits, whole-number CPU) so k0s
+            # CPU Manager pins the pod and the 1 kHz SCHED_FIFO loop isn't
+            # preempted. Model is tiny + CPU-bound; 2 cores cover the busy
+            # loop + intra-op=2 ORT threads.
+            requests: { cpu: "2", memory: "1Gi" }
+            limits:   { cpu: "2", memory: "1Gi" }
+          securityContext:
+            # Mirrors cpp-robot-state-estimator: RT scheduling + mlock, no
+            # full privileged (no GPU, no /dev/input).
+            capabilities:
+              add:
+                - SYS_NICE   # SCHED_FIFO priority for the 1 kHz loop
+                - IPC_LOCK   # mlock the SHM working set
+
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
+        # DirectoryOrCreate matches phantom-locomotion + dma-recorder so the
+        # mount succeeds on robots that have never run dma-recorder.
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }

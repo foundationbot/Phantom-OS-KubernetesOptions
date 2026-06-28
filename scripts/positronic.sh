@@ -300,6 +300,7 @@ ${C_BOLD}Examples:${C_RESET}
   bash scripts/positronic.sh logs --previous --init
   bash scripts/positronic.sh exec
   bash scripts/positronic.sh exec locomotion
+  bash scripts/positronic.sh exec omni-wbc
   bash scripts/positronic.sh exec -- ros2 topic list
   bash scripts/positronic.sh exec locomotion -- sh
   bash scripts/positronic.sh sonic status
@@ -533,10 +534,12 @@ exec [<target>] [-- command...]
   Targets (default: positronic):
     positronic     positronic-control pod (positronic ns)
     locomotion     phantom-locomotion DaemonSet pod (positronic ns)
+    omni-wbc       omni-wbc DaemonSet pod (positronic ns)
 
   Examples
     bash scripts/positronic.sh exec                      # positronic shell
     bash scripts/positronic.sh exec locomotion           # locomotion shell
+    bash scripts/positronic.sh exec omni-wbc             # omni-wbc shell
     bash scripts/positronic.sh exec -- ros2 topic list   # one-off in positronic
     bash scripts/positronic.sh exec locomotion -- sh     # one-off in locomotion
 HELP
@@ -575,8 +578,13 @@ HELP
       APP_LABEL="app.kubernetes.io/name=phantom-locomotion"
       CONTAINER_NAME="phantom-locomotion"
       ;;
+    omni-wbc|wbc|omniwbc)
+      NAMESPACE="positronic"
+      APP_LABEL="app.kubernetes.io/name=omni-wbc"
+      CONTAINER_NAME="omni-wbc"
+      ;;
     *)
-      die "unknown target: $target (try 'positronic' or 'locomotion'; see exec --help)"
+      die "unknown target: $target (try 'positronic', 'locomotion', or 'omni-wbc'; see exec --help)"
       ;;
   esac
 
