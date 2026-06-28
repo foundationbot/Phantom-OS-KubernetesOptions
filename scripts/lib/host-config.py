@@ -810,6 +810,20 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     # full joint sweep at each Kd multiplier rung. Inert when
     # `testMode: joint-sweep`.
     "positionKdMultipliers":   "1.0",
+    # Absolute per-joint drive-gain overrides for the sweep, pushed once
+    # via /motor_params (use_gains=True) and reset to JSON-config defaults
+    # on exit. Comma-separated list of JOINT:FIELD=VALUE entries where
+    # FIELD is one of position_kp/ki/kd, velocity_kp/ki/kd, torque_kp:
+    #   setGains: "LeftHipPitch:velocity_kp=0.12, RightHipPitch:torque_kp=15.0"
+    # VALUE is ABSOLUTE (not a multiplier) and UNCLAMPED — the operator
+    # owns the bound. A 0 value is rejected (the /motor_params protocol
+    # reads a 0 field as "keep current", so it can't express an override).
+    # Default empty (no override). Applies in any testMode but is mutually
+    # exclusive with a multi-rung positionKdMultipliers ladder. Distinct
+    # from the policy-diagnostics gain-contract knobs (positionKp* /
+    # *Overrides) below, which are inert in the locomotion render. Mirrors
+    # jointBiasOverrides' omit-if-empty behaviour.
+    "setGains": "",
 }
 
 # Map host-config camelCase field names -> environment-variable name set
@@ -862,6 +876,7 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "chirpRrdDir":              "LOCOMOTION_DIAGNOSTIC_CHIRP_RRD_DIR",
     "chirpAmplitudeOverrides":  "LOCOMOTION_DIAGNOSTIC_CHIRP_AMPLITUDE_OVERRIDES",
     "positionKdMultipliers":    "LOCOMOTION_DIAGNOSTIC_POSITION_KD_MULTIPLIERS",
+    "setGains":                 "LOCOMOTION_DIAGNOSTIC_SET_GAINS",
 }
 
 # Fields that expand from a single `tol` value into a (BAND_LO, BAND_HI)
@@ -899,6 +914,9 @@ DIAGNOSTIC_OMIT_IF_EMPTY: frozenset[str] = frozenset({
     # uses the global `chirpAmplitudeRad`. Mirrors jointBiasOverrides
     # so a bare diagnostic config doesn't ship a blank env var.
     "chirpAmplitudeOverrides",
+    # setGains: empty means no gain override; omit so a bare diagnostic
+    # config doesn't ship a blank LOCOMOTION_DIAGNOSTIC_SET_GAINS.
+    "setGains",
 })
 
 # Diagnostic fields whose rendered ConfigMap value must be the

@@ -423,6 +423,7 @@ images:
 #   chirpAmplitudeOverrides:  ""                # see "Per-joint chirp amplitudes"
 #   positionKdMultipliers:    "1.0"             # single rung = no Kd override
 #                                                # Bode tuning sweep: "1.0,1.25,1.5,1.75,2.0"
+#   setGains:                 ""                # see "Per-joint gain override"
 #
 # waitForStart: when `true` (default), the diagnostic subscribes to
 # /phantom/start_startup (Bool) and blocks until the operator presses
@@ -537,6 +538,33 @@ images:
 # for ~45 min of bench time. Chirp-mode-only — inert when
 # `testMode: joint-sweep`. Maps to env
 # LOCOMOTION_DIAGNOSTIC_POSITION_KD_MULTIPLIERS.
+#
+# Per-joint gain override (`setGains`): comma-separated list of
+# JOINT:FIELD=VALUE entries that overrides individual drive PID gains
+# for the duration of the run. FIELD is one of:
+#   position_kp  position_ki  position_kd
+#   velocity_kp  velocity_ki  velocity_kd
+#   torque_kp
+# Example:
+#   setGains: "LeftHipPitch:velocity_kp=0.12, RightHipPitch:torque_kp=15.0"
+# The diagnostic pushes one MotorParametersData{use_gains=true} on
+# /motor_params before the sweep and resets every drive to its JSON-
+# config gains on exit/abort. Key properties:
+#   - VALUE is ABSOLUTE (a drive gain, not a multiplier of baseline) and
+#     is NOT clamped — the master applies it verbatim, so the operator
+#     owns the safe bound. Start near the CSP value and step gently.
+#   - A 0 value is REJECTED at launch: the /motor_params protocol reads a
+#     zero field as "keep current", so 0 cannot express an override.
+#     Omit the joint/field instead of setting it to 0.
+#   - Applies in any testMode, but CANNOT be combined with a multi-rung
+#     positionKdMultipliers ladder (both drive /motor_params).
+#   - torque_kp is frequently overwritten by the Novanta driver from
+#     drive SDO 0x243B, so a torque_kp override may not take on hardware
+#     — confirm against the master's /motor_params_applied readback.
+# This is the gain knob for the locomotion diagnostic sweep; it is
+# distinct from the policy-diagnostics gain-contract fields
+# (positionKp* / *Overrides), which are inert in this render. Default
+# empty (no override). Maps to env LOCOMOTION_DIAGNOSTIC_SET_GAINS.
 #
 # The default outPath lives on the DaemonSet's /recordings hostPath
 # mount (host /root/recordings, same path dma-recorder writes .rrd
