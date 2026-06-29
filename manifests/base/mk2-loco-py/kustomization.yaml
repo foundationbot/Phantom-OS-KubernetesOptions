@@ -7,3 +7,4 @@ kind: Kustomization
 # mk2-loco-py.yaml for the full safety posture + the IMU-verification gate.
 resources:
   - mk2-loco-py.yaml
+  - configmap.yaml

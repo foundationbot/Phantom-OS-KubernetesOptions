@@ -1,0 +1,33 @@
+# Per-host knobs for the mk2-loco-py DaemonSet, consumed via
+# `envFrom: configMapRef: mk2-loco-py-config` in mk2-loco-py.yaml.
+#
+# IMPORTANT — env precedence: the DaemonSet sets the three safety invariants
+# (OBSERVE_ONLY, IMU_MOUNT, ENABLE_GATE) and LOCOMOTION_MODE / RATE_HZ / WEB_PORT
+# / WEB_BIND as INLINE container `env`, which OVERRIDES anything here (k8s env
+# wins over envFrom). So setting those in this ConfigMap has NO effect — by
+# design, so a bench operator can't silently change the safety posture from a
+# ConfigMap edit. The only effective knob below is WEB_TOKEN (not set inline).
+#
+# WEB_TOKEN gates the web console's CONTROL POSTs (home/start/stop/twist/disable).
+#   - empty (default)  -> console is OBSERVE-ONLY: anyone on the robot LAN can
+#                         watch /status, but cannot command. E-STOP is always
+#                         accepted regardless. This is the safe shipping default.
+#   - set to a secret  -> paste the same value into the console's token box to
+#                         command. Note this still does NOTHING to the robot while
+#                         OBSERVE_ONLY=1 — it only unlocks the console's intent
+#                         path (twist/start), which you watch in telemetry until
+#                         you deliberately arm (see HARDWARE-RUNBOOK.md).
+#
+# Set a real token per-host: either edit this value via a bootstrap strategic-merge
+# overlay (same mechanism as positronic-config / as-inference-config), or, for a
+# quick bring-up, `kubectl -n positronic create configmap mk2-loco-py-config
+# --from-literal=WEB_TOKEN=<secret> --dry-run=client -o yaml | kubectl apply -f -`.
+# For an open/shared network, graduate WEB_TOKEN to a Secret + envFrom secretRef.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mk2-loco-py-config
+  namespace: positronic
+data:
+  # Observe-only until an operator sets a real token (see above).
+  WEB_TOKEN: ""
