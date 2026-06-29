@@ -86,7 +86,9 @@ Paste that token into the console's token box.
    ```
    The loop now *will* write `/desired` — but only once the dead-man exists.
 
-2. **Open the dead-man gate** (on the host; `/dev/shm` is a hostPath):
+2. **Open the dead-man gate.** Easiest: flip the **Enable gate** toggle in the
+   console (reflects the real file; arming needs the token, disabling is always
+   allowed). Or on the host (`/dev/shm` is a hostPath):
    ```bash
    touch /dev/shm/wolverine_enable     # engage
    ```
