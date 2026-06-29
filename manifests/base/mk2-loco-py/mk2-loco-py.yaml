@@ -39,13 +39,14 @@
 #                    status) every cycle but writes NOTHING to /desired. The safe
 #                    default for first hardware contact. Promoting to commanding
 #                    (OBSERVE_ONLY=0) is a DELIBERATE, reviewed manifest edit.
-#   IMU_MOUNT=mk2-pelvis  selects the pelvis-IMU body-frame rotation. ⚠ The pelvis
-#                    mount quat is currently UNVERIFIED in the node table (identity
-#                    passthrough) — the node logs a loud warning. BEFORE enabling
-#                    commands you MUST (a) confirm the robot's /config publishes
-#                    PelvisIMU (not TorsoIMU) and (b) verify the mount quat from
-#                    the console gravity/tilt telemetry during OBSERVE_ONLY. If
-#                    /config is torso, re-export the policy against the torso IMU.
+#   IMU_MOUNT (unset) the pelvis-IMU body-frame rotation is now BAKED into the
+#                    ONNX (observation_params.body_frame_quat = 0,0,1,0, a 180°
+#                    flip about Y) — derived from on-robot fall data (the robot
+#                    read gravity +z standing and shifted to -x falling forward).
+#                    Leave IMU_MOUNT unset so the node uses the baked rotation; a
+#                    non-empty IMU_MOUNT would OVERRIDE it. /config must publish
+#                    PelvisIMU. Still confirm gravity reads ~[0,0,-1] upright in
+#                    the console during OBSERVE_ONLY before arming.
 #   ENABLE_GATE=/dev/shm/wolverine_enable  operator dead-man: even with
 #                    OBSERVE_ONLY=0, no /desired is written until this file exists
 #                    (engage: `touch`; kill: `rm`).
@@ -102,7 +103,10 @@ spec:
             - { name: RATE_HZ,         value: "50" }   # Python node is 50 Hz (dt=0.02)
             # ── Phase-1 safety invariants (see header) ──
             - { name: OBSERVE_ONLY,    value: "1" }
-            - { name: IMU_MOUNT,       value: "mk2-pelvis" }
+            # IMU mount is BAKED into the ONNX (body_frame_quat 0,0,1,0). Leave
+            # IMU_MOUNT empty so the node uses the baked rotation; a non-empty
+            # value would override it (see header).
+            - { name: IMU_MOUNT,       value: "" }
             - { name: ENABLE_GATE,     value: "/dev/shm/wolverine_enable" }
             # ── web console: observe-only until WEB_TOKEN is set in the ConfigMap ──
             - { name: WEB_PORT,        value: "8088" }
