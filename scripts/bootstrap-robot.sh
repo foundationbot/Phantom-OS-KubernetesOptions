@@ -1390,6 +1390,18 @@ host_config() {
   if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
   phase "phase 4: host config"
 
+  # Ensure /etc/phantom exists so the dma-video cameras-config hostPath
+  # (type: FileOrCreate, /etc/phantom/head_camera.json) can be created by
+  # the kubelet. FileOrCreate creates the file but NOT its parent dir, so
+  # without this the camera pods stick in ContainerCreating with
+  # "head_camera.json: no such file or directory" even on a robot with no
+  # OAK config. ArgoCD does not manage this host path.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  mkdir -p /etc/phantom"
+  else
+    mkdir -p /etc/phantom && pass "/etc/phantom present (dma-video hostPath parent)"
+  fi
+
   # Always run — the script is internally idempotent (hosts.toml insert
   # is no-op when already present, daemon.json merge is no-op when the
   # entry exists). A previous skip-on-hosts.toml-only check could leave
