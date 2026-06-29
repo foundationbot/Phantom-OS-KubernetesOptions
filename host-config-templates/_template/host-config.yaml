@@ -272,7 +272,7 @@ images:
   # not an @sha256 digest); re-pin on each release. Mutually exclusive with the
   # other /desired drivers — set has-mk2-loco-py 'true' and the rest 'false'.
   # mk2-loco-py:
-  #   image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.7-loco-aarch64
+  #   image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.8-loco-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
