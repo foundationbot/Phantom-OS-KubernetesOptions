@@ -267,11 +267,12 @@ images:
   # has-sonic / has-omni-wbc / has-wolverine-loco all 'false'. Its own PYTHON image
   # co-located in the C++ node's repo foundationbot/dma-ghost-wbc-inference, tag
   # suffix -loco (the cpp node uses ""/"-aarch64"; -loco never moves cpp's tags).
-  # Uncomment on the host that opts in (Thor=arm64). Pinned by immutable @sha256
-  # digest (the :v0.1.0-beta.4-loco-aarch64 tag resolves to this); re-pin on each
-  # release.
+  # Uncomment on the host that opts in (Thor=arm64). Pin the immutable
+  # :vX.Y.Z-loco-aarch64 release tag (the host-config renderer expects repo:tag,
+  # not an @sha256 digest); re-pin on each release. Mutually exclusive with the
+  # other /desired drivers — set has-mk2-loco-py 'true' and the rest 'false'.
   # mk2-loco-py:
-  #   image: foundationbot/dma-ghost-wbc-inference@sha256:1f24c25dfac6b62e099020d1486f939f7f1665b629ae1c5b86eaebd891c47af8
+  #   image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.4-loco-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the

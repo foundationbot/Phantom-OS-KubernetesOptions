@@ -6,7 +6,7 @@ sensor → obs → ONNX → status loop and serves the console, but writes **not
 to `/desired`. Arming to actually command the robot is a **deliberate, supervised**
 step (below) — never the default.
 
-Image: `foundationbot/dma-ghost-wbc-inference@sha256:1f24c25d…` (the `:v0.1.0-beta.4-loco-aarch64` tag), arm64/Thor.
+Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.4-loco-aarch64` (immutable release tag; `@sha256:1f24c25d…`), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest.
 
 ---
 

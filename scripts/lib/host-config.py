@@ -1840,6 +1840,21 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         "stack": "core",
         "manifest_image": "foundationbot/wolverine-dma-inference-cpp",
     },
+    "mk2-loco-py": {
+        # mk2-loco-py DaemonSet — MK2 velocity-twist locomotion as the
+        # phantom-locomotion-style PYTHON node (50 Hz) + web console
+        # (foundation.bot/has-mk2-loco-py gated, default-off). Its OWN python
+        # image, co-located in the C++ node's repo
+        # foundationbot/dma-ghost-wbc-inference with the -loco tag suffix (the
+        # cpp node uses ""/"-aarch64"; -loco never moves the cpp tags). The
+        # base manifest pins foundationbot/dma-ghost-wbc-inference:PLACEHOLDER
+        # directly (repo == manifest_image -> retag only), so a host overrides
+        # the tag via images.mk2-loco-py. arm64/Thor. Pin the immutable
+        # :vX.Y.Z-loco-aarch64 release tag (digests aren't supported here —
+        # _split_image_ref expects repo:tag).
+        "stack": "core",
+        "manifest_image": "foundationbot/dma-ghost-wbc-inference",
+    },
 }
 
 
