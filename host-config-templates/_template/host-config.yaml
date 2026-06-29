@@ -840,6 +840,11 @@ nodeLabels:
   # 1 kHz node + teleop web-UI sidecar; mutually exclusive with
   # has-positronic/locomotion/sonic — all drive /desired)
   foundation.bot/has-wolverine-loco: 'false'
+  # mk2-loco-py DaemonSet (MK2 velocity-twist locomotion as the phantom-locomotion
+  # -style PYTHON node, 50 Hz, + web console; the Python sibling of omni-wbc /
+  # wolverine-loco. Mutually exclusive with has-positronic/locomotion/sonic/
+  # omni-wbc/wolverine-loco — all drive /desired)
+  foundation.bot/has-mk2-loco-py: 'false'
   # yovariable-server DaemonSet
   foundation.bot/has-yovariable: 'true'
 
