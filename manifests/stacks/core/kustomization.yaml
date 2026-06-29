@@ -38,3 +38,4 @@ resources:
   - ../../base/wm-inference
   - ../../base/as-inference
   - ../../base/wolverine-loco
+  - ../../base/mk2-loco-py
