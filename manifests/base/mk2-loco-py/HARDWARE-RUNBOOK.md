@@ -6,7 +6,7 @@ sensor → obs → ONNX → status loop and serves the console, but writes **not
 to `/desired`. Arming to actually command the robot is a **deliberate, supervised**
 step (below) — never the default.
 
-Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.6-loco-aarch64` (immutable release tag), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest. (beta.5 bakes the pelvis IMU mount `body_frame_quat 0,0,1,0`, derived from on-robot fall data.)
+Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.6-loco-aarch64` (immutable release tag), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest. (beta.6 bakes the pelvis IMU mount `body_frame_quat 0,0,1,0` from on-robot fall data, **and** fixes IMU name resolution `pelvis`→`pelvis_imu` so the policy actually receives IMU data — the original fall was the policy running blind.)
 
 ---
 
@@ -17,7 +17,7 @@ On the robot's **`/etc/phantomos/host-config.yaml`** (NOT the repo `_template`):
 ```yaml
 images:
   mk2-loco-py:
-    image: foundationbot/dma-ghost-wbc-inference@sha256:1f24c25dfac6b62e099020d1486f939f7f1665b629ae1c5b86eaebd891c47af8
+    image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.6-loco-aarch64
 nodeLabels:
   foundation.bot/has-mk2-loco-py:    'true'
   foundation.bot/has-positronic:     'false'   # default is 'true' — MUST flip
@@ -43,18 +43,20 @@ The console is on the robot's host network: **http://<robot-ip>:8088**
 (or `kubectl -n positronic port-forward ds/mk2-loco-py 8088:8088`).
 
 Verify, while `OBSERVE_ONLY=1`:
-1. **`/config` reports `PelvisIMU`** (not `TorsoIMU`). The node logs the mounted
-   IMUs at startup and warns that the `mk2-pelvis` mount quat is unverified.
-2. **Gravity / tilt telemetry is sane** — stand the robot level; projected-gravity
-   should read ~`[0,0,-1]`, tilt ≈ 0. Tip it; the vector should track. A wrong
-   mount shows up as gravity pointing the wrong way / tilt sign flipped.
+1. **IMU is plumbed** — startup log shows `config: … IMUs=['pelvis']` and
+   `pelvis_imu_proj_gravity: rotated by quat wxyz=[0.0, 0.0, 1.0, 0.0]`. If the IMU
+   name doesn't resolve, the policy runs **blind** on a default orientation — that
+   was the original fall (fixed in beta.6, but confirm it here).
+2. **Gravity / tilt telemetry is sane** — stand the robot level; tilt should be
+   small (a few °, matching the robot's real lean), **not ~180°**. Tip it forward;
+   tilt should grow and proj_gravity gain `+x`. A constant tilt regardless of pose
+   means the IMU isn't being read.
 3. **Joint positions/velocities** in `/status` match reality (units, signs, order).
 4. Optionally set a token and drive the console (Home → Start → twist) and watch
    the *would-be* actions in telemetry — still no motion under `OBSERVE_ONLY=1`.
 
-> If the IMU is torso-mounted, or the mount quat is wrong: fix `IMU_MOUNT` in
-> `mk2-loco-py.yaml` (or re-export the policy against the correct IMU frame)
-> **before** arming. Do not arm on an unverified mount.
+> The pelvis IMU mount (`body_frame_quat 0,0,1,0`, 180° about Y) is baked into the
+> image from on-robot fall data. Do not arm until observe-only tilt looks correct.
 
 ### Enable the console to command (still safe)
 Set a real `WEB_TOKEN` so you can issue start/twist (intent only, until armed):
