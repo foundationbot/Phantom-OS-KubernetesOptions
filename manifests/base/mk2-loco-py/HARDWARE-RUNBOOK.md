@@ -6,7 +6,7 @@ sensor → obs → ONNX → status loop and serves the console, but writes **not
 to `/desired`. Arming to actually command the robot is a **deliberate, supervised**
 step (below) — never the default.
 
-Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.10-loco-aarch64` (immutable release tag), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest. (beta.6 bakes the pelvis IMU mount `body_frame_quat 0,0,1,0` from on-robot fall data, **and** fixes IMU name resolution `pelvis`→`pelvis_imu` so the policy actually receives IMU data — the original fall was the policy running blind.)
+Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.11-loco-aarch64` (immutable release tag), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest. (beta.6 bakes the pelvis IMU mount `body_frame_quat 0,0,1,0` from on-robot fall data, **and** fixes IMU name resolution `pelvis`→`pelvis_imu` so the policy actually receives IMU data — the original fall was the policy running blind. beta.11 fixes a startup bug where a stale command left in `/dev/shm` from a prior session was replayed on pod restart, auto-homing the robot with no operator action — the node now boots in OFF and waits for a fresh operator command.)
 
 ---
 
@@ -17,7 +17,7 @@ On the robot's **`/etc/phantomos/host-config.yaml`** (NOT the repo `_template`):
 ```yaml
 images:
   mk2-loco-py:
-    image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.10-loco-aarch64
+    image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.11-loco-aarch64
 nodeLabels:
   foundation.bot/has-mk2-loco-py:    'true'
   foundation.bot/has-positronic:     'false'   # default is 'true' — MUST flip
