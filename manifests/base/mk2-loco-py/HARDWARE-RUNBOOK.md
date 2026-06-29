@@ -6,7 +6,7 @@ sensor → obs → ONNX → status loop and serves the console, but writes **not
 to `/desired`. Arming to actually command the robot is a **deliberate, supervised**
 step (below) — never the default.
 
-Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.5-loco-aarch64` (immutable release tag), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest. (beta.5 bakes the pelvis IMU mount `body_frame_quat 0,0,1,0`, derived from on-robot fall data.)
+Image: `foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.6-loco-aarch64` (immutable release tag), arm64/Thor. Pin by **tag** in host-config — the renderer expects `repo:tag`, not a digest. (beta.5 bakes the pelvis IMU mount `body_frame_quat 0,0,1,0`, derived from on-robot fall data.)
 
 ---
 
