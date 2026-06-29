@@ -8,9 +8,10 @@
 # policy exported from FreshEnv/omni_wbc without the C++ port.
 #
 # ── Image ────────────────────────────────────────────────────────────────────
-# foundationbot/wolverine-dma-inference, tag suffix -loco (built by omni-wbc CI
-# docker/dma_policy_loco; same repo as the DLT wheel image, never moves its
-# :latest/:beta). SINGLE self-contained image: numpy+onnx+onnxruntime+scipy +
+# foundationbot/dma-ghost-wbc-inference, tag suffix -loco (built by omni-wbc CI
+# docker/dma_policy_loco; its own PYTHON image co-located in the C++ node's repo,
+# the -loco suffix never collides with / moves the cpp :latest/:beta). SINGLE
+# self-contained image: numpy+onnx+onnxruntime+scipy +
 # dma_common wheel + the baked policy.onnx at /artifacts/policy.onnx (no models
 # carrier, no initContainer). Per-robot tag (e.g. :beta-loco, or pin an @sha256
 # digest) is rewritten by Kustomize from host-config.yaml's images.mk2-loco-py.
@@ -84,7 +85,7 @@ spec:
 
       containers:
         - name: mk2-loco-py
-          image: foundationbot/wolverine-dma-inference:PLACEHOLDER
+          image: foundationbot/dma-ghost-wbc-inference:PLACEHOLDER
           imagePullPolicy: IfNotPresent
           # ENTRYPOINT is dma_launch.sh; LOCOMOTION_MODE=policy forks the web
           # console + runs the node. Do NOT override command.

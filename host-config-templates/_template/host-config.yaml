@@ -206,6 +206,16 @@ stacks:
 #                          omni-wbc bin/release.sh publishes vX.Y.Z[-beta.N];
 #                          runtime is arm64 (Thor). Only pin on hosts that opt
 #                          in via nodeLabels has-omni-wbc: 'true'.
+#   mk2-loco-py            core stack — mk2-loco-py DaemonSet (MK2 velocity-twist
+#                          locomotion as the phantom-locomotion-style PYTHON node,
+#                          50 Hz, has-mk2-loco-py gated, default-off). SINGLE
+#                          self-contained image (numpy+onnx+onnxruntime+scipy +
+#                          dma_common wheel + baked policy.onnx at /artifacts);
+#                          its own PYTHON image co-located in the C++ node's repo
+#                          foundationbot/dma-ghost-wbc-inference, tag suffix -loco
+#                          (built by omni-wbc CI docker/dma_policy_loco). Ships
+#                          OBSERVE_ONLY=1; runtime is arm64 (Thor). Only pin on
+#                          hosts that opt in via nodeLabels has-mk2-loco-py: 'true'.
 images:
   positronic-control:
     image: foundationbot/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
@@ -252,6 +262,15 @@ images:
   # WBC ship gate is green the release is -beta.N (see omni-wbc bin/release.sh).
   # omni-wbc:
   #   image: foundationbot/wolverine-dma-inference-cpp:v1.0.0-beta.1
+  # mk2-loco-py is default-off (nodeLabels has-mk2-loco-py: 'false') and is in the
+  # /desired exclusion group — opting in REQUIRES has-positronic / has-locomotion /
+  # has-sonic / has-omni-wbc / has-wolverine-loco all 'false'. Its own PYTHON image
+  # co-located in the C++ node's repo foundationbot/dma-ghost-wbc-inference, tag
+  # suffix -loco (the cpp node uses ""/"-aarch64"; -loco never moves cpp's tags).
+  # Uncomment and pin the -loco release tag (Thor=arm64) only on the host that opts
+  # in; prefer an @sha256 digest.
+  # mk2-loco-py:
+  #   image: foundationbot/dma-ghost-wbc-inference:v0.1.0-beta.4-loco-aarch64
 
 # Optional dma-ethercat overrides. After phase 7 installs the .deb,
 # bootstrap writes DMA_CONFIG into /etc/dma/dma-ethercat.env so the
