@@ -49,4 +49,4 @@ spec:
         - name: cameras-config
           hostPath:
             path: /etc/phantom/head_camera.json
-            type: File
+            type: FileOrCreate

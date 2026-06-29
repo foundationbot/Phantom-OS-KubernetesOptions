@@ -40,18 +40,24 @@ data:
 
     db = db.getSiblingDB('ArgusDB');
 
-    print('Seeding Argus database...');
+    print('🌱 Seeding Argus database...');
+
+    // Drop existing data (optional - comment out if you want to preserve data)
+    // db.users.deleteMany({});
+    // db.login_credentials.deleteMany({});
+    // db.accesses.deleteMany({});
 
     // Operator UI App ID (used for access levels)
     const OPERATOR_UI_APP_ID = ObjectId("691bcf923433f53b6a11874d");
 
     // Insert apps (required for app_id validation during login)
+    // Backend uses "apps" collection with "access_level" defining allowed access values
     db.apps.insertMany([
       {
         _id: OPERATOR_UI_APP_ID,
         app_name: "Operator UI",
         is_active: true,
-        access_level: ["root", "admin", "supervisor", "operator"]
+        access_level: ["root", "admin", "operator", "external_operator", "dev"]
       }
     ]);
 
@@ -68,12 +74,16 @@ data:
           country_code: "+1",
           number: "LC2kQ7UwfPRjCxx1qT4UkA==:G4zbsEAANw/MSZ1LZweHLA=="
         },
-        is_verified: { phone: true, email: true, address: false },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.650641Z"),
         updated_at: new Date("2025-11-20T03:28:30.650641Z")
       },
-      {
+        {
         _id: ObjectId("cd4febde54a0ba1a19621952"),
         name: {
           first_name: "Juhnj8+2UZNM/hScNmEP6w==:+2oFaMGVqSlFinjnw/2yoQ==",
@@ -84,28 +94,16 @@ data:
           country_code: "+1",
           number: "Fr8aS0R1qivOyqg8A0FyFQ==:cvWEjcCD7IEEiAlbbydcyg=="
         },
-        is_verified: { phone: true, email: true, address: false },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.684809Z"),
         updated_at: new Date("2025-11-20T03:28:30.684809Z")
       },
-      {
-        _id: ObjectId("abc84accb3af2a3809a795eb"),
-        name: {
-          first_name: "3Itvw+vMztUFQ19PrCj5zg==:BihL2ce91x648ZKGwEI0Hw==",
-          last_name: "uGYQhB5z6gOExREV2Cxxjw==:SHTVYtcHltRlQwGwC8pPnA=="
-        },
-        email: "XBmy27i3QoQNvy3WRc5Smg==:0g9T+Pes3wFposmP/MPR9jfnTJFvhOVspq578vAuhl8=",
-        phone: {
-          country_code: "+1",
-          number: "XvK52ns0zXj+/OJPIdPaFg==:ysOZDlGcLkxAHjoDRRl22g=="
-        },
-        is_verified: { phone: true, email: true, address: false },
-        is_active: true,
-        created_at: new Date("2025-11-20T03:28:30.708590Z"),
-        updated_at: new Date("2025-11-20T03:28:30.708590Z")
-      },
-      {
+        {
         _id: ObjectId("7592cc9e8c1843d801637a13"),
         name: {
           first_name: "iD/JKf7TXXD/NiPVDJTDeg==:wl95E1ty5IxFJ08i3vcujQ==",
@@ -116,12 +114,16 @@ data:
           country_code: "+1",
           number: "7Z9NWEK+UJGkmnEhnT19Ng==:ABxgC5tce22PnlLOa9jGMg=="
         },
-        is_verified: { phone: true, email: true, address: false },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.732244Z"),
         updated_at: new Date("2025-11-20T03:28:30.732244Z")
       },
-      {
+        {
         _id: ObjectId("8db7177f5b555ea581add455"),
         name: {
           first_name: "8mGvv33L3IlGw/ChXaE5JQ==:lV5OJUDJYgDgVVJZ5GMTew==",
@@ -132,28 +134,16 @@ data:
           country_code: "+1",
           number: "tkxGjJgT6sln4rQO2EGNeQ==:t3WYBF6d7Lpg03U5r5Yezg=="
         },
-        is_verified: { phone: true, email: true, address: false },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.755729Z"),
         updated_at: new Date("2025-11-20T03:28:30.755729Z")
       },
-      {
-        _id: ObjectId("2d02a9ea6a25327d4cf29f19"),
-        name: {
-          first_name: "uWcKXRyaQid98gzwnpo4hg==:ooHwRHsqoTsFKCOWuogWvw==",
-          last_name: "ZwtbWflV2dly2CiECM28UA==:fjssrIP8KbaTIorMheLd4g=="
-        },
-        email: "Z06IAB7nuF/ZkiwePfVrzQ==:tYgathdb8nIPRUW/VUfNXLrf3TbT8oI9VrAPdmjE7z4=",
-        phone: {
-          country_code: "+1",
-          number: "RKcfhPFtbU6TAEqEYiA/Jw==:caW+2bvbFNaLkucDyWRICg=="
-        },
-        is_verified: { phone: true, email: true, address: false },
-        is_active: true,
-        created_at: new Date("2025-11-20T03:28:30.779277Z"),
-        updated_at: new Date("2025-11-20T03:28:30.779277Z")
-      },
-      {
+        {
         _id: ObjectId("b95249da26418f403252017f"),
         name: {
           first_name: "qLC5wYdKdOxRqtdFHuxfSQ==:wJXCvIoFgXrTlej9a6T83g==",
@@ -164,28 +154,16 @@ data:
           country_code: "+1",
           number: "HikOYiYCZ0sJecMuC8IZfA==:iqX8O/8T4ToVCPNuGkH/6A=="
         },
-        is_verified: { phone: true, email: true, address: false },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.802863Z"),
         updated_at: new Date("2025-11-20T03:28:30.802863Z")
       },
-      {
-        _id: ObjectId("3d1f1d21037c33f6931c6d23"),
-        name: {
-          first_name: "ofLWQ1DHWmUFpAT19V/aag==:Wozef+ioFlKlupMTOh6Sag==",
-          last_name: "wqZwMAOHDn+516PFaxtg0g==:3dPPYpg+EMnz7Hs1Qwn3cQ=="
-        },
-        email: "upEGXLIj/EVi21aakCW8JA==:Dw9NoPPIjjsk+RMrDApO9mmFoei9rpABz9A1pGjNScI=",
-        phone: {
-          country_code: "+1",
-          number: "90UAjJWfig1f8SwiwclILg==:frQhKJP7cfp7sd5RYpfC9g=="
-        },
-        is_verified: { phone: true, email: true, address: false },
-        is_active: true,
-        created_at: new Date("2025-11-20T03:28:30.826286Z"),
-        updated_at: new Date("2025-11-20T03:28:30.826286Z")
-      },
-      {
+        {
         _id: ObjectId("758fafd3bd024719c7e006fc"),
         name: {
           first_name: "bz6tJ6Kzheu0Htx/6wLj9Q==:g0OxEIGUmOY9IlzPp+QusA==",
@@ -196,104 +174,1112 @@ data:
           country_code: "+1",
           number: "VwMhjVxaPXiwbElSffEefw==:Mz1tGIOa7zinFY3YOuMkvA=="
         },
-        is_verified: { phone: true, email: true, address: false },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
         is_active: true,
         created_at: new Date("2025-11-20T03:34:24.079508Z"),
         updated_at: new Date("2025-11-20T03:34:24.079508Z")
+      },
+        {
+        _id: ObjectId("0d8c0b21d055fa1075f37a7f"),
+        name: {
+          first_name: "ksVtiwaIgc8MWWhKPq8FSg==:xnI58ufG6k0rp7R34V2pxw==",
+          last_name: "nbKjhwPRo7BRd8XhEGdQhw==:7YoChDlDG0OUSM4vwa71rA=="
+        },
+        email: "kEuoO104OINENuwf902Saw==:SGuZzeMHYQas5QuFGLGpbzZon0SbXLn0sp8tIzPErD4=",
+        phone: {
+          country_code: "+1",
+          number: "i9m9Q/2zUdohmujLe1IZxw==:zPM9P3vUNGI++as6TNKh5Q=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-01-14T00:00:00.000000Z"),
+        updated_at: new Date("2026-01-14T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("7bd39014ea05177144060f7e"),
+        name: {
+          first_name: "j2IwEMDYnWAOG6e9SZfTqQ==:H0dgufOAn3ZHS+KPkd4/Mw==",
+          last_name: "IYBgvV5OFE+5qEaj1SQ4ag==:V7CVijTspPC/GLtiQgS9qQ=="
+        },
+        email: "koEHp5wfvopV9iP+/CbU1w==:bmggROlCpJ0zVtFASuKgjqZHZL5WwIseq2NqnAMfNJk=",
+        phone: {
+          country_code: "+1",
+          number: "uRmwdh49inRfN3DF2aC8Gw==:vvXXeoEniqCUQrHFCQd+LA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-01-14T00:00:00.000000Z"),
+        updated_at: new Date("2026-01-14T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("018760953933226e9014cbed"),
+        name: {
+          first_name: "A6XNHRCW/G2gMMDnaEUi+Q==:CdqXaUm4IOtXpuZDDFnNXA==",
+          last_name: "SmlICnh34aE7okmw4tpP/Q==:V88ieWAqhXBDj1qL+F/s2A=="
+        },
+        email: "510OqHeqRWPn9wsF/PQV5w==:UHNJbzMNYqk7vJJUJPUfz5rOjEr+niF4bMsvpoMlGiAcyvh0SnixuzZlHCDqRFjG",
+        phone: {
+          country_code: "+1",
+          number: "ZuFZj3RQh32VftLOixnIAw==:ua6Ya7KBq2Gnq/iFm/jtFA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-01-15T00:00:00.000000Z"),
+        updated_at: new Date("2026-01-15T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("d98132b776d8dc9b498b3033"),
+        name: {
+          first_name: "FMrFUDy8LiCox0fzFCTRKw==:WXhJJ00RYQSaYo0/HILjNg==",
+          last_name: "o93Sesycjm6OZ/n6/hcdFQ==:pa4xvj4ux4KsIZpugRZaqQ=="
+        },
+        email: "oXEWn8HOPFXw3n//KpOzGw==:KeVrhnf77eiM7vlSkXw/uhLEaEmKzkQzvkq/qho5cPI=",
+        phone: {
+          country_code: "+1",
+          number: "5FY42r6bVz1IWoqFylB4Ww==:WWi+DRLWJRWujSsry5ohTw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-01-28T00:00:00.000000Z"),
+        updated_at: new Date("2026-01-28T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("9e52a57fd15e905e2fbc5ebf"),
+        name: {
+          first_name: "Ifm+l0VtT6gQabojVHGMJQ==:lIbO71CLiAQPFXGIqEJRcA==",
+          last_name: "vpLMqGqNkCi/e3qqSwbVtg==:Yxmlwpv9tjKf1wv43tGOeg=="
+        },
+        email: "EkkWKRapYJ2otMa0iXXxpw==:QFxao4A++JQDOWehiZRJqI8IZZVd8oh/eKmI1ITCHZA=",
+        phone: {
+          country_code: "+1",
+          number: "0s8h5NtuCIizZW5F2w0I/w==:f3IGqP+sPby1rC9sOBf1FA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-10T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-10T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("a9c47db9abfffbab5391e4b1"),
+        name: {
+          first_name: "KfZ2aKufgon+gM33u18oJg==:VYbkPMOZwirdP7PTo1zYLQ==",
+          last_name: "A30VfE5vk+IQPG+KvmTtJA==:r3Ovd4cOeF3F7K9bvd0GXg=="
+        },
+        email: "1f+oBPheVln71w1gCaz8nA==:VxhmZ+80kTk6d3e8BoUEPu/dW/cAZXIjpEFVg7EO/lQ=",
+        phone: {
+          country_code: "+1",
+          number: "3iJ+hugRP+HOFKexFLqnaQ==:2vLim+XcnW9inr0Q1RUWqQ=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-11T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-11T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("1aae4407cba7513015be6de4"),
+        name: {
+          first_name: "4KiAUjFhPiFdJfeHikPNdA==:hzob1nSX3w2TxG32BbaZkw==",
+          last_name: "kGXa+pD7YOKKwRMcMN8JxA==:p+rcRKkMdycLqjlOScImuw=="
+        },
+        email: "LedMoUQBf1JpQzJnnQHIIw==:6U7jFzmWSrq+0PoTzrKPKxbeI1XR3bdL16UWd2mkIcw=",
+        phone: {
+          country_code: "+1",
+          number: "Cns49Xr2ZQDprqHe+AUUXw==:1cTkwX7jLlpEa36ZZTj5Gw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-23T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-23T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("a461b1cd5e9a8df2eca6a42e"),
+        name: {
+          first_name: "hJ9CLziEIOS8hGUFcR0IoQ==:RHil21KWn21495liZeprBg==",
+          last_name: "F1Gsjuus/TVODLg10hexQA==:k7cnjm0cPg8QCCa7iAZwzQ=="
+        },
+        email: "SkO6YmbRXssWqrLvo1hRwQ==:0s5+JhR+CwTnfZULd3TIgHt3tbKXiDtN56weHZNhbXQ=",
+        phone: {
+          country_code: "+1",
+          number: "q18tlF1/dIPTnqSkZfXh2g==:TnJl5Q2aGcQert0c4aP1Mw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-23T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-23T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("d19c1b9568c53ce8e8da8c0b"),
+        name: {
+          first_name: "ruU1p8+tToocEsKqnTJe/Q==:Wy92sZvno2h8bAGeQM1Sug==",
+          last_name: "125EmAvzoMbKw1VYbj73fg==:xniuMt7AfYeJe6M2pZpE2A=="
+        },
+        email: "cC/l8kRjAASGn30V4sUaNA==:9pvkRNd05OxhBRB10ALkQPmoEtQDvXWJZmH5TyH4uT4=",
+        phone: {
+          country_code: "+1",
+          number: "CO90Zp7LnFbCWdWyC5aatw==:NiIBuKvflTqyz0u0+WMJmQ=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("b01f91660e3dc1250370dd5d"),
+        name: {
+          first_name: "BbUrFogR7B8diuAsRxWVfw==:dxkt/w6RQs2ABkWBaqtTLw==",
+          last_name: "L7RnpkihI3B781uFWeXWeQ==:SsOqhl6qS9LQwQ0x5CdnOA=="
+        },
+        email: "k9r8Be5/UvqXQZ658kdylw==:HFSZWfnoSWFjhDYD2cIjrZORN11yM7OOAUXbvjaWzok=",
+        phone: {
+          country_code: "+1",
+          number: "RphvEduh/dgx0ieuOaiWFQ==:5DgkIaBcSPBTdR3HXMd7eQ=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("0a0c4c96d29aa17a65ec15e8"),
+        name: {
+          first_name: "6TbLChXfyZ/JK3mamG0cmA==:Ta4vLJOi0gedNPiK6rfLmg==",
+          last_name: "toFfkPvnjrdsQrfBcTCObQ==:5E5d2UlXLh2+dfuGDt7keA=="
+        },
+        email: "U82JtJmgs/U2gL2q5bKiMQ==:LCfb90PD+DtSBsLyhQVq1Nx8bU6vRhlutAJdFubguUQ=",
+        phone: {
+          country_code: "+1",
+          number: "DisRN2IzMg1BCHlv8cHwCw==:guQwxnVq/Ry5+XkioMMu4A=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("f320e90d1b8e81e530c4a0b1"),
+        name: {
+          first_name: "mPoF+MVjMsoGu4GgM4gvrQ==:QpmlOfzN7N1fokKDqslXHg==",
+          last_name: "ooxZhsTpUf+VXVLp0u97wQ==:ZySR7OfaBfpo2Diyc6j3fQ=="
+        },
+        email: "PoXqdN2OiZi07uCbPQnBUw==:XDGHHE84N3t2QkHkaAO3q2q7P2SjqX6ehoZcgRGzVCo=",
+        phone: {
+          country_code: "+1",
+          number: "ECcDnUc9w/fKZnzbP+WkHg==:x959OuunL+rXtn9JXz+h2Q=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z"),
+        updated_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("1ea5ac7efe4a319b3352ba1e"),
+        name: {
+          first_name: "j4lK/cDae1L+UWuh+Yw7gg==:vDPgMarigl8gybHqgOnxMQ==",
+          last_name: "fTtzjMp8NJjdc+UF36Ig8Q==:zwslgbCvFm150UaGxivjng=="
+        },
+        email: "xnmXVNfrdjcQksGaQPdHyA==:f+0T0/d3eu2WZF1EKPWczIepIl4kbPjQZIbKLnFHVWI1sZthl2sTv9Wbm1NeV6jy",
+        phone: {
+          country_code: "+1",
+          number: "S/wJlCpEVKw5wdlryA1M3w==:OSz4L4J7CMUoukkw0VyWFA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-03-31T00:00:00.000000Z"),
+        updated_at: new Date("2026-03-31T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("c04d0014dde18317ba16968e"),
+        name: {
+          first_name: "8L0NKVuuBzDp7AoabnH2Mw==:beBUZPHBsXo+jWvxFgDwRg==",
+          last_name: "13JYMx/BGG4eOzWwSC6YXw==:QLk/GGtJfb+NGYlipmc4uA=="
+        },
+        email: "ZU75kC6auEFZmAi7Taoq2w==:chVxg2gVagOnYbwZcNSv5ortWIBUMX7nRJGFe7JaLbg=",
+        phone: {
+          country_code: "+1",
+          number: "C3o2Ny3zN9+nBY+4R3ImDQ==:VcAy8umSrSx0a+lEGWtGNg=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-01T00:00:00.000000Z"),
+        updated_at: new Date("2026-04-01T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("a1b2c3d4e5f6a7b8c9d0e1f2"),
+        name: {
+          first_name: "c8uPfDEIWXAJo9QXNr5R2g==:KNfqTiYkfGc/ojSNV4DXwA==",
+          last_name: "X8FRfojfeaf+U6MiFx+27Q==:erpYlAaBujvYpJJaix6Oew=="
+        },
+        email: "RpaN7ktI1iUAl8wJP5f5GA==:LHYvxQUs1zn5pvycPTH6iBic5YLGucj+c3v6mEAPwys=",
+        phone: {
+          country_code: "+49",
+          number: "6iOrQlQQ3fqERiEAvZJndA==:hHuzB4wVvWRV6v7zFdxUrw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-17T00:00:00.000000Z"),
+        updated_at: new Date("2026-04-17T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("b2c3d4e5f6a7b8c9d0e1f2a3"),
+        name: {
+          first_name: "LzflIiln1W7LJDk8tuIRWg==:bkmszLc3GiIZSkbua4y8Cg==",
+          last_name: "NM54AVr/Nm5tIkr92lJ3pw==:ki24H6h1jiaqbJ6SWlzpqQ=="
+        },
+        email: "sIX8BJcteBkgLG/zGDaQ3w==:yJBEmE4zoqRC+/BExb4O9O5TUdBj7SikZPccsEvQu7s=",
+        phone: {
+          country_code: "+1",
+          number: "UvbA4nTtj3eLyNR4bgkkUg==:8TB9Ka6skkt/Y33TBDeS5Q=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-17T00:00:00.000000Z"),
+        updated_at: new Date("2026-04-17T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("27f9c751acdf0b81309fde58"),
+        name: {
+          first_name: "MPTQ6HNSpoLMxAnNlQ7Vng==:4dgwBd/f+qtJyFMosjh8HQ==",
+          last_name: "gWcPj4u16Kpr7dBXsbikvQ==:JOE11PxbKdpaPlAxWkISXw=="
+        },
+        email: "vLZ4fjzxT0gVD1wdBNf/qA==:uzDHiSbgps4h4NPnKP2tYV5at07lFJov9tfBXLDPhQw=",
+        phone: {
+          country_code: "+1",
+          number: "wYGjXYz9oRmwW/nrzNR2Kg==:0vvIlYbnt9AJXffh20JhcA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-05-12T00:00:00.000000Z"),
+        updated_at: new Date("2026-05-12T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("5a759ef8c799b4838ab15ecf"),
+        name: {
+          first_name: "subkVFu2WeWsxolrxFnVOQ==:VJ1RxnJDUwHbuzYeR0yWxA==",
+          last_name: "82tHZ0KaHN71NfRNRbUIcg==:OUlvg/fxHMkbuWBVSF2sQg=="
+        },
+        email: "VSFqoq2/ECcxI+0mwvuI0w==:URWkO64I2k9Dy6W44pPhMrZFBNl+5VQXzYW9FPC2/Zw=",
+        phone: {
+          country_code: "+1",
+          number: "jMc4UwzpiVHbQ4Q2kr89EA==:S+OUCFCtPifIXHbpQAFplA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-05-12T00:00:00.000000Z"),
+        updated_at: new Date("2026-05-12T00:00:00.000000Z")
+      },
+      // ── Kansas site external operators ──
+      {
+        _id: ObjectId("2d117896cc33ee394d1c8bf8"),
+        name: {
+          first_name: "K9A9wXP96ECsytgKryEKKw==:++4LOn7asO4UcEvtqwagSA==",
+          last_name: "zc+CqGVaBp+OJaAZxpTOww==:v0rmaISZx3i8ibmcEtCIrw=="
+        },
+        email: "Amzul/Q8/Vm+jb7dVNq+dA==:lf7/dvqvHNP9O7IKGXgcPoPrJI0Y28VpxOHiyxtwZaY=",
+        phone: {
+          country_code: "+1",
+          number: "ALiUPZz3HDo0/OX5/RlLPA==:njw7KhAI2CeyCqt/wFJcWQ=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z"),
+        updated_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        _id: ObjectId("de803683ceb7e48320ca0c3c"),
+        name: {
+          first_name: "Y7eaQJUsTnsH7QGjLQNRrQ==:2lJkBHR14weQZav/JbJNKA==",
+          last_name: "jJs0W8pE4kOzqXrK0XIaMg==:M5TTYWk3wJ2k18PWPHFRDQ=="
+        },
+        email: "lmXeI7l0Xwc3ibiODGBlxA==:vFCRYjdq7HlMGzG9NTtV6z4GGSaqhgckaXAXesfYIkU=",
+        phone: {
+          country_code: "+1",
+          number: "TJgDkvF4lyz7QE7a3JWQOA==:DGFjetVZ/8yOXIJRhisxwQ=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z"),
+        updated_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        _id: ObjectId("afb1967eb805385730c1ad5f"),
+        name: {
+          first_name: "HyO8O5QNBuHFufRqyo0dOA==:OB3F07NG1yz8V0qqQay8Wg==",
+          last_name: "QsVnbwFXNtKfo5GeXSjPPQ==:lPp5GOL1450PSfxnxuAGQQ=="
+        },
+        email: "aRs0fyMbwRozNoKlpEWClQ==:rNZFIuLFMa6vEYMmPSCX9SDrsmpllckBPoO45kYn19OcS0qpfUrloeigzmkIvxut",
+        phone: {
+          country_code: "+1",
+          number: "WcH2G8R60b6S3SlqW5O0mA==:RNa96HgmHQOxXlOPq+mWww=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z"),
+        updated_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        _id: ObjectId("a32bee07e84b8cd18b2db1b8"),
+        name: {
+          first_name: "bT+JDtLAwmebamnngX0UlQ==:sps+QmFIGCqUzOmz3FQt4w==",
+          last_name: "Q8/l76HXTdRIt0t3LpzVsQ==:EeuSsJYTJQvIFjAGgouu/A=="
+        },
+        email: "6l7Zy/WXWLZEAConeRVI3A==:DVCfa256xW41iJxlamihFBRN0ftx9YEawC4Kp893npU=",
+        phone: {
+          country_code: "+1",
+          number: "qWWmeo8pnLPcmTSWZI6xFA==:QL/UOLEYWpRYHpHCuaWtEw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z"),
+        updated_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        _id: ObjectId("4cb3fe7b69b0d52d327a3f4c"),
+        name: {
+          first_name: "/3/9jU2AUNsqvf8WZvp8dw==:gZTa42IYo/dVdzpNqB41bQ==",
+          last_name: "cPcrraWR3sBnqiQmSR3qpQ==:uibETcc6zzxXgzcKmzzdMA=="
+        },
+        email: "Ei9jwj1yiKTf7qONCuAmxw==:GIldDOCvXmn6n019+n8770qhN5kz21fJ/S2Itn8FnFQ=",
+        phone: {
+          country_code: "+1",
+          number: "Xp+S+znH9u0KvaP3QaQHeA==:NKvjqlNUBd+/14VYAq97ug=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z"),
+        updated_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+      // garrett - Kansas site external operator
+      {
+        _id: ObjectId("a1e43a4fd20a5c7b115a1156"),
+        name: {
+          first_name: "uiogtPGUU1pTQe8uAjhx+w==:MxCJXuKLhs1GPJkDFihQoA==",
+          last_name: "ZxXPmQ0oEamPQvFGtMXxHg==:weuj57bz5mB01Pcb7zE18g=="
+        },
+        email: "OcqTZ5IUMaA2Fx0RPBAdOA==:5Hd6HOfNdgL2EszHsLv0k9Vs/O5LdCUxMPC0hYAtVRU=",
+        phone: {
+          country_code: "+1",
+          number: "Yw8LmGBZLcQ9oT67Hq8FeA==:m/uZqy4v1s2iabDvV9S2RA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-30T00:00:00.000000Z"),
+        updated_at: new Date("2026-04-30T00:00:00.000000Z")
+      },
+      // mason - Kansas site external operator
+      {
+        _id: ObjectId("48a2fef2f528ca8e1c755d8f"),
+        name: {
+          first_name: "TaFjzPcw0CkNPgU3StyDeA==:C4H9bkrSBeqvaHqgz0kvgw==",
+          last_name: "nXwqLbcP0vEPoa/DO1bJ3w==:ziGqPugIAzNS+L4Sm3+ySw=="
+        },
+        email: "O2/OgPXqQQepBmxn5bA3Qw==:QtWGrZLpJ1GZFoScL3AWUBsCA3TFvFK7zEc/IpjBweY=",
+        phone: {
+          country_code: "+1",
+          number: "oRGu9YsvHBZjUjGotfwtbw==:t9x3NWRfTujKT5+zCmgWNw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-04-30T00:00:00.000000Z"),
+        updated_at: new Date("2026-04-30T00:00:00.000000Z")
+      },
+        {
+        _id: ObjectId("7ae90bc59067aa24aebedbfe"),
+        name: {
+          first_name: "dSCY/N24m/Cw65iga3qcoA==:uDrnHwvcb7JoixTSPLbUBQ==",
+          last_name: "j2JXDyzHCRtPI949AQcriA==:oOqq5Rb/Vbm7KQTHUocnzg=="
+        },
+        email: "WdWexEUrqxIlRt9akjh2zg==:IySIZFibwyVxbOoOi/lnvuFkA4CtG6BqVE4Uxj3k1pw=",
+        phone: {
+          country_code: "+1",
+          number: "zOBAZENdShUjH0jFX+zeXQ==:eyd5v8cBt66aGqEAOqv7Nw=="
+        }
+        },
+      {
+        _id: ObjectId("c77f033ad3ea73b436ea0120"),
+        name: {
+          first_name: "kLx/pducyzUPy3IoVi+fdw==:JibQzXc7Cv94Nax1IjgJVA==",
+          last_name: "54bnni9Vsn2sKxHsQ8EA3w==:2uKclacivkv91o56T22SAg=="
+        },
+        email: "1XWW5KVb3Yojxk7cwpzbrA==:R//wI8Y7XSsJwm5CMrVa+sgOMVyztm57s38lVGUb1WY=",
+        phone: {
+          country_code: "+1",
+          number: "5m5g5uTZu/EFj4Wfx8sSuA==:hz6omgkaavKBs48/Byrl7w=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-05-19T03:04:37.772192Z"),
+        updated_at: new Date("2026-05-19T03:04:37.772192Z")
+      },
+        {
+        _id: ObjectId("6e73a898f4d73c098993289c"),
+        name: {
+          first_name: "N34IdbWAtEHmP8Q3Gr4Tnw==:edhRDN1GCJ7tICXa3jPBtg==",
+          last_name: "vKw9juCA2CbTbnRHvBkaSQ==:LYDvZL4aNEkDSwCPdqYXiA=="
+        },
+        email: "55ERWjoF/lChLj9GByLVZA==:lhOb3iCgqPTKejgJ4fMRd1WdpYRINFhZ3d8WWpxvLyE=",
+        phone: {
+          country_code: "+1",
+          number: "jFYA2yTlevsZ9Z123ysP2Q==:2X6QGjBGhRPudu7xGkcjrA=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-05-19T03:04:37.822409Z"),
+        updated_at: new Date("2026-05-19T03:04:37.822409Z")
+      },
+      // blair - operator
+      {
+        _id: ObjectId("2d0157e7b3b914788ab914ab"),
+        name: {
+          first_name: "AvHlp1EW0qXkvnEotsptSA==:1GWQMlKgIytvMI7oylDcOQ==",
+          last_name: "B4sU/sLTWvbP4zq2y1mgxQ==:ZIJ3DnPpAe1rZsDg6P0cKA=="
+        },
+        email: "hR4fDf7Vx1sEYaXMoprJKg==:HMgiKZcg7lY4x4cMPU5SJ/ciKNt2QjChPo61Dnf8bu4=",
+        phone: {
+          country_code: "+1",
+          number: "6/EBVqYpV8Ej5cjbrVtqVA==:DHwKqGwPOL8SjPXiue0mzg=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-06-03T22:31:59.488319Z"),
+        updated_at: new Date("2026-06-03T22:31:59.488319Z")
+      },
+      // mclaren - operator
+      {
+        _id: ObjectId("580d3d656fb61f437c9337c5"),
+        name: {
+          first_name: "KXiOkVEf8zo49vKuFNzXaA==:FoEu5G9NZc52FeRCcSY3Jw==",
+          last_name: "j74gJ4slHUXh8aY4ols2SA==:ZR0OS7w9iSoHeVq+Iwhgdw=="
+        },
+        email: "cVkee+naOa+UVCgJeQk8Rg==:4BAa/F7cIseIsAK4RUdVF37TW05MzWny14iXqZShnyY=",
+        phone: {
+          country_code: "+1",
+          number: "vnKQt6cqKkslebDVnqzh1Q==:rz5Ad2o5W9k8fg+iqDsUUw=="
+        },
+        is_verified: {
+          phone: true,
+          email: true,
+          address: false
+        },
+        is_active: true,
+        created_at: new Date("2026-06-03T22:31:59.488319Z"),
+        updated_at: new Date("2026-06-03T22:31:59.488319Z")
       }
     ]);
 
     // Insert login credentials (username is plaintext lowercase)
-    // Passwords: <username>123123 (e.g., greg123123), except uma which is Bot!@#123
     db.login_credentials.insertMany([
     {
         user_id: ObjectId("df2f1bf027de60b52258e580"),
         username: "greg",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$mE+zCGt+6nDIODRRj/TWrA$GnOCwTFUVYuhIjnL3kqu6decxFYaftZT9IVp7Th+B2w",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$4JgBZS9h5bSMEJw6kbhj+g$S6pO6f8MKLHbnPH2x1HjokCBOpYvVrUXxtZ1aT+GuVk",
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.650641Z")
       },
-      {
+        {
         user_id: ObjectId("cd4febde54a0ba1a19621952"),
         username: "sejin",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$E7J9Ub0TLggfE8vIfwvE9Q$a+5yF4Ccdm/VkZjl3utoX2oWoESvNjn618eT/yCkSos",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$/YYBMTU7xTk8NCiX1yPJ5A$VBoS6A2xqtGccGuV0dFglKgBGCCVZUJvw5Lezd/RS1I",
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.684809Z")
       },
-      {
-        user_id: ObjectId("abc84accb3af2a3809a795eb"),
-        username: "shahir",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$NgfPU4wGkTsVYHhreVCqjw$6PY/sc9zof6QUm4gJ1rwo3YBkm4WMLhIX0AaFrVGadI",
-        is_active: true,
-        created_at: new Date("2025-11-20T03:28:30.708590Z")
-      },
-      {
+        {
         user_id: ObjectId("7592cc9e8c1843d801637a13"),
         username: "frank",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$WBPZqf4bEuqmU/QByKEbVQ$2tkbj1FOfzLHEJ3Q/z5lnZN2ySXmpw9We/qZFB3kMAY",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$u5l9x7mt1ZfKbv5neKj5pA$LxloFp13QRZOiBie/I2XPJJwXwOvz2NKC7dNG7zdbo4",
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.732244Z")
       },
-      {
+        {
         user_id: ObjectId("8db7177f5b555ea581add455"),
         username: "liz",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$QF4TQj/m42ZiQZQaSgHH2w$/JniMTaH5G+6xfKMhYnEoWnhoSBvRYKiAprQronCstU",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$Kdo/N91h7nxitDfmgayYgQ$wN+iGaEr2BlLnBQyHnLnZ6aEIdmgQSDSZv6SaJC/O6c",
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.755729Z")
       },
-      {
-        user_id: ObjectId("2d02a9ea6a25327d4cf29f19"),
-        username: "gary",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$Wv19o4U1xa4KlsUzpQ0t8Q$LeJ2K9EYCQd716D2by87MA9qAVRPQLm0qFP+M3lc8Rg",
-        is_active: true,
-        created_at: new Date("2025-11-20T03:28:30.779277Z")
-      },
-      {
+        {
         user_id: ObjectId("b95249da26418f403252017f"),
         username: "gaurav",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$yekCYDBBN9QKAzk4ReHkug$7V7n0R3gWkZS+8dbZ6E2P4xQQfvPrROTh/T4GFz5geo",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$6NKL3BB11TTQlyhFsbfiIg$Jry6elgYjmznaQOdrR4C+SAUZODSrmbDpT7jEbE0c8Y",
         is_active: true,
         created_at: new Date("2025-11-20T03:28:30.802863Z")
       },
-      {
-        user_id: ObjectId("3d1f1d21037c33f6931c6d23"),
-        username: "felix",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$766eA0W3lDPvm5on6lXoMg$kAWH9EWnPGeyxtbJK340Mjj7XLSt9K45q9/wY2hUG8c",
-        is_active: true,
-        created_at: new Date("2025-11-20T03:28:30.826286Z")
-      },
-      {
+        {
         user_id: ObjectId("758fafd3bd024719c7e006fc"),
         username: "uma",
-        password: "$argon2id$v=19$m=65536,t=3,p=4$Dny5Ez2BPh8kv0TnTZQdNg$/ry7LxRVpWgYcU5gRazNt1j9xmttzVUrbTYex09YkMc",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$zIMyamzc+/aUeATjDB7DZw$FaVYJKuwfBGOodDEGGLBw4Doucvck6K9lJcdh4aYayQ",
         is_active: true,
         created_at: new Date("2025-11-20T03:34:24.079508Z")
+      },
+        {
+        user_id: ObjectId("0d8c0b21d055fa1075f37a7f"),
+        username: "sachet",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$epmTHosSPIri8auuoeZFog$X89qxspYzUzKMDQpRjoG0irfgFmTZqytLNcmi7wMPGo",
+        is_active: true,
+        created_at: new Date("2026-01-14T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("7bd39014ea05177144060f7e"),
+        username: "sankaet",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$r+CY7Kzv/SYnqug+hPfCGg$F50W95ckp0DPtzwdhn2zfTU1QJ2ClOq1Ka5km8xXl6k",
+        is_active: true,
+        created_at: new Date("2026-01-14T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("018760953933226e9014cbed"),
+        username: "akshat",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$chI1hGQRLOpDKE3MPAUNKQ$q8ONOkuPzBJkb0k9fjXbfpcsvEc5Z3WWIJKLygw189E",
+        is_active: true,
+        created_at: new Date("2026-01-15T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("d98132b776d8dc9b498b3033"),
+        username: "elio",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$ZGlM0K3tQF/EMOStOEps3Q$WGYlzenWXhnOKCEuo45afS2i7bNvoO3WR9GSJQTyrtA",
+        is_active: true,
+        created_at: new Date("2026-01-28T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("9e52a57fd15e905e2fbc5ebf"),
+        username: "jason",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$s4YN666QeAOz6A99+qsn8w$SgtojluE0YTrW7n5DV736OzgI3vbjpqXraajN/IYsoM",
+        is_active: true,
+        created_at: new Date("2026-02-10T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("a9c47db9abfffbab5391e4b1"),
+        username: "siddhant",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$NuK37SsvlLT3rdPph+7l8w$DCUVJis6HbZM9lFgZ1gErg55YzoDk+ZHaqBD5WBHhOo",
+        is_active: true,
+        created_at: new Date("2026-02-11T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("1aae4407cba7513015be6de4"),
+        username: "choon",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$zndBQ/XVtLpe2zGCQ873rw$YyMcc9otshVaDJ7iTDkkYjC0IDl89IzSGLUW8sZCNak",
+        is_active: true,
+        created_at: new Date("2026-02-23T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("a461b1cd5e9a8df2eca6a42e"),
+        username: "vasudev",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$sKSk8B86xVZ5JTeawbN4cw$OVDycLX8PXNM42ThKrrhPMLu27n/8mMdijtsAMLaXLk",
+        is_active: true,
+        created_at: new Date("2026-02-23T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("d19c1b9568c53ce8e8da8c0b"),
+        username: "sean",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$/omVySQcyyEmQXb3leI7Rg$FK2cgZEXaPxie6WdEqghuL4AScHlupXfbVewAl9K938",
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("b01f91660e3dc1250370dd5d"),
+        username: "mahadev",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$7pRpY8QQ4StskdaiTcV3vA$R+4aKfBqgn66WAuSmF9tb1sTsRH9wihVo74FD+9JasI",
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("0a0c4c96d29aa17a65ec15e8"),
+        username: "devesh",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$/PN7BtwUmoTBcXA7sYPZ5g$Dx9dIV369pgGX+Evsbq2lgEksm3x+YN2lKQwkIWkWkM",
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("f320e90d1b8e81e530c4a0b1"),
+        username: "smagt",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$A83ywkezy0jP8ZoYwvGmrQ$wuNbm8eDQbJtFwEl+5/Lnm6qf5qyU25dI2/ahf9lVb8",
+        is_active: true,
+        created_at: new Date("2026-02-24T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("1ea5ac7efe4a319b3352ba1e"),
+        username: "harrison",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$rVheMKjQN8++jveoJSs8JA$YseXBkD4nWZtXZwotf7jq/bR9gqAzPD0Qg+GqEZ3Rss",
+        is_active: true,
+        created_at: new Date("2026-03-31T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("c04d0014dde18317ba16968e"),
+        username: "jes",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$r5fZBdWf5Z8ZoKeUelj7+w$LO5/ozg0oHJGMVC0m2wRizkA5DqlrpUbGDqs4MVsd30",
+        is_active: true,
+        created_at: new Date("2026-04-01T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("a1b2c3d4e5f6a7b8c9d0e1f2"),
+        username: "karlma",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$+LxOb/8Nv6nokshaQGDN0g$v1DYWw9daOgvEpCT55SiKeL0m4pmRZDYd5X7vOo5NZs",
+        is_active: true,
+        created_at: new Date("2026-04-17T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("b2c3d4e5f6a7b8c9d0e1f2a3"),
+        username: "ole",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$hpwWc3cV5g0/IuUD2Vs1gA$1Mf0VKXeu9jlVqH4s2Chwtj9AtaQE+bGIRrW0OAtDis",
+        is_active: true,
+        created_at: new Date("2026-04-17T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("27f9c751acdf0b81309fde58"),
+        username: "karthik",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$o+Y3vZf9NigKcLleDncTSg$iCwpME+HNqObyZIEMZa0TvumYDBAL2katSQL9Y1DqC8",
+        is_active: true,
+        created_at: new Date("2026-05-12T00:00:00.000000Z")
+      },
+        {
+        user_id: ObjectId("5a759ef8c799b4838ab15ecf"),
+        username: "david",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$SH4xgy/+/pfSI9qmPtDIOw$0j/SMdLN6KbsoTdXhFJEFJPaGWxxhFKBTfYkrUtgAsM",
+        is_active: true,
+        created_at: new Date("2026-05-12T00:00:00.000000Z")
+      },
+      // ── Kansas site external operators ──
+      {
+        user_id: ObjectId("2d117896cc33ee394d1c8bf8"),
+        username: "cruz",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$f31YAjv6L2y8CjEtL3TfRg$OZvZDUzDn8N9LDkZLHFDTHt81KcqXG4CDAXA2mMcLLE",
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        user_id: ObjectId("de803683ceb7e48320ca0c3c"),
+        username: "dalton",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$cToirEG/aiyCNBaG5wt65A$rrcX8UfbyoJ7W1POOEod3FsLDxM6RwW8fMNFjdg4Gdw",
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        user_id: ObjectId("afb1967eb805385730c1ad5f"),
+        username: "nicolette",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$E2DH54UNLAALsHRqHxoOkw$ofjXo0+jYO8JK4ZeIDFYSWFa+e2JsKJv1dq0zCBZX+A",
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        user_id: ObjectId("a32bee07e84b8cd18b2db1b8"),
+        username: "tyler",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$p44P9+8EwWV6XaDNh5BAqg$qWaC9+XOlRkZSFuTvSKi/o0HiTIBZaWot20CqzOB4EM",
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+        {
+        user_id: ObjectId("4cb3fe7b69b0d52d327a3f4c"),
+        username: "viet",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$1TDMqZZAQUuSQ0nIHTu3Ag$iHibZDkNmEVcWJxpIiTX5es7Vk6YrX1fab5vUHo/Nc4",
+        is_active: true,
+        created_at: new Date("2026-04-23T23:00:22.951067Z")
+      },
+      // garrett - Kansas site external operator
+      {
+        user_id: ObjectId("a1e43a4fd20a5c7b115a1156"),
+        username: "garrett",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$FntxpCw5NBvOhkEmjpmpWQ$MUd1zHCIYRh10aVyMaNpNAytR2fJ+sVpyO96VGHCHqI",
+        is_active: true,
+        created_at: new Date("2026-04-30T00:00:00.000000Z")
+      },
+      // mason - Kansas site external operator
+      {
+        user_id: ObjectId("48a2fef2f528ca8e1c755d8f"),
+        username: "mason",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$5ksCz6jF9rEv9IMXJ9H3kQ$lVbXKNPuxnLVWSuvpotXRPw//G5i84DRsUmmUMKVR2I",
+        is_active: true,
+        created_at: new Date("2026-04-30T00:00:00.000000Z")
+      },
+      // serena - operator
+      {
+        user_id: ObjectId("7ae90bc59067aa24aebedbfe"),
+        username: "serena",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$rMdh9jmwA4ASHbZoNHs89A$pgqh9RfaYIT6U4iV1lP+6gynKFkamzHCWKQcwab9Jx4",
+        is_active: true,
+        created_at: new Date("2026-05-19T03:04:37.772192Z")
+      },
+      // karen - operator
+      {
+        user_id: ObjectId("6e73a898f4d73c098993289c"),
+        username: "karen",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$rqDwMvEag2zZDMPnX9XCBw$zgmPgl1ycnZt0r1CMQgRKlzpH9CLtaqgb86ArvnQrSQ",
+        is_active: true,
+        created_at: new Date("2026-05-19T03:04:37.822409Z")
+      },
+      {
+        user_id: ObjectId("c77f033ad3ea73b436ea0120"),
+        username: "raj.virginkar",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$fD0OPru8nvNL2QyFQIuK9w$6caNw8fH3v8tNUghyW8Xwe4fUcO51MHrHGs4noqO5ho",
+        is_active: true,
+        created_at: new Date("2026-05-22T19:04:44.050539Z")
+      },
+      // blair - operator
+      {
+        user_id: ObjectId("2d0157e7b3b914788ab914ab"),
+        username: "blair",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$Zntm7m0XWvqS2CSVsqJoAw$Da8wn9Y39i6urNOHpbrXf5eghZwCw9h3m3ZmBEKuy0U",
+        is_active: true,
+        created_at: new Date("2026-06-03T22:31:59.488319Z")
+      },
+      // mclaren - operator
+      {
+        user_id: ObjectId("580d3d656fb61f437c9337c5"),
+        username: "mclaren",
+        password: "$argon2id$v=19$m=65536,t=3,p=4$VqhJ1NNubIf8hHEPA71Rhg$RYLvWGdpNaL9X+FlTEYl2Gu5phGqCC3CppBEU84nuUU",
+        is_active: true,
+        created_at: new Date("2026-06-03T22:31:59.488319Z")
       }
     ]);
 
-    // Insert user accesses (RBAC)
-    db.accesses.insertMany([
-      { user_id: ObjectId("df2f1bf027de60b52258e580"), app_id: OPERATOR_UI_APP_ID, access: ["supervisor"] },
-      { user_id: ObjectId("cd4febde54a0ba1a19621952"), app_id: OPERATOR_UI_APP_ID, access: ["operator"] },
-      { user_id: ObjectId("abc84accb3af2a3809a795eb"), app_id: OPERATOR_UI_APP_ID, access: ["operator"] },
-      { user_id: ObjectId("7592cc9e8c1843d801637a13"), app_id: OPERATOR_UI_APP_ID, access: ["operator"] },
-      { user_id: ObjectId("8db7177f5b555ea581add455"), app_id: OPERATOR_UI_APP_ID, access: ["operator"] },
-      { user_id: ObjectId("2d02a9ea6a25327d4cf29f19"), app_id: OPERATOR_UI_APP_ID, access: ["operator"] },
-      { user_id: ObjectId("b95249da26418f403252017f"), app_id: OPERATOR_UI_APP_ID, access: ["admin"] },
-      { user_id: ObjectId("3d1f1d21037c33f6931c6d23"), app_id: OPERATOR_UI_APP_ID, access: ["admin"] },
-      { user_id: ObjectId("758fafd3bd024719c7e006fc"), app_id: OPERATOR_UI_APP_ID, access: ["root"] }
-    ]);
-
-    // Create indexes
+    // Create indexes for users collection
     db.users.createIndex({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: "string" } } });
     db.users.createIndex({ "phone.country_code": 1, "phone.number": 1 }, { unique: true, partialFilterExpression: { "phone.country_code": { $type: "string" }, "phone.number": { $type: "string" } } });
     db.users.createIndex({ "name.last_name": 1, "name.first_name": 1 });
+
+    // Create indexes for login_credentials collection
     db.login_credentials.createIndex({ username: 1 }, { unique: true });
     db.login_credentials.createIndex({ user_id: 1 }, { unique: true });
+
+    // Insert user accesses (RBAC collection - backend uses "accesses" with "access" field)
+    db.accesses.insertMany([
+      // greg - admin
+      {
+        user_id: ObjectId("df2f1bf027de60b52258e580"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // sejin - operator
+      {
+        user_id: ObjectId("cd4febde54a0ba1a19621952"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // frank - operator
+      {
+        user_id: ObjectId("7592cc9e8c1843d801637a13"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // liz - operator
+      {
+        user_id: ObjectId("8db7177f5b555ea581add455"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // gaurav - admin
+      {
+        user_id: ObjectId("b95249da26418f403252017f"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // uma - root
+      {
+        user_id: ObjectId("758fafd3bd024719c7e006fc"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["root"]
+      },
+      // sachet - dev
+      {
+        user_id: ObjectId("0d8c0b21d055fa1075f37a7f"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["dev"]
+      },
+      // sankaet - admin
+      {
+        user_id: ObjectId("7bd39014ea05177144060f7e"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // akshat - admin
+      {
+        user_id: ObjectId("018760953933226e9014cbed"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // elio - admin
+      {
+        user_id: ObjectId("d98132b776d8dc9b498b3033"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // jason - operator
+      {
+        user_id: ObjectId("9e52a57fd15e905e2fbc5ebf"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // siddhant - dev
+      {
+        user_id: ObjectId("a9c47db9abfffbab5391e4b1"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["dev"]
+      },
+      // choon - admin
+      {
+        user_id: ObjectId("1aae4407cba7513015be6de4"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // vasudev - operator
+      {
+        user_id: ObjectId("a461b1cd5e9a8df2eca6a42e"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // sean - operator
+      {
+        user_id: ObjectId("d19c1b9568c53ce8e8da8c0b"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // mahadev - operator
+      {
+        user_id: ObjectId("b01f91660e3dc1250370dd5d"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // devesh - operator
+      {
+        user_id: ObjectId("0a0c4c96d29aa17a65ec15e8"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // smagt - admin
+      {
+        user_id: ObjectId("f320e90d1b8e81e530c4a0b1"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // harrison - admin
+      {
+        user_id: ObjectId("1ea5ac7efe4a319b3352ba1e"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // jes - operator
+      {
+        user_id: ObjectId("c04d0014dde18317ba16968e"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // karlma - admin
+      {
+        user_id: ObjectId("a1b2c3d4e5f6a7b8c9d0e1f2"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // ole - admin
+      {
+        user_id: ObjectId("b2c3d4e5f6a7b8c9d0e1f2a3"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["admin"]
+      },
+      // karthik - operator
+      {
+        user_id: ObjectId("27f9c751acdf0b81309fde58"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // david - operator
+      {
+        user_id: ObjectId("5a759ef8c799b4838ab15ecf"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // ── Kansas site external operators ──
+      // cruz - external_operator
+      {
+        user_id: ObjectId("2d117896cc33ee394d1c8bf8"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // dalton - external_operator
+      {
+        user_id: ObjectId("de803683ceb7e48320ca0c3c"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // nicolette - external_operator
+      {
+        user_id: ObjectId("afb1967eb805385730c1ad5f"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // tyler - external_operator
+      {
+        user_id: ObjectId("a32bee07e84b8cd18b2db1b8"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // viet - external_operator
+      {
+        user_id: ObjectId("4cb3fe7b69b0d52d327a3f4c"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // garrett - Kansas site external operator
+      {
+        user_id: ObjectId("a1e43a4fd20a5c7b115a1156"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // mason - Kansas site external operator
+      {
+        user_id: ObjectId("48a2fef2f528ca8e1c755d8f"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["external_operator"]
+      },
+      // serena - operator
+      {
+        user_id: ObjectId("7ae90bc59067aa24aebedbfe"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // karen - operator
+      {
+        user_id: ObjectId("6e73a898f4d73c098993289c"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // raj - dev
+      {
+        user_id: ObjectId("c77f033ad3ea73b436ea0120"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["dev"]
+      },
+      // blair - operator
+      {
+        user_id: ObjectId("2d0157e7b3b914788ab914ab"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      },
+      // mclaren - operator
+      {
+        user_id: ObjectId("580d3d656fb61f437c9337c5"),
+        app_id: OPERATOR_UI_APP_ID,
+        access: ["operator"]
+      }
+    ]);
+
+    // Create indexes for accesses collection
     db.accesses.createIndex({ user_id: 1, app_id: 1 }, { unique: true });
     db.accesses.createIndex({ app_id: 1 });
 
-    print('Seeding completed successfully!');
+    print('✅ Seeding completed successfully!');
     print('Users created: ' + db.users.countDocuments({}));
     print('Login credentials created: ' + db.login_credentials.countDocuments({}));
     print('Accesses created: ' + db.accesses.countDocuments({}));
