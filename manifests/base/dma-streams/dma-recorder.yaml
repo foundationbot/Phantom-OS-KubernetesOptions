@@ -171,19 +171,54 @@ spec:
               : "${MAX_BYTES:=107374182400}"      # 100 GiB
               : "${CHECK_INTERVAL_SECONDS:=300}"  # 5 min
               echo "[janitor] retention=${RETENTION_DAYS}d max_bytes=${MAX_BYTES} interval=${CHECK_INTERVAL_SECONDS}s"
-              while true; do
-                # 1) Lifetime cap
-                find /recordings -maxdepth 1 -type f -name 'recording_*.rrd' \
-                     -mtime +"${RETENTION_DAYS}" -print -delete || true
 
-                # 2) Folder size cap — remove oldest until under MAX_BYTES
+              # A recording session is a SET of sibling files that share the
+              # main .rrd's basename: the data .rrd, the .rbl blueprint, the
+              # .meta.json manifest, the _sensors / _state_estimator sidecars,
+              # and the _journal.rrd produced by the journal-collector. Delete
+              # them as a unit — globbing only recording_*.rrd used to orphan
+              # the .rbl (and now the .meta.json / _journal.rrd) and let the
+              # folder-size accounting count bytes it could never reclaim.
+              rm_session() {
+                main="$1"
+                base="${main%.rrd}"
+                rm -f "${main}" \
+                      "${base}.rbl" \
+                      "${base}.meta.json" \
+                      "${base}_sensors.rrd" \
+                      "${base}_state_estimator.rrd" \
+                      "${base}_journal.rrd" \
+                      "${base}_journal.rrd.partial"
+              }
+
+              # Oldest-first list of MAIN .rrd files only (exclude the sidecar
+              # .rrd suffixes so each session is selected exactly once).
+              list_main() {
+                ls -1tr /recordings/recording_*.rrd 2>/dev/null \
+                  | grep -v -e '_sensors\.rrd$' \
+                            -e '_state_estimator\.rrd$' \
+                            -e '_journal\.rrd$' || true
+              }
+
+              while true; do
+                # 1) Lifetime cap — drop whole sessions older than RETENTION_DAYS.
+                find /recordings -maxdepth 1 -type f -name 'recording_*.rrd' \
+                     ! -name '*_sensors.rrd' \
+                     ! -name '*_state_estimator.rrd' \
+                     ! -name '*_journal.rrd' \
+                     -mtime +"${RETENTION_DAYS}" | while IFS= read -r f; do
+                  echo "[janitor] expired: $(basename "${f}")"
+                  rm_session "${f}"
+                done
+
+                # 2) Folder size cap — remove oldest session until under MAX_BYTES.
                 while :; do
                   used=$(du -sb /recordings 2>/dev/null | cut -f1 || echo 0)
                   if [ "${used:-0}" -le "${MAX_BYTES}" ]; then break; fi
-                  oldest=$(ls -1tr /recordings/recording_*.rrd 2>/dev/null | head -1 || true)
+                  oldest=$(list_main | head -1)
                   if [ -z "${oldest}" ]; then break; fi
-                  echo "[janitor] over budget (used=${used}); removing $(basename "${oldest}")"
-                  rm -f "${oldest}"
+                  echo "[janitor] over budget (used=${used}); removing session $(basename "${oldest}")"
+                  rm_session "${oldest}"
                 done
 
                 sleep "${CHECK_INTERVAL_SECONDS}"
@@ -206,6 +241,48 @@ spec:
             - name: recordings
               mountPath: /recordings
 
+        # ── Journal collector sidecar — bundles dma-ethercat journald logs ──
+        # Post-hoc: watches /recordings for sealed <base>.meta.json manifests
+        # the recorder drops, reads that recording's dma-ethercat journald
+        # slice via libsystemd, and writes a <base>_journal.rrd carrying the
+        # SAME (application_id, recording_id). The Rerun viewer then merges it
+        # onto the recording's timeline, so the logs scrub in lockstep with the
+        # telemetry (journald __REALTIME_TIMESTAMP and the recorder's
+        # "timestamp" timeline are both CLOCK_REALTIME epoch — no clock
+        # mapping). The blueprint's "Logs" tab (src/blueprint_builder.cpp)
+        # surfaces them via a TextLog view on /logs/**.
+        - name: journal-collector
+          image: foundationbot/dma-streams:SOF-1167-latest
+          imagePullPolicy: Always
+          command: ["dma_journal_collector"]
+          args:
+            - --recordings
+            - /recordings
+            - --journal-dir
+            - /var/log/journal
+            - --unit
+            - dma-ethercat
+            - --interval
+            - "30"
+          securityContext:
+            # Host journal files are owned root:systemd-journal; run as root to
+            # read them through the read-only mount. No privileged needed — the
+            # collector only reads /var/log/journal and writes /recordings.
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: recordings
+              mountPath: /recordings
+            - name: journal
+              mountPath: /var/log/journal
+              readOnly: true
+
       volumes:
         - name: dev-shm
           hostPath:
@@ -215,3 +292,11 @@ spec:
           hostPath:
             path: /root/recordings
             type: DirectoryOrCreate
+        # Host's persistent systemd journal — read-only so the collector can
+        # pull dma-ethercat's logs. Persistent journaling must be enabled on
+        # the host (/var/log/journal exists); if a host only has the volatile
+        # runtime journal, point this at /run/log/journal instead.
+        - name: journal
+          hostPath:
+            path: /var/log/journal
+            type: Directory
