@@ -183,6 +183,11 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
      "false",
      "omni-wbc DaemonSet (omni-wbc whole-body controller; mutually "
      "exclusive with has-locomotion, has-sonic and has-positronic)"),
+    ("foundation.bot/has-mk2-loco-py",
+     "false",
+     "mk2-loco-py DaemonSet (MK2 velocity-locomotion, phantom-locomotion-style "
+     "PYTHON node @50 Hz + in-container web console; mutually exclusive with "
+     "has-positronic/locomotion/sonic/omni-wbc/wolverine-loco — all drive /desired)"),
 )
 
 
@@ -3278,6 +3283,7 @@ def cmd_validate(cfg: dict) -> int:
                 "foundation.bot/has-psi-dma-walking", "false"
             )
             effective_wbc = nl.get("foundation.bot/has-omni-wbc", "false")
+            effective_mk2py = nl.get("foundation.bot/has-mk2-loco-py", "false")
             enabled_drivers = [
                 label
                 for label, eff in (
@@ -3288,6 +3294,7 @@ def cmd_validate(cfg: dict) -> int:
                     ("foundation.bot/has-psi", effective_psi),
                     ("foundation.bot/has-psi-dma-walking", effective_psi_dma),
                     ("foundation.bot/has-omni-wbc", effective_wbc),
+                    ("foundation.bot/has-mk2-loco-py", effective_mk2py),
                 )
                 if eff == "true"
             ]
@@ -3315,8 +3322,9 @@ def cmd_validate(cfg: dict) -> int:
                         "foundation.bot/has-locomotion, "
                         "foundation.bot/has-sonic, "
                         "foundation.bot/has-wolverine-loco, "
-                        "foundation.bot/has-psi and "
-                        "foundation.bot/has-omni-wbc are mutually exclusive — "
+                        "foundation.bot/has-psi, "
+                        "foundation.bot/has-omni-wbc and "
+                        "foundation.bot/has-mk2-loco-py are mutually exclusive — "
                         "only one may be \"true\" (got: "
                         f"{', '.join(enabled_drivers)})"
                     )

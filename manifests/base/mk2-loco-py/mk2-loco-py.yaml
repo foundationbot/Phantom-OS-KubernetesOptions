@@ -1,0 +1,125 @@
+# mk2-loco-py — DaemonSet running the MK2 velocity-twist LOCOMOTION policy as the
+# phantom-locomotion-style PYTHON node (numpy + onnxruntime), with the omni-wbc
+# web console forked in-container. Gated on foundation.bot/has-mk2-loco-py.
+#
+# This is the Python sibling of the C++ `omni-wbc` / `wolverine-loco` deployments:
+# same /actuals→/desired SHM contract and same host posture, but a 50 Hz Python
+# loop instead of the 1 kHz C++ node. Use it to bring up a velocity-locomotion
+# policy exported from FreshEnv/omni_wbc without the C++ port.
+#
+# ── Image ────────────────────────────────────────────────────────────────────
+# foundationbot/wolverine-dma-inference, tag suffix -loco (built by omni-wbc CI
+# docker/dma_policy_loco; same repo as the DLT wheel image, never moves its
+# :latest/:beta). SINGLE self-contained image: numpy+onnx+onnxruntime+scipy +
+# dma_common wheel + the baked policy.onnx at /artifacts/policy.onnx (no models
+# carrier, no initContainer). Per-robot tag (e.g. :beta-loco, or pin an @sha256
+# digest) is rewritten by Kustomize from host-config.yaml's images.mk2-loco-py.
+#
+# ── CPU-only ───────────────────────────────────────────────────────────────────
+# onnxruntime CPUExecutionProvider — NO CUDA / runtimeClassName / NVIDIA_*.
+#
+# ── SHM contract ───────────────────────────────────────────────────────────────
+# Reads /actuals, writes /desired (positions only; the DMA master keeps its tuned
+# PD), /config handshake — the queues DMA.ethercat's dma_main owns. hostIPC + the
+# /dev/shm hostPath mirror `docker run --ipc host -v /dev/shm:/dev/shm`. The web
+# console (forked by dma_launch.sh in policy mode) binds 8088; hostNetwork puts it
+# on the robot IP (http://<robot-ip>:8088). It talks to the node ONLY through
+# /dev/shm/mk2_loco_* files — the node owns every /desired write.
+#
+# ── Mutual exclusion ───────────────────────────────────────────────────────────
+# Writes /desired → in the positronic/locomotion/sonic/omni-wbc/wolverine-loco
+# mutual-exclusion group. A robot opting into mk2-loco-py MUST set has-positronic
+# / has-locomotion / has-sonic / has-omni-wbc / has-wolverine-loco all "false".
+#
+# ── Phase-1 hardware-test safety posture (OBSERVE-ONLY) ────────────────────────
+# Three invariants are baked as explicit `env` (they OVERRIDE the optional
+# ConfigMap — k8s env wins over envFrom — so a bench operator can't silently arm):
+#   OBSERVE_ONLY=1   the node runs the full loop (read /actuals → obs → ONNX →
+#                    status) every cycle but writes NOTHING to /desired. The safe
+#                    default for first hardware contact. Promoting to commanding
+#                    (OBSERVE_ONLY=0) is a DELIBERATE, reviewed manifest edit.
+#   IMU_MOUNT=mk2-pelvis  selects the pelvis-IMU body-frame rotation. ⚠ The pelvis
+#                    mount quat is currently UNVERIFIED in the node table (identity
+#                    passthrough) — the node logs a loud warning. BEFORE enabling
+#                    commands you MUST (a) confirm the robot's /config publishes
+#                    PelvisIMU (not TorsoIMU) and (b) verify the mount quat from
+#                    the console gravity/tilt telemetry during OBSERVE_ONLY. If
+#                    /config is torso, re-export the policy against the torso IMU.
+#   ENABLE_GATE=/dev/shm/wolverine_enable  operator dead-man: even with
+#                    OBSERVE_ONLY=0, no /desired is written until this file exists
+#                    (engage: `touch`; kill: `rm`).
+# Non-authority per-host knobs (WEB_TOKEN, rate, status paths) come from the
+# optional mk2-loco-py-config ConfigMap via envFrom.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mk2-loco-py
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: mk2-loco-py
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mk2-loco-py
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mk2-loco-py
+    spec:
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-mk2-loco-py: "true"
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      hostIPC: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: dockerhub-creds
+      terminationGracePeriodSeconds: 15
+
+      containers:
+        - name: mk2-loco-py
+          image: foundationbot/wolverine-dma-inference:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # ENTRYPOINT is dma_launch.sh; LOCOMOTION_MODE=policy forks the web
+          # console + runs the node. Do NOT override command.
+          stdin: true
+          tty: true
+          ports:
+            - { name: web, containerPort: 8088, hostPort: 8088 }
+          envFrom:
+            - configMapRef:
+                name: mk2-loco-py-config
+                optional: true
+          env:
+            - { name: LOCOMOTION_MODE, value: "policy" }
+            - { name: RATE_HZ,         value: "50" }   # Python node is 50 Hz (dt=0.02)
+            # ── Phase-1 safety invariants (see header) ──
+            - { name: OBSERVE_ONLY,    value: "1" }
+            - { name: IMU_MOUNT,       value: "mk2-pelvis" }
+            - { name: ENABLE_GATE,     value: "/dev/shm/wolverine_enable" }
+            # ── web console: observe-only until WEB_TOKEN is set in the ConfigMap ──
+            - { name: WEB_PORT,        value: "8088" }
+            - { name: WEB_BIND,        value: "0.0.0.0" }
+          volumeMounts:
+            - { name: shm,        mountPath: /dev/shm }
+            - { name: recordings, mountPath: /recordings }
+          resources:
+            requests: { cpu: "2", memory: "1Gi" }
+            limits:   { cpu: "2", memory: "1Gi" }
+          securityContext:
+            capabilities:
+              add:
+                - SYS_NICE   # loop scheduling headroom
+                - IPC_LOCK   # mlock the SHM working set
+
+      volumes:
+        - name: shm
+          hostPath: { path: /dev/shm, type: Directory }
+        - name: recordings
+          hostPath: { path: /root/recordings, type: DirectoryOrCreate }
