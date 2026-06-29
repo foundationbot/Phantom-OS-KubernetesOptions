@@ -84,6 +84,196 @@ About 30 minutes of operator attention. The setup wizard asks roughly
 
 ---
 
+## Choosing an install method
+
+There are two ways to get the container images onto the robot:
+
+- **Offline image bundle** — ship the multi-GB `.tar.zst` and import it
+  into containerd; zero runtime dependency on DockerHub. Best for
+  air-gapped robots, or when the robot↔registry link is slow/unreliable.
+  This is what the **Setup steps** section below covers (it uses all
+  three artifacts).
+- **Online (DockerHub pulls)** — skip the bundle entirely; the robot
+  pulls every image from DockerHub as pods schedule. Best when the robot
+  has its own decent internet (≳10 MB/s) and you'd rather not build and
+  ship a tens-of-GB bundle. Only the small control-plane `.deb` is
+  needed. See **Online install** immediately below.
+
+Rule of thumb: good internet on the robot → online; air-gapped or bad
+link → bundle. (Shipping a 47 GB bundle over a ~1 MB/s link takes ~9 h;
+pulling the same images over a 13 MB/s robot uplink is far faster.)
+
+---
+
+## Online install (DockerHub pulls — no image bundle)
+
+You need only **one** file: `phantomos-k0s-<version>-all.deb` (the
+control-plane package — `Architecture: all`, so the same file installs
+on amd64 and arm64). k0s/terraform binaries, the ArgoCD Helm chart, and
+every container image are fetched from the internet at install time.
+
+**Prerequisites**
+
+- Ubuntu 24.04, ~50 GB free.
+- **Outbound internet** to DockerHub *and* to the binary/chart sources
+  terraform uses (`get.k0s.sh`, `releases.hashicorp.com`,
+  `registry.terraform.io`, `argoproj.github.io`).
+- **DockerHub credentials** with read access to `foundationbot/*` (these
+  images are private).
+
+### 1. Install the control-plane `.deb`
+
+```bash
+sudo dpkg -i ./phantomos-k0s-<version>-all.deb
+```
+
+Drops the repo at `/opt/Phantom-OS-KubernetesOptions/` (scripts +
+manifests + the `.git` ArgoCD tracks). **Skip the image-bundle step
+entirely** — there is no bundle in this flow.
+
+### 2. Put DockerHub creds where bootstrap can read them
+
+Bootstrap's *seed-pull-secrets* phase builds the `dockerhub-creds`
+Secret from **root's** Docker config (it runs as root), so the file must
+be at **`/root/.docker/config.json`** — not your user's home:
+
+```bash
+sudo docker login          # writes /root/.docker/config.json
+# — or, if you already logged in as your user:
+sudo mkdir -p /root/.docker && sudo cp ~/.docker/config.json /root/.docker/config.json
+```
+
+> ⚠️ **The most common online-install failure.** If the creds live only
+> in your user `~/.docker/config.json`, `dockerhub-creds` gets created in
+> **no** namespace, every private pull fails with `insufficient_scope:
+> authorization failed` / `FailedToRetrieveImagePullSecret`, and pods sit
+> in `ImagePullBackOff`. Always put the creds under `/root/.docker/`.
+
+### 3. Configure the host
+
+```bash
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/configure-host.sh            # interactive wizard
+# — or stage /etc/phantomos/host-config.yaml directly, then:
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/configure-host.sh --validate
+```
+
+Key fields for an online install:
+
+- `gitSource: local` — ArgoCD tracks the on-disk `.git`.
+- `images:` — the `foundationbot/*` tags must match the robot's **arch**
+  (e.g. `…-arm64` / `…-aarch64` on a Jetson). `localhost:5443/*` images
+  (`phantom-models`, `phantom-policies`, `phantom-loco`) are **local-only
+  and not on DockerHub** — workloads needing them stay `ImagePullBackOff`
+  until those images are supplied; they're only needed to *run a policy*,
+  not for first bringup.
+- `cpuIsolation:` — set `enabled: false` to skip, or see **CPU isolation
+  without a motor bus** below.
+
+### 4. Bootstrap
+
+```bash
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
+     --robot <name> --yes --keep-going [--skip-ethercat-install]
+```
+
+- **`--keep-going`** — on Jetson/Tegra, `configure-inotify-limits.sh`
+  runs `sysctl --system`, which errors on `net.core.default_qdisc` (a
+  knob the Tegra kernel doesn't expose). That **cosmetic** failure
+  otherwise halts bootstrap *before* the gitops phase, so ArgoCD never
+  deploys. `--keep-going` continues past it — the inotify limits still
+  get set correctly.
+- **`--skip-ethercat-install`** — skip the dma-ethercat motor service
+  when no EtherCAT bus is connected. Phase 12 (ethercat) **hard-gates**
+  the gitops phase (this bypasses `--keep-going` on purpose), so a robot
+  with no powered motor bus never deploys ArgoCD without this flag.
+
+Bootstrap installs k0s, runs `terraform apply` to bring up ArgoCD (chart
++ providers pulled online), and applies the per-host Applications. Pods
+then pull their images from DockerHub.
+
+### 5. (RT robots) reboot to apply CPU isolation
+
+See **CPU isolation without a motor bus** below — the kernel `isolcpus`
+only takes effect after a reboot.
+
+### 6. Verify
+
+```bash
+sudo k0s kubectl get nodes
+sudo k0s kubectl get applications -n argocd
+sudo k0s kubectl get pods -A
+```
+
+Expect ArgoCD up and the `gaia` app `Healthy`. Pods still
+`ContainerCreating` are mid-pull (the full image set is tens of GB —
+allow time on the robot's link). Expected no-hardware failures:
+positronic-control (no GPU/models), dma-video (no cameras), DMA-plane
+workloads (no EtherCAT). ArgoCD UI: `https://<robot-ip>:30443`, user
+`admin`, the password you set — **default `1984` on a non-interactive
+bootstrap**; rotate with `bootstrap-robot.sh --argocd-admin`.
+
+---
+
+## CPU isolation without a motor bus
+
+You can lay down real-time CPU isolation *before* the EtherCAT hardware
+is wired. In `host-config.yaml`:
+
+```yaml
+cpuIsolation:
+  enabled: true
+  partitions:
+    - name: ecat
+      cpus: 10-13          # RT cores — 14-core Jetson Thor isolates 10-13
+  nic:
+    iface: ecat1
+    irqCore: 13
+    selector:
+      mac: <MAC of the port to become ecat1>   # REQUIRED non-interactive
+  dmaRtCpu: 11
+  installAffinityDefaults: true
+```
+
+> The `nic.selector` (MAC / PCI / driver+index) is **mandatory for a
+> non-interactive bootstrap** — without it the phase fails with `no
+> cpuIsolation.nic.selector and shell is not interactive`. Pick the port
+> you'll wire EtherCAT to; bootstrap renames it to `ecat1` via a
+> persistent udev rule (works with no cable attached). Omit the
+> `dmaEthercat:` block (and pass `--skip-ethercat-install`) so the motor
+> service isn't attempted with no bus.
+
+The cpu-isolation phase creates the `ecat` cgroup cpuset (active at
+runtime), renames+IRQ-pins the NIC, and writes the kernel cmdline
+(extlinux on Jetson, GRUB on x86) with
+`isolcpus=domain,managed_irq,<cores>`, `rcu_nocb_poll`, `skew_tick=1`,
+`irqaffinity=<housekeeping>`. **A reboot is required** for `isolcpus` to
+take effect:
+
+```bash
+# Eyeball the new cmdline FIRST — a timestamped backup is saved beside it:
+sudo grep APPEND /boot/extlinux/extlinux.conf       # Jetson  (GRUB: /etc/default/grub)
+sudo reboot
+# after it returns:
+cat /sys/devices/system/cpu/isolated                # == your RT cores, e.g. 10-13
+systemctl is-active cpusets.service                  # active
+ip -br link | grep ecat1                             # the renamed NIC
+```
+
+> ⚠️ **Jetson has no in-place cmdline rollback.** If the new
+> `extlinux.conf` doesn't boot, recovery needs boot media. Confirm the
+> `APPEND` line still contains all the *original* boot args (it should be
+> the old line **plus** the RT tokens) before you reboot. Backup:
+> `extlinux.conf.bak.<timestamp>`.
+
+When the motor bus is later connected, finish the RT stack:
+
+```bash
+sudo vim /etc/phantomos/host-config.yaml            # set dmaEthercat.configPath: phantom-NNNN.json
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --install-dma-ethercat
+```
+
+---
+
 ## Setup steps
 
 ### 1. Install the control-plane `.deb`
@@ -546,6 +736,25 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-o
 
 ## Common things that bite
 
+- **(online install) every private pull is `ImagePullBackOff` /
+  `insufficient_scope: authorization failed` / `FailedToRetrieveImagePullSecret`** —
+  `dockerhub-creds` was never created because the creds weren't in
+  **`/root/.docker/config.json`** (bootstrap seeds from root's home, not
+  yours). Fix: `sudo docker login` (or copy your config into
+  `/root/.docker/`), then `bootstrap-robot.sh --seed-pull-secrets` and
+  delete the stuck pods so they retry.
+- **(Jetson/Tegra) bootstrap halts at phase 4 with `configure-inotify-limits.sh`
+  FAIL** (`sysctl: setting key "net.core.default_qdisc": No such file or
+  directory`) — the Tegra kernel doesn't expose that sysctl, so
+  `sysctl --system` returns non-zero. It's cosmetic (inotify limits are
+  still set), but bootstrap bails at the first failure, so **gitops never
+  runs**. Re-run with `--keep-going`.
+- **bootstrap finishes but ArgoCD/workloads never deployed (only
+  kube-system pods)** — a phase before gitops failed. The usual culprits
+  on a dev/no-hardware robot are the two above, or the **phase-12
+  ethercat gate** firing because a `dmaEthercat:` block is present with no
+  motor bus. Run with `--skip-ethercat-install` (and/or remove the
+  `dmaEthercat:` block) so phase 12 is skipped and gitops can run.
 - **`data bundle not extracted`** during `dpkg -i` of the image `.deb` —
   you ran `dpkg -i` directly without extracting the sidecar first.
   Use `install-image-bundle.sh` instead — it handles both steps.
@@ -598,9 +807,17 @@ sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh --image-o
 ## Reference: command cheat sheet
 
 ```bash
-# install
+# install (offline bundle method)
 sudo dpkg -i ./phantomos-k0s-*-all.deb
 sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/install-image-bundle.sh ./
+
+# install (ONLINE / DockerHub-pull method — no bundle)
+sudo dpkg -i ./phantomos-k0s-*-all.deb
+sudo docker login                                                                          # creds -> /root/.docker
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/configure-host.sh                       # gitSource: local
+sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/bootstrap-robot.sh \
+     --robot <name> --yes --keep-going --skip-ethercat-install                              # RT/dev, no motor bus
+sudo reboot                                                                                 # if cpuIsolation enabled (apply isolcpus)
 
 # configure + bootstrap
 sudo bash /opt/Phantom-OS-KubernetesOptions/scripts/configure-host.sh
