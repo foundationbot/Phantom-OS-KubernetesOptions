@@ -49,9 +49,14 @@ printf '%s\n' "$CONF_CONTENT" > "$CONF_FILE"
 chmod 644 "$CONF_FILE"
 echo "wrote $CONF_FILE"
 
-# Apply the new limits to the running kernel. --system reloads every
-# drop-in; harmless and keeps us consistent with however the host is
-# already tuned.
-sysctl --system >/dev/null
+# Apply the new limits to the running kernel. Apply ONLY our drop-in
+# (not `sysctl --system`): --system re-applies every drop-in on the host,
+# and on some kernels (e.g. Tegra/Jetson) an unrelated pre-existing
+# drop-in sets a key the kernel doesn't expose (e.g.
+# net.core.default_qdisc). `sysctl --system` returns non-zero on that,
+# which would fail this script and halt bootstrap before gitops. Loading
+# just our file sets the inotify limits without depending on the rest of
+# the host's sysctl tree.
+sysctl -p "$CONF_FILE" >/dev/null 2>&1 || true
 echo "applied inotify limits:"
 sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches
