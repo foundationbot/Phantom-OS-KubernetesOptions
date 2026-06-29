@@ -395,14 +395,27 @@ Common-and-expected failures:
   bug.
 - **No OAK cameras**: dma-video producer/viewer exit cleanly and
   Kubernetes restarts them indefinitely → CrashLoopBackOff. Also
-  environmental.
-- **dma-video pods `Pending` with `head_camera.json is not a file`**:
-  the `dma-video` pods mount the per-host OAK config from
-  `/etc/phantom/head_camera.json` (hostPath, `type: File`); it isn't
-  created by the install. Create it from the robot's **OAK module ID
-  (MXID)** — see [operations.md §7.21](operations.md#721-dma-video-pods-pending--etcphantomhead_camerajson-missing).
-  On a host with no OAK hardware, set `foundation.bot/has-cameras: 'false'`
-  in host-config `nodeLabels:` so the stack isn't scheduled.
+  environmental. On a host with no OAK hardware, set
+  `foundation.bot/has-cameras: 'false'` in host-config `nodeLabels:` so
+  the stack isn't scheduled.
+- **dma-video pods stuck `ContainerCreating` with `head_camera.json …
+  no such file or directory`**: the pods mount the per-host OAK config
+  from `/etc/phantom/head_camera.json` (hostPath `type: FileOrCreate`).
+  FileOrCreate makes an empty file but **not its parent dir**, so
+  bootstrap's host-config phase does `mkdir -p /etc/phantom`. If you hit
+  this the dir is missing — `sudo mkdir -p /etc/phantom` and the pods
+  schedule. For real multi-cam config, create the file from the robot's
+  **OAK module ID (MXID)** — see
+  [operations.md §7.21](operations.md#721-dma-video-pods-pending--etcphantomhead_camerajson-missing).
+- **OAK producer CrashLoops `No OAK devices found` though a camera is
+  plugged in** — the OAK isn't enumerating. USB autosuspend must be off
+  **both** ways (`scripts/configure-usb-power.sh` does both): the OAK
+  udev rule **and** `usbcore.autosuspend=-1` on the kernel cmdline
+  (extlinux/GRUB; **reboot to apply**) — the udev rule alone is not
+  enough. If `lsusb` still shows no `03e7` and `dmesg` shows
+  descriptor-read errors (`-32`/`-71`), it's physical: use a **direct
+  USB-3 port** (not a USB-2 hub chain), a **data-capable cable**, and
+  **proper power** (OAK-D Y-adapter/barrel).
 
 ### 6. Access the ArgoCD UI
 
