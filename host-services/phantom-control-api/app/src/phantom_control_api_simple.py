@@ -776,6 +776,66 @@ async def get_service_logs(service_name: str = 'positronic_control', lines: int 
     return result
 
 
+@app.get("/service/loki-logs", response_model=ServiceLogsResponse)
+async def get_service_loki_logs(service_name: str = 'dma-ethercat', lines: int = 200):
+    """
+    Get logs for a host service from Loki (gaia log store).
+
+    Unlike /service/logs (live journalctl on this host), this returns
+    history that survives restarts and aggregates the related labels
+    (e.g. for dma-ethercat: the unit, the RT .master, and the spine
+    bridges). Loki endpoint is configurable via the LOKI_URL env var
+    (default http://localhost:10310; gaia runs hostNetwork).
+
+    **Query parameters:**
+    - `service_name` (optional): host service (default: 'dma-ethercat')
+    - `lines` (optional): max lines (default: 200, max: 1000)
+    """
+    import time
+    import httpx
+
+    if lines > 1000:
+        lines = 1000
+
+    loki_url = os.environ.get("LOKI_URL", "http://localhost:10310").rstrip("/")
+    # dma-ethercat: match the unit + RT .master + spine bridges. Others: <name>.* .
+    if service_name == "dma-ethercat":
+        selector = '{service_name=~"dma-ethercat.*|dma-(boundary|loop-event)-bridge.service"}'
+    else:
+        selector = '{service_name=~"%s.*"}' % service_name
+
+    end_ns = time.time_ns()
+    start_ns = end_ns - 3600 * 1_000_000_000  # last hour
+    params = {
+        "query": selector,
+        "limit": str(lines),
+        "start": str(start_ns),
+        "end": str(end_ns),
+        "direction": "backward",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{loki_url}/loki/api/v1/query_range", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        entries = []  # (ts_ns, line)
+        for stream in data.get("data", {}).get("result", []):
+            for value in stream.get("values", []):
+                entries.append((int(value[0]), value[1]))
+        entries.sort(key=lambda e: e[0])  # chronological
+        logs = [line for _, line in entries][-lines:]
+        return ServiceLogsResponse(
+            service_name=service_name, source="loki", lines=len(logs),
+            logs=logs, timestamp=datetime.now().isoformat(),
+        )
+    except Exception as e:
+        return ServiceLogsResponse(
+            service_name=service_name, source="loki", lines=0, logs=[],
+            timestamp=datetime.now().isoformat(),
+            error=f"Loki query failed ({loki_url}): {e}",
+        )
+
+
 @app.get("/service/logs/stream")
 async def stream_service_logs(service_name: str = 'positronic_control'):
     """
