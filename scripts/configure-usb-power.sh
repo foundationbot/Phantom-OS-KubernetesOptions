@@ -29,6 +29,7 @@ set -eu
 
 RULES_DIR=/etc/udev/rules.d
 RULE_FILE="$RULES_DIR/71-oak-usb-power.rules"
+USB3_RULE_FILE="$RULES_DIR/81-oak-usb3.rules"
 
 read -r -d '' RULE_CONTENT <<'EOF' || true
 # Luxonis OAK cameras — disable USB autosuspend so libusb claim and
@@ -43,6 +44,22 @@ ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03e7", \
 # producer runs as root so this is belt-and-suspenders, but it matches
 # the upstream DepthAI setup and unblocks any non-root tooling.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"
+EOF
+
+read -r -d '' USB3_RULE_CONTENT <<'EOF' || true
+# Keep USB 3.x SuperSpeed controllers/root hubs awake for OAK/Movidius.
+# The SuperSpeed controller suspends the instant the OAK bootloader
+# disconnects, so the firmware re-enumerates down on USB 2.0 (Bus 1)
+# instead of USB 3 — the classic "No OAK devices found" with the device
+# stuck on Bus 1. (Sourced from DMA.video/scripts/81-oak-usb3.rules.)
+ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", ATTR{speed}=="5000", \
+    RUN+="/bin/sh -c 'echo on > /sys$DEVPATH/../power/control'"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{speed}=="5000", ATTR{bDeviceClass}=="09", \
+    ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{speed}=="10000", ATTR{bDeviceClass}=="09", \
+    ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{speed}=="20000", ATTR{bDeviceClass}=="09", \
+    ATTR{power/control}="on"
 EOF
 
 if [ -r "$RULE_FILE" ] && [ "$(cat "$RULE_FILE")" = "$RULE_CONTENT" ]; then
@@ -62,6 +79,24 @@ else
   udevadm control --reload-rules
   udevadm trigger --action=change --subsystem-match=usb --attr-match=idVendor=03e7
   echo "udev rules reloaded; triggered change events for any attached OAK devices"
+fi
+
+# Keep the SuperSpeed bus awake so the OAK doesn't re-enumerate down to
+# USB 2 between bootloader and firmware. Separate file (matches the
+# upstream DMA.video name) so it's obvious what it does.
+if [ -r "$USB3_RULE_FILE" ] && [ "$(cat "$USB3_RULE_FILE")" = "$USB3_RULE_CONTENT" ]; then
+  echo "udev rule already present at $USB3_RULE_FILE — no-op"
+else
+  mkdir -p "$RULES_DIR"
+  if [ -e "$USB3_RULE_FILE" ]; then
+    cp -p "$USB3_RULE_FILE" "$USB3_RULE_FILE.bak.$(date +%Y%m%d-%H%M%S)"
+  fi
+  printf '%s\n' "$USB3_RULE_CONTENT" > "$USB3_RULE_FILE"
+  chmod 644 "$USB3_RULE_FILE"
+  echo "wrote $USB3_RULE_FILE"
+  udevadm control --reload-rules
+  udevadm trigger --action=add --subsystem-match=usb >/dev/null 2>&1 || true
+  echo "SuperSpeed keep-awake rule installed (OAK USB-3 re-enumeration fix)"
 fi
 
 # ---------------------------------------------------------------------------
