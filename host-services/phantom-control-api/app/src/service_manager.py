@@ -589,10 +589,11 @@ class UnifiedServiceManager(ServiceManager):
         'amr_testbed': 'ROBOT',
         'lift_testbed': 'ROBOT',
         'robot': 'ROBOT',
-        # EtherCAT motor master (host systemd) + its spine bridges
-        'dma-ethercat': 'ROBOT',
-        'dma-boundary-bridge': 'ROBOT',
-        'dma-loop-event-bridge': 'ROBOT'
+        # EtherCAT motor master (host systemd) + its spine bridges. 'AI' so they
+        # route through systemctl (the start/stop/logs path), not supervisorctl.
+        'dma-ethercat': 'AI',
+        'dma-boundary-bridge': 'AI',
+        'dma-loop-event-bridge': 'AI'
     }
 
     # Mapping from friendly names to actual systemd service names

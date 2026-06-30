@@ -50,12 +50,22 @@ if ! python3 -c 'import ensurepip' 2>/dev/null; then
     run "apt-get update -qq"
     run "apt-get install -y python3-venv"
 fi
+# Build deps for source wheels. Some pinned deps (e.g. psutil==5.9.6) have no
+# prebuilt aarch64/cp312 wheel and compile from source, needing Python.h + gcc.
+if ! dpkg -s python3-dev >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+    log "installing build deps (python3-dev, gcc) for source wheels"
+    run "apt-get update -qq"
+    run "apt-get install -y python3-dev gcc"
+fi
 
-# 2. service user (system, no login)
+# 2. service user (system, no login). systemd-journal group so the /service/logs
+#    journalctl path works (control goes via systemctl+polkit; reading the journal
+#    needs group membership).
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     log "creating system user $SERVICE_USER"
     run "useradd --system --no-create-home --shell /usr/sbin/nologin '$SERVICE_USER'"
 fi
+run "usermod -aG systemd-journal '$SERVICE_USER'"
 
 # 3. directories
 log "creating $INSTALL_DIR, $ENV_DIR, $LOG_DIR"
@@ -121,6 +131,9 @@ fi
 log "installing phantom-control-api.service"
 run "install -m 0644 '$SRC/phantom-control-api.service' /etc/systemd/system/phantom-control-api.service"
 run "systemctl daemon-reload"
-run "systemctl enable --now phantom-control-api.service"
+run "systemctl enable phantom-control-api.service"
+# restart (not just enable --now, which no-ops on an already-running service)
+# so a re-install picks up updated app payload / env / unit.
+run "systemctl restart phantom-control-api.service"
 
 log "phantom-control-api installed (listening on :$PCA_API_PORT)"
