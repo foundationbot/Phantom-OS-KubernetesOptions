@@ -25,7 +25,7 @@ spec:
         foundation.bot/has-gaia: "true"
       containers:
         - name: shm-stats
-          image: foundationbot/dma-common:SOF-1167-latest-aarch64
+          image: foundationbot/dma-common:beta-latest-aarch64
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dma_common.shm_stats_exporter", "--metrics-port", "9300"]
           # hostPID lets the /proc scan SEE every PID, but attributing consumers by
