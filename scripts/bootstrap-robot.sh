@@ -406,6 +406,7 @@ SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
 SKIP_GAIA_HOST=0
+SKIP_PHANTOM_CONTROL_API=0
 # dma-ethercat install runs by default. Combined with the default-on
 # uninstall pre-phase, a routine bootstrap re-run gives you a clean
 # reinstall of the realtime stack. Pass --skip-ethercat-install to
@@ -453,6 +454,7 @@ while [ $# -gt 0 ]; do
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gaia-host)         SELECTED_PHASES+=(gaia-host); shift ;;
+    --phantom-control-api) SELECTED_PHASES+=(phantom-control-api); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --load-image-tars)   SELECTED_PHASES+=(load-image-tars); shift ;;
@@ -488,6 +490,8 @@ while [ $# -gt 0 ]; do
     --skip-log-management)
                          SKIP_LOG_MANAGEMENT=1; shift ;;
     --skip-gaia-host)    SKIP_GAIA_HOST=1; shift ;;
+    --skip-phantom-control-api)
+                         SKIP_PHANTOM_CONTROL_API=1; shift ;;
     --skip-operator-ui-config)
                          SKIP_OPERATOR_UI_CONFIG=1; shift ;;
     --skip-ethercat-install)
@@ -689,6 +693,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
   SKIP_GAIA_HOST=1
+  SKIP_PHANTOM_CONTROL_API=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_LOAD_IMAGE_TARS=1
@@ -719,6 +724,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gaia-host)         SKIP_GAIA_HOST=0 ;;
+      phantom-control-api) SKIP_PHANTOM_CONTROL_API=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       load-image-tars)   SKIP_LOAD_IMAGE_TARS=0 ;;
@@ -741,7 +747,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|ecat-interface|load-image-tars|extract-models) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|phantom-control-api|ecat-interface|load-image-tars|extract-models) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -3808,6 +3814,35 @@ gaia_host() {
   fi
 }
 
+# The robot control API (phantom-control-api.service on :5000) is a HOST
+# process, not a k8s workload: it drives host systemd units (dma-ethercat,
+# positronic, ...) and is what argus nginx /api/control/ + /api/ai/ proxy
+# to. install-phantom-control-api.sh lays down the vendored payload
+# (host-services/phantom-control-api/), builds the venv, installs the unit +
+# scoped polkit rule, and enables it. Idempotent. Per-host values
+# (ecat interface, controller json) come from cpuIsolation.nic / host-config.
+phantom_control_api() {
+  if [ "${SKIP_PHANTOM_CONTROL_API:-0}" = 1 ]; then
+    phase "phase: phantom-control-api host service  (skipped — --skip-phantom-control-api)"
+    return
+  fi
+  phase "phase: phantom-control-api host service"
+  local installer="$REPO_ROOT/scripts/install-phantom-control-api.sh"
+  if [ ! -f "$installer" ]; then
+    info "no $installer — skipping phantom-control-api"
+    return
+  fi
+
+  # The EtherCAT NIC is renamed to `ecat1` by the ecat-interface udev rule
+  # fleet-wide, which is the installer's default PCA_CONTROLLER_IFACE — so no
+  # per-host interface needs to be threaded here.
+  if DRY_RUN="$DRY_RUN" bash "$installer"; then
+    pass "phantom-control-api installed"
+  else
+    fail "install-phantom-control-api.sh"
+  fi
+}
+
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
     phase "phase 12: install dma-ethercat  (skipped — --skip-ethercat-install)"
@@ -6174,6 +6209,7 @@ print_plan() {
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
   _step $([ "${SKIP_GAIA_HOST:-0}"       = 0 ] && echo 1 || echo 0) "phase     gaia-host services (outside k0s)" "--skip-gaia-host"
+  _step $([ "${SKIP_PHANTOM_CONTROL_API:-0}" = 0 ] && echo 1 || echo 0) "phase     phantom-control-api (host :5000)" "--skip-phantom-control-api"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
@@ -6253,6 +6289,7 @@ extract_models     ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
 gaia_host          ; guard
+phantom_control_api ; guard
 setup_positronic   ; guard
 validate
 

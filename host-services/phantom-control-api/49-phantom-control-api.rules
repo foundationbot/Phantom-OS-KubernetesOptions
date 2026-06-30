@@ -1,0 +1,35 @@
+// Allow the unprivileged phantom-api user (which runs phantom-control-api.service)
+// to start/stop/restart ONLY the host units in the api-server's service registry,
+// plus daemon-reload. The app calls `systemctl` directly (no sudo); over D-Bus that
+// triggers polkit, so without this rule start/stop would fail for a non-root user.
+// Scoped to a fixed unit allow-list = least privilege. Keep in sync with
+// service_manager.py VALID_SERVICES / phantom_control_api_simple.py service_name_map.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "phantom-api") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    // daemon-reload (not unit-scoped)
+    if (action.id === "org.freedesktop.systemd1.reload-daemon") {
+        return polkit.Result.YES;
+    }
+    if (action.id === "org.freedesktop.systemd1.manage-units") {
+        var allowed = {
+            "dma-ethercat.service": true,
+            "dma-boundary-bridge.service": true,
+            "dma-loop-event-bridge.service": true,
+            "phantom-positronic-control.service": true,
+            "phantom-rerun.service": true,
+            "ros2-message-tracker.service": true,
+            "phantom-locomotion-container.service": true,
+            "phantom-locomotion-policy.service": true,
+            "phantom-locomotion-joystick.service": true,
+            "phantom-controller.service": true,
+            "ethernet-online.service": true
+        };
+        var unit = action.lookup("unit");
+        if (unit && allowed[unit] === true) {
+            return polkit.Result.YES;
+        }
+    }
+    return polkit.Result.NOT_HANDLED;
+});
