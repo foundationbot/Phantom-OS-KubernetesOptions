@@ -37,12 +37,19 @@ if [ ! -d "$SRC/app" ]; then
     exit 1
 fi
 
-# 1. system deps (python venv toolchain)
+# 1. system deps (python venv toolchain). NB: a bare `import venv` can succeed
+#    while venv creation still fails because ensurepip (shipped in the versioned
+#    python3.X-venv package) is missing — that's the real prerequisite, so test it.
 log "ensuring python venv toolchain"
 if ! command -v python3 >/dev/null 2>&1; then
-    run "apt-get update -qq && apt-get install -y python3 python3-venv python3-dev"
+    run "apt-get update -qq"
+    run "apt-get install -y python3 python3-venv python3-dev"
 fi
-python3 -c 'import venv' 2>/dev/null || run "apt-get install -y python3-venv"
+if ! python3 -c 'import ensurepip' 2>/dev/null; then
+    log "ensurepip missing — installing python3-venv"
+    run "apt-get update -qq"
+    run "apt-get install -y python3-venv"
+fi
 
 # 2. service user (system, no login)
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
@@ -59,14 +66,15 @@ log "syncing app payload -> $INSTALL_DIR"
 run "rsync -a --delete '$SRC/app/src' '$SRC/app/static' '$INSTALL_DIR/'"
 run "cp '$SRC/app/requirements.txt' '$INSTALL_DIR/requirements.txt'"
 
-# 5. venv (create once, always refresh deps)
-if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
+# 5. venv (create once, always refresh deps). Gate on pip — not python —
+#    presence so a half-built venv from an earlier failed run is rebuilt.
+if [ ! -x "$INSTALL_DIR/venv/bin/pip" ]; then
     log "creating venv"
-    run "python3 -m venv '$INSTALL_DIR/venv'"
+    run "python3 -m venv --clear '$INSTALL_DIR/venv'"
 fi
 log "installing python deps (needs network)"
-run "'$INSTALL_DIR/venv/bin/pip' install --quiet --upgrade pip"
-run "'$INSTALL_DIR/venv/bin/pip' install --quiet -r '$INSTALL_DIR/requirements.txt'"
+run "'$INSTALL_DIR/venv/bin/python' -m pip install --quiet --upgrade pip"
+run "'$INSTALL_DIR/venv/bin/python' -m pip install --quiet -r '$INSTALL_DIR/requirements.txt'"
 
 # 6. ownership / perms
 run "chown -R '$SERVICE_USER:$SERVICE_USER' '$INSTALL_DIR' '$LOG_DIR'"
