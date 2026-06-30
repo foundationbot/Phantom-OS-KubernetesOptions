@@ -37,6 +37,12 @@ read -r -d '' RULE_CONTENT <<'EOF' || true
 # (scripts/configure-usb-power.sh). Re-run that script after editing.
 ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03e7", \
   ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"
+
+# Luxonis OAK access rule (DepthAI's stock 80-movidius.rules): make the
+# device world-rw so libusb can claim it without root. The dma-video
+# producer runs as root so this is belt-and-suspenders, but it matches
+# the upstream DepthAI setup and unblocks any non-root tooling.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"
 EOF
 
 if [ -r "$RULE_FILE" ] && [ "$(cat "$RULE_FILE")" = "$RULE_CONTENT" ]; then
