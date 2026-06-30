@@ -20,6 +20,35 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector:
         foundation.bot/has-cameras: "true"
+      initContainers:
+        # Sequence the pipeline: the producer must be up and publishing
+        # the /dev/shm camera queues before the streamer starts —
+        # otherwise it has no frames to read, crashes 0 s after start,
+        # and CrashLoopBackOffs (spamming logs and masking the real
+        # upstream issue). Same producer-gate the viewer uses. We wait
+        # indefinitely (producer is on the same node); staying in Init is
+        # the right state to expose if the producer can't open the OAK.
+        - name: wait-for-producer
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "waiting for producer to publish /dev/shm/video_meta_cam* queues..."
+              i=0
+              until ls /dev/shm/video_meta_cam* >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ $((i % 15)) -eq 0 ]; then
+                  echo "  still waiting ($((i * 2))s elapsed)"
+                fi
+                sleep 2
+              done
+              echo "producer queues present: $(ls /dev/shm/video_meta_cam* | tr '\n' ' ')"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
       containers:
         - name: rtsp-streamer
           image: foundationbot/dma-video:main
