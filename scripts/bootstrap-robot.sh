@@ -2047,7 +2047,15 @@ seed_pull_secrets() {
     fi
   fi
 
-  # Pick a source file (explicit override, then ~/.docker/config.json).
+  # Pick a source file: explicit override, then root's docker config,
+  # then (when run via sudo) the invoking user's. Operators commonly
+  # `docker login` as themselves and then run bootstrap with sudo, which
+  # leaves the creds in /home/$SUDO_USER/.docker — not /root/.docker that
+  # this (root) process sees as $HOME. Without the SUDO_USER fallback,
+  # dockerhub-creds gets created in no namespace and every private pull
+  # dies with insufficient_scope / ImagePullBackOff. credsStore-backed
+  # configs have no inline auths (would authenticate to nothing), so each
+  # candidate must have a non-empty .auths.
   local secret_file=""
   if [ -n "$DOCKERHUB_SECRET_FILE" ]; then
     if [ ! -r "$DOCKERHUB_SECRET_FILE" ]; then
@@ -2056,15 +2064,19 @@ seed_pull_secrets() {
     fi
     secret_file="$DOCKERHUB_SECRET_FILE"
     info "source: $secret_file (--dockerhub-secret-file)"
-  elif [ -r "$HOME/.docker/config.json" ]; then
-    # credsStore-backed configs have no inline auths, so the resulting
-    # Secret would authenticate to nothing. Detect that and fall through.
-    if jq -e '(.auths // {}) | length > 0' "$HOME/.docker/config.json" >/dev/null 2>&1; then
-      secret_file="$HOME/.docker/config.json"
-      info "source: $secret_file (default)"
-    else
-      info "$HOME/.docker/config.json has no inline auths (credsStore?); falling back to phantom ns"
-    fi
+  else
+    local _cand
+    for _cand in "$HOME/.docker/config.json" \
+                 "${SUDO_USER:+/home/$SUDO_USER/.docker/config.json}"; do
+      [ -n "$_cand" ] && [ -r "$_cand" ] || continue
+      if jq -e '(.auths // {}) | length > 0' "$_cand" >/dev/null 2>&1; then
+        secret_file="$_cand"
+        info "source: $secret_file"
+        break
+      fi
+    done
+    [ -n "$secret_file" ] || \
+      info "no docker config with inline auths under /root or \$SUDO_USER (credsStore?); falling back to phantom ns"
   fi
 
   # Build the secret YAML from whichever source resolved.
@@ -4028,6 +4040,25 @@ install_dma_ethercat() {
     systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/      /' || true
     ethercat_die "service did not start — check systemctl status / journalctl -u dma-ethercat for the underlying cause"
   fi
+
+  # Spine bridges (boundary + loop-event) ship in the dma-ethercat .deb
+  # as separate units with WantedBy=dma-ethercat.service, but install
+  # *disabled* — and PartOf= only propagates stop/restart, not start. So
+  # enable them explicitly here; otherwise they sit inactive and the
+  # control-event spine is silently down. Non-fatal: a bridge that can't
+  # start must not halt the realtime stack.
+  local _bridge
+  for _bridge in dma-boundary-bridge dma-loop-event-bridge; do
+    if systemctl cat "${_bridge}.service" >/dev/null 2>&1; then
+      if systemctl enable --now "${_bridge}.service" 2>/dev/null; then
+        pass "${_bridge}.service enabled and started"
+      else
+        warn "${_bridge}.service present but failed to enable/start (non-fatal) — journalctl -u ${_bridge}"
+      fi
+    else
+      note "${_bridge}.service not shipped by this dma-ethercat .deb — skipping"
+    fi
+  done
 }
 
 # Resolve the per-robot DMA_CONFIG path and write it to
