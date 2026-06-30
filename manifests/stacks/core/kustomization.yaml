@@ -24,7 +24,7 @@ resources:
   - ../../base/registry
   - ../../base/dma-video
   - ../../base/positronic
-  - ../../base/phantomos-api-server
+  - ../../base/phantom-namespace
   - ../../base/yovariable-server
   - ../../base/dma-streams
   - ../../base/phantom-locomotion
