@@ -3320,7 +3320,7 @@ cpu_isolation() {
   # the cgroup-v2 partition created in step 2, not the cmdline.
   local cmdline_changed=0
   local migrate_out migrate_rc
-  migrate_out="$(cpusets_run migrate-cmdline --add-rt-flags --yes 2>&1)"
+  migrate_out="$(cpusets_run migrate-cmdline --add-rt-flags --nohz-full "$_ci_dma_rt" --yes 2>&1)"
   migrate_rc=$?
   printf '%s\n' "$migrate_out"
   if [ $migrate_rc -ne 0 ]; then
