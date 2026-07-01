@@ -706,6 +706,16 @@ DEFAULT_LOCOMOTION_DIAGNOSTIC: dict[str, str] = {
     "holdBiasS":    "2.0",
     "holdHomeS":    "1.0",
     "joints":       "all",
+    # Per-motor enable: which motors are ENERGIZED for the diagnostic
+    # (vs `joints`, which selects which motors are SWEPT). Comma-separated
+    # joint names, or `all` / `none`. Empty (default) means the diagnostic
+    # falls back to the `--joints` set — so the common bench case "sweep the
+    # hip pitches and energize only them" needs one knob. Enabling either
+    # ankle axis auto-promotes to the whole ankle pair (master-side). This is
+    # distinct from the policy-diagnostics gain-contract knobs. Renders to
+    # LOCOMOTION_DIAGNOSTIC_ENABLED_MOTORS, which dma_launch.sh forwards as
+    # --enabled-motors to the diagnostic node.
+    "enabledMotors": "",
     # /recordings is a hostPath mount (foundationbot/Phantom-OS-
     # KubernetesOptions phantom-locomotion.yaml: host /root/recordings,
     # type DirectoryOrCreate). The launcher mkdir -p's the diag_reports
@@ -852,6 +862,10 @@ DIAGNOSTIC_FIELD_TO_ENV: dict[str, str] = {
     "holdBiasS":    "LOCOMOTION_DIAGNOSTIC_HOLD_BIAS_S",
     "holdHomeS":    "LOCOMOTION_DIAGNOSTIC_HOLD_HOME_S",
     "joints":       "LOCOMOTION_DIAGNOSTIC_JOINTS",
+    # Per-motor enable: the ENERGIZED set (vs `joints`, the SWEPT set).
+    # Omitted when blank (see DIAGNOSTIC_OMIT_IF_EMPTY) so the diagnostic
+    # node falls back to the --joints set.
+    "enabledMotors": "LOCOMOTION_DIAGNOSTIC_ENABLED_MOTORS",
     "outPath":      "LOCOMOTION_DIAGNOSTIC_OUT_PATH",
     "waitForStart": "LOCOMOTION_DIAGNOSTIC_WAIT_FOR_START",
     "jointBiasOverrides": "LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES",
@@ -929,6 +943,9 @@ DIAGNOSTIC_OMIT_IF_EMPTY: frozenset[str] = frozenset({
     # uses the global `chirpAmplitudeRad`. Mirrors jointBiasOverrides
     # so a bare diagnostic config doesn't ship a blank env var.
     "chirpAmplitudeOverrides",
+    # Per-motor enable: a blank enabledMotors emits no env var, so the
+    # diagnostic node defaults the ENERGIZED set to the --joints set.
+    "enabledMotors",
 })
 
 # Diagnostic fields whose rendered ConfigMap value must be the

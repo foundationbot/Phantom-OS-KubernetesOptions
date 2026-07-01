@@ -389,6 +389,7 @@ images:
 #   holdBiasS:            2.0                   # plateau hold (both modes)
 #   holdHomeS:            1.0                   # home hold between joints
 #   joints:               all
+#   enabledMotors:        ""                    # energize subset; "" => --joints set
 #   outPath:              /recordings/diag_reports/diag_report.json
 #   waitForStart:         true
 #   jointBiasOverrides:   ""                    # see "Per-joint bias overrides"
@@ -449,6 +450,24 @@ images:
 #   jointBiasOverrides: "RightHipRoll=-0.10"
 # Default empty (use the global `bias` for every joint). Maps to env
 # LOCOMOTION_DIAGNOSTIC_JOINT_BIAS_OVERRIDES. FIR-339.
+#
+# enabledMotors: which motors are ENERGIZED for the run — distinct from
+# `joints`, which selects which motors are SWEPT. Comma-separated joint
+# names, or `all` / `none`. The motivating bench case is energizing only
+# the joints under test (e.g. the two hip pitches for a wire-integrity
+# sweep) while the arms, neck, and rest of the legs stay limp — so the
+# operator isn't holding a fully-live robot to exercise one joint:
+#   joints:        LeftHipPitch,RightHipPitch    # sweep these
+#   enabledMotors: LeftHipPitch,RightHipPitch    # energize only these
+# Enabling either ankle axis (pitch or roll) auto-promotes to the whole
+# ankle pair (master-side), so a coupled axis is never commanded while
+# only one half is energized. Default empty: omits the env var entirely
+# and the diagnostic node falls back to the `--joints` set, so the common
+# "sweep the hip pitches and energize only them" case needs one knob — but
+# a non-empty `enabledMotors` always wins. Distinct from the
+# policy-diagnostics gain-contract knobs. Maps to env
+# LOCOMOTION_DIAGNOSTIC_ENABLED_MOTORS, which dma_launch.sh forwards as
+# --enabled-motors to dma_diagnostic_node.
 #
 # iterations: repeat the joint sweep N times back-to-back per run.
 # Each iteration writes its own timestamped report under outPath's
