@@ -148,6 +148,42 @@ def test_gain_block_renders_globals_and_overrides():
     assert "DIAG_VELOCITY_KP_OVERRIDES" not in kv
 
 
+def test_host_pd_tune_sweep_fields_render_when_set_omitted_when_empty():
+    """The host-pd-tune sweep knobs are optional: a bare config omits their
+    DIAG_* env (they're in DIAG_OMIT_IF_EMPTY); a block that sets them emits
+    each raw, and testMode switches the run to the sweep."""
+    bare = _diag_kv({})
+    for env in ("DIAG_HOST_PD_CONFIG", "DIAG_OBJECTIVE", "DIAG_SINE_PERIODS",
+                "DIAG_SINE_AGG", "DIAG_HOST_PD_KP_BOX", "DIAG_MR_CAP_DB",
+                "DIAG_TUNE_PROFILE", "DIAG_OVERSHOOT_CAP"):
+        assert env not in bare, env
+
+    cfg = {
+        "phantomPolicyDiagnostics": {
+            "testMode": "host-pd-tune",
+            "hostPdConfig": "/etc/policy-diagnostics-tools/hostpd/mk2.json",
+            "joints": "LeftElbowPitch",
+            "objective": "bode",
+            "sinePeriods": "4,2,1",
+            "sineAgg": "max",
+            "hostPdKpBox": "0.3:3",
+            "mrCapDb": "3.0",
+        }
+    }
+    kv = _diag_kv(cfg)
+    assert kv["DIAG_TEST_MODE"] == "host-pd-tune"
+    assert kv["DIAG_HOST_PD_CONFIG"] == "/etc/policy-diagnostics-tools/hostpd/mk2.json"
+    assert kv["DIAG_JOINTS"] == "LeftElbowPitch"
+    assert kv["DIAG_OBJECTIVE"] == "bode"
+    assert kv["DIAG_SINE_PERIODS"] == "4,2,1"
+    assert kv["DIAG_SINE_AGG"] == "max"
+    assert kv["DIAG_HOST_PD_KP_BOX"] == "0.3:3"
+    assert kv["DIAG_MR_CAP_DB"] == "3.0"
+    # Sweep knobs left unset stay omitted.
+    assert "DIAG_TUNE_PROFILE" not in kv
+    assert "DIAG_OVERSHOOT_CAP" not in kv
+
+
 def test_every_field_maps_to_a_diag_env():
     """Every field in DEFAULT_POLICY_DIAGNOSTICS has a DIAG_FIELD_TO_ENV
     entry, and the maps agree on the key set (no orphan envs)."""

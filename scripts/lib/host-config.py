@@ -1280,6 +1280,24 @@ DEFAULT_POLICY_DIAGNOSTICS: dict[str, str] = {
     "mjOrderFromConfig": "",
     "mjOrderFile":       "/etc/policy-diagnostics-tools/mj_order.json",
     "imuRolesFile":      "/etc/policy-diagnostics-tools/imu_roles.json",
+    # ── host-pd-tune sweep (testMode: host-pd-tune) — CST host-side-PD gain
+    # tuner. All default "" and are OMITTED from the ConfigMap unless the
+    # operator sets them (DIAG_OMIT_IF_EMPTY); launch.py forwards each
+    # only-when-set, and the node supplies its own tune-profile / code
+    # default when a flag is absent. hostPdConfig points at the host-PD JSON
+    # mounted from the policy-diagnostics-hostpd ConfigMap.
+    "hostPdConfig": "",
+    "tuneProfile":  "",
+    "objective":    "",
+    "sinePeriods":  "",
+    "sineAgg":      "",
+    "sineAmpRad":   "",
+    "hostPdKpBox":  "",
+    "hostPdKdBox":  "",
+    "oscSoftCap":   "",
+    "oscHardCap":   "",
+    "overshootCap": "",
+    "mrCapDb":      "",
 }
 
 # Map host-config camelCase field names -> the DIAG_* environment-variable
@@ -1355,6 +1373,19 @@ DIAG_FIELD_TO_ENV: dict[str, str] = {
     "velocityKiOverrides": "DIAG_VELOCITY_KI_OVERRIDES",
     "velocityKdOverrides": "DIAG_VELOCITY_KD_OVERRIDES",
     "torqueKpOverrides":   "DIAG_TORQUE_KP_OVERRIDES",
+    # host-pd-tune sweep. Emitted RAW; launch.py forwards each only-when-set.
+    "hostPdConfig": "DIAG_HOST_PD_CONFIG",
+    "tuneProfile":  "DIAG_TUNE_PROFILE",
+    "objective":    "DIAG_OBJECTIVE",
+    "sinePeriods":  "DIAG_SINE_PERIODS",
+    "sineAgg":      "DIAG_SINE_AGG",
+    "sineAmpRad":   "DIAG_SINE_AMP_RAD",
+    "hostPdKpBox":  "DIAG_HOST_PD_KP_BOX",
+    "hostPdKdBox":  "DIAG_HOST_PD_KD_BOX",
+    "oscSoftCap":   "DIAG_OSC_SOFT_CAP",
+    "oscHardCap":   "DIAG_OSC_HARD_CAP",
+    "overshootCap": "DIAG_OVERSHOOT_CAP",
+    "mrCapDb":      "DIAG_MR_CAP_DB",
 }
 
 # Policy-diagnostics fields whose rendered value should be omitted when
@@ -1373,6 +1404,19 @@ DIAG_OMIT_IF_EMPTY: frozenset[str] = frozenset({
     "velocityKiOverrides",
     "velocityKdOverrides",
     "torqueKpOverrides",
+    # host-pd-tune sweep — all optional; omit unless the operator sets them.
+    "hostPdConfig",
+    "tuneProfile",
+    "objective",
+    "sinePeriods",
+    "sineAgg",
+    "sineAmpRad",
+    "hostPdKpBox",
+    "hostPdKdBox",
+    "oscSoftCap",
+    "oscHardCap",
+    "overshootCap",
+    "mrCapDb",
 })
 
 # Policy-diagnostics bool fields. launch.py compares DIAG_SKIP_IMU_TESTS /

@@ -660,6 +660,107 @@ images:
 #     mounts:
 #       - {name: recordings, host: /data2/recordings, container: /recordings}
 
+# ── Per-host policy-diagnostics config (phantomPolicyDiagnostics) ──────────
+# The STANDALONE policy-diagnostics DaemonSet (manifests/base/policy-
+# diagnostics/), gated on foundation.bot/has-policy-diagnostics. Bootstrap's
+# policy-diagnostics-config phase renders this block into the
+# policy-diagnostics-config ConfigMap (DIAG_* env) that the launcher
+# (policy-diagnostics-tools' launch.py) reads via envFrom (optional). Every
+# field is optional; omitted fields fall back to launch.py's built-in
+# defaults, so a bare (or absent) block still runs a joint-sweep. It shares
+# the position-mode knobs with phantomLocomotion.diagnostic (bias, holds,
+# naming, IMU tols, chirp*, the 14 CSP gain knobs — see that section above);
+# the HOST-PD SWEEP knobs below are specific to `testMode: host-pd-tune`.
+#
+# ── Host-PD gain sweep (testMode: host-pd-tune) ───────────────────────────
+# CST host-side-PD gain tuner. Drives ONE joint at a time with a sine (or a
+# chirp, for objective: bode) at a candidate kp/kd — pushed over /desired as
+# the command's stiffness/damping — scores the tracking off /actuals, adapts
+# kp/kd with a bounded Hooke–Jeeves search, and reports the best gains per
+# joint. Report-only: it prints a per-candidate table + winner and writes a
+# JSON report; it NEVER writes gains back into any config.
+#
+# SAFETY: run on a HUNG / clamped robot, with the policy node stopped and an
+# E-stop in reach. Only the joint under test is actively swept; every other
+# joint holds at its config gains. A hard oscillation/overshoot or a
+# position divergence aborts the session (limp + return home).
+#
+# Sweep options (all optional unless marked REQUIRED; shown with defaults):
+#   testMode:      host-pd-tune     # REQUIRED to select the sweep (else joint-sweep)
+#   hostPdConfig:  ""               # REQUIRED. Path to the DMA host-PD JSON
+#                                   #   (per-joint kp/kd, tauMaxNm, limits) —
+#                                   #   the SAME file dma_main runs. Delivered
+#                                   #   by the policy-diagnostics-hostpd
+#                                   #   ConfigMap, mounted at
+#                                   #   /etc/policy-diagnostics-tools/hostpd/ .
+#   joints:        all              # REQUIRED. One name, a comma list, or
+#                                   #   `all`. Tuned SEQUENTIALLY — one joint
+#                                   #   moves at a time (see the two examples).
+#   objective:     lexicographic    # lexicographic = min tracking RMS while
+#                                   #   rejecting buzz/overshoot (safe default);
+#                                   #   composite = weighted rms+osc+overshoot;
+#                                   #   bode = max −3 dB bandwidth under a
+#                                   #   resonant-peak cap (uses the chirp).
+#   sinePeriods:   "2"              # sine period(s), seconds; comma list e.g.
+#                                   #   "4,2,1" (=0.25/0.5/1 Hz). Each candidate
+#                                   #   runs at every period. (sine objectives)
+#   sineAgg:       max              # combine per-period metrics: max
+#                                   #   (worst-case) | mean. (sine objectives)
+#   sineAmpRad:    0.2              # sine command amplitude (rad)
+#   hostPdKpBox:   "0.3:3"          # kp search box as [lo×,hi×] of the config
+#   hostPdKdBox:   "0.3:3"          # kd search box; both auto-capped so peak
+#                                   #   commanded torque stays under tauMaxNm.
+#   oscSoftCap:    1.3              # osc ratio over this → candidate infeasible
+#                                   #   (search routes away; run continues)
+#   oscHardCap:    2.0              # osc ratio over this → ABORT the session
+#   overshootCap:  0.2              # fractional-overshoot feasibility cap
+#   mrCapDb:       3.0              # bode only: resonant-peak cap (dB)
+#   # bode also reuses the chirp* knobs: chirpFreqMinHz / chirpFreqMaxHz /
+#   #   chirpAmplitudeRad / chirpDurationS / chirpEnvelopeS.
+#   masterGain:    1.0              # soft-start scale applied to the PD torque
+#   iterations:    1                # repeat the whole sweep N times
+#   waitForStart:  true             # block on the joystick X gate before moving
+#   outPath:       /recordings/diag_reports/diag_report.json   # JSON report
+#
+# Example — tune ONE joint (recommended for first bring-up):
+# phantomPolicyDiagnostics:
+#   testMode: host-pd-tune
+#   hostPdConfig: /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+#   joints: LeftElbowPitch
+#   objective: lexicographic
+#   sinePeriods: "2"
+#
+# Example — ALL joints, one by one. `joints: all` walks every joint on
+# /config SEQUENTIALLY: it tunes a joint to completion (only that joint
+# moving; the rest hold at config gains), records its winner, restores it,
+# then moves to the next. All winners land in the one report. Set
+# waitForStart so the operator arms each run:
+# phantomPolicyDiagnostics:
+#   testMode: host-pd-tune
+#   hostPdConfig: /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+#   joints: all
+#   objective: lexicographic
+#   sinePeriods: "2"
+#   waitForStart: true
+#
+# Example — a chosen subset, one by one (same sequential behaviour):
+#   joints: "LeftElbowPitch,LeftShoulderPitch,LeftShoulderRoll"
+#
+# Example — bode characterisation on one joint (chirp sweep):
+# phantomPolicyDiagnostics:
+#   testMode: host-pd-tune
+#   hostPdConfig: /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+#   joints: LeftElbowPitch
+#   objective: bode
+#   chirpFreqMinHz: 0.5
+#   chirpFreqMaxHz: 20.0
+#   mrCapDb: 3.0
+#
+# Provide hostPdConfig via the policy-diagnostics-hostpd ConfigMap (operator/
+# bootstrap-provided per host, like policy-diagnostics-tables):
+#   kubectl -n positronic create configmap policy-diagnostics-hostpd \
+#     --from-file=mk2_full_robot_hostpd.json=<path-to-the-host-PD-json>
+
 # Per-host phantom-sonic config (the MK1 Walking ↔ SONIC stack, gated on
 # foundation.bot/has-sonic). Bootstrap phase sonic-config renders
 # /etc/phantomos/phantom-sonic-config.yaml from this block — a ConfigMap
