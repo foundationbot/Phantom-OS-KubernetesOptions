@@ -827,6 +827,55 @@ sudo bash scripts/bootstrap-robot.sh --gitops
 > that didn't get the import. Use the import only as a stopgap when the
 > registry pod is down.
 
+#### Extracting models/policies to the host (phase 14c)
+
+The carrier images are **not** run as in-cluster (init) containers. Their
+model/policy trees are copied **once onto the host** at `/root/models`, and
+the consumer pods bind-mount that host directory read-only:
+
+| Consumer | Host path | Mounted at | hostPath type |
+|---|---|---|---|
+| positronic-control | `/root/models` | `/root/models` (`$PHANTOM_MODELS`) | `Directory` — **must pre-exist** |
+| phantomos-api-server (policy picker) | `/root/models` | `/home/operator/models`, read-only | `DirectoryOrCreate` |
+| phantom-locomotion | `/root/models/policies` | `/data/policies`, read-only | `DirectoryOrCreate` |
+
+The copy is done by bootstrap's **phase 14c extract-models**
+([`scripts/extract-models-to-host.sh`](../scripts/extract-models-to-host.sh)),
+which `docker create`s an ephemeral container from each ref and `docker cp`s
+the subtree out:
+
+- `phantom-models:/models/.` → `/root/models/`
+- `phantom-policies:/models/policies/.` → `/root/models/policies/`
+
+The refs come from `images.phantom-models` / `images.phantom-policies` in
+`host-config.yaml`; any ref left unset or at `:PLACEHOLDER` is **soft-skipped**
+(a robot that runs only locomotion need not wire `phantom-models`). The phase
+is idempotent — a `.extracted-ref` marker in each dest dir makes an
+unchanged-ref re-run a true no-op; a changed ref re-extracts (overlay,
+non-destructive). Models are self-versioned, so an in-place overwrite of the
+flat tree is the whole versioning story.
+
+```bash
+# Run just this phase (e.g. after pinning a new model/policy tag):
+sudo bash scripts/bootstrap-robot.sh --extract-models
+
+# Or invoke the extractor directly (bypasses host-config resolution):
+sudo bash scripts/extract-models-to-host.sh \
+  --models-ref   foundationbot/phantom-models:<tag> \
+  --policies-ref foundationbot/phantom-policies:<tag>
+#   --dry-run  preview the docker create/cp/rm without running them
+#   --force    re-extract even if the .extracted-ref marker already matches
+#   --dest DIR host destination root (default: /root/models)
+```
+
+> **positronic-control requires `/root/models` to exist.** Its mount is
+> `type: Directory`, so the pod will not schedule on a host where the
+> directory is absent. The extract-models phase creates and populates it; if
+> you opt out with `--skip-extract-models`, you must provision `/root/models`
+> yourself before positronic-control can run. The locomotion and api-server
+> mounts are `DirectoryOrCreate` and tolerate an empty/absent dir (the pod
+> CrashLoops until it's populated, then self-recovers).
+
 ---
 
 ### 3.14 CPU isolation and core pinning (EtherCAT RT)
@@ -1019,6 +1068,7 @@ won't come up, install Job stuck) see
 | 13. gitops | `--gitops` | terraform apply (ArgoCD Helm chart); render+apply per-stack Application CRs from `host-config.yaml` |
 | 14. argocd admin | `--argocd-admin` | install argocd CLI; reset admin password (default `1984` on empty input) |
 | 14b. load-image-tars | `--load-image-tars` (with `--phantom-models-tar <path>` / `--phantom-policies-tar <path>`) | (optional) wait for the `k0s-registry` Deployment to become Available, then load + push the prebuilt `phantom-models` / `phantom-policies` tarballs into `localhost:5443` (via [`scripts/load-image-tars.sh`](../scripts/load-image-tars.sh)) and update the matching `images:` tag in `host-config.yaml`. On an interactive full bootstrap, prompts for any path not given by a flag. Runs **between gitops and image-overrides** so the unchanged image-overrides phase injects the new tag. Soft-skips if neither tarball is provided or the registry never comes up. See [§3.13](#313-copy-a-locally-built-image-to-other-robots-offline-tar-transfer). |
+| 14c. extract-models | `--extract-models` (default-on; `--skip-extract-models` to opt out) | copy the model/policy trees baked into the `phantom-models` / `phantom-policies` carrier images **once onto the host** at `/root/models` (and `/root/models/policies`) via [`scripts/extract-models-to-host.sh`](../scripts/extract-models-to-host.sh), so positronic-control, phantomos-api-server, and phantom-locomotion read them through a read-only `hostPath` bind-mount instead of a per-pod init container. Resolves the two refs from `images.phantom-models` / `images.phantom-policies` in `host-config.yaml`; soft-skips any ref that is unset or `:PLACEHOLDER`. Idempotent (a `.extracted-ref` marker makes an unchanged-ref re-run a no-op). Runs right after load-image-tars so the carrier images are available to `docker create`. See [§3.13 → Extracting models/policies to the host](#extracting-modelspolicies-to-the-host-phase-14c). |
 | 15. image overrides | `--image-overrides` | inject `images:` from `host-config.yaml` into the live Applications |
 | 16. deployments | `--deployments` | inject `deployments:` patches per stack (or clear when absent). Alias: `--dev-mounts` |
 
@@ -1232,13 +1282,20 @@ new robot needs no installer-tree commit, just a host-config entry.
   see 7.1 / 7.2      see 7.3 / 7.6
 ```
 
-### 7.1 `Init:ImagePullBackOff` on positronic-control
+### 7.1 `ImagePullBackOff` on positronic-control
 
 Image overrides didn't apply, the requested tag doesn't exist on
 DockerHub, or the `dockerhub-creds` pull secret is missing in the
-`positronic` namespace. positronic-control, phantom-models, and
-phantom-policies all pull from `foundationbot/*` on DockerHub like
-every other private image.
+`positronic` namespace. positronic-control pulls from `foundationbot/*`
+on DockerHub like every other private image.
+
+> **Not** `phantom-models` / `phantom-policies`: those carrier images are
+> no longer pulled in-cluster (positronic-control has no init container).
+> They are consumed on the **host** by the extract-models phase and surface
+> their models through the `/root/models` bind-mount — see
+> [§3.13 → Extracting models/policies to the host](#extracting-modelspolicies-to-the-host-phase-14c).
+> A models problem shows up as a `FailedMount`/`Pending` pod or an empty
+> `/policy/list`, not an `ImagePullBackOff`.
 
 ```bash
 # Check what tag the live Application is trying to pull

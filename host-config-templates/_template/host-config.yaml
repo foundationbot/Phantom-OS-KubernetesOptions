@@ -96,15 +96,24 @@ stacks:
 # Known containers (others are rejected at validate-time):
 #   positronic-control   core stack — manifest uses
 #                          foundationbot/positronic-control
-#   phantom-models       core stack — positronic-control's load-models init.
-#                          manifest uses foundationbot/phantom-models.
-#                          Bundles model weights / configs (~GB).
-#                          NOTE: phantomos-api-server no longer consumes this
-#                          image — it bind-mounts /root/models off the host
-#                          directly. Only positronic-control still pulls it.
-#   phantom-policies     core stack — phantom-locomotion's load-policies init.
-#                          manifest uses foundationbot/phantom-policies.
-#                          Slim image with ONNX files at /models/policies/.
+#   phantom-models       core stack — model-weights carrier image
+#                          (foundationbot/phantom-models, ~GB). NO LONGER an
+#                          in-cluster (init) container: bootstrap's phase 14c
+#                          extract-models (scripts/extract-models-to-host.sh)
+#                          copies its /models tree ONCE onto the host at
+#                          /root/models, and the consumers — positronic-control
+#                          and phantomos-api-server — bind-mount that host dir
+#                          read-only. The image ref is still set here purely so
+#                          the extract phase knows what to copy from; leave it
+#                          unset / :PLACEHOLDER to skip the models extract.
+#   phantom-policies     core stack — policy-ONNX carrier image
+#                          (foundationbot/phantom-policies, slim; ONNX at
+#                          /models/policies/). Like phantom-models, NO LONGER a
+#                          load-policies init container: phase 14c extract-models
+#                          copies its /models/policies subtree onto the host at
+#                          /root/models/policies, which phantom-locomotion
+#                          bind-mounts read-only at /data/policies. The ref here
+#                          only drives the extract; unset / :PLACEHOLDER skips it.
 #                          Build with `scripts/phantom-models/build.py
 #                          --image phantom-policies --manifest <yaml>`.
 #   operator-ui          operator stack — manifest uses

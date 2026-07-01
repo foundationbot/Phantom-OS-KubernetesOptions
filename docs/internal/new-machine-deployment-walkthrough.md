@@ -475,10 +475,14 @@ bash ~/development/foundation/platformOsDepl/Phantom-OS-KubernetesOptions/script
 ## 4. Build the phantom-models image
 
 The model weights ship as a separate OCI image so the policy image
-stays small and rebuilds don't reship gigabytes of weights. The init
-container `load-models` copies `/models/.` from this image into a
-shared `emptyDir` that the main container then mounts read-only at
-`/root/models`.
+stays small and rebuilds don't reship gigabytes of weights. The image is
+**no longer run as an init container**: bootstrap's phase 14c
+extract-models ([`scripts/extract-models-to-host.sh`](../../scripts/extract-models-to-host.sh))
+copies `/models/.` out of it **once onto the host** at `/root/models`, and
+positronic-control / phantomos-api-server bind-mount that host directory
+read-only. (Historically a `load-models` init container copied it into a
+per-pod `emptyDir` instead.) See
+[operations.md §3.13 → Extracting models/policies to the host](../operations.md#extracting-modelspolicies-to-the-host-phase-14c).
 
 Source: [`scripts/phantom-models/build.py`](../scripts/phantom-models/build.py).
 
@@ -578,9 +582,12 @@ images:
     newTag: 2026-04-29
 ```
 
-Kustomize's `images:` transformer rewrites both `containers:` and
-`initContainers:`, so a single entry per repo covers the main pod
-*and* the `load-models` init container.
+Kustomize's `images:` transformer rewrites every matching image
+reference, so a single entry per repo covers each consumer. Note that
+`phantom-models` / `phantom-policies` are no longer in-cluster
+(init) containers — their `images:` entry now only tells the host-side
+extract-models phase which tag to copy from (see
+[operations.md §3.13 → Extracting models/policies to the host](../operations.md#extracting-modelspolicies-to-the-host-phase-14c)).
 
 Commit and push to the per-robot branch:
 
@@ -774,9 +781,10 @@ alias StartPhantomWalkingIMU2DMA="RCUTILS_COLORIZED_OUTPUT=1 \
     policy_path:=$PHANTOM_MODELS/walking-imu-hard-railing"
 ```
 
-`$PHANTOM_MODELS` resolves to `/root/models` — the read-only mount the
-init container populated from the `phantom-models` image. The launch
-file brings up the policy node, the DMA bridge, and the IMU receiver.
+`$PHANTOM_MODELS` resolves to `/root/models` — the host directory
+bind-mounted into the pod, populated by the extract-models phase from the
+`phantom-models` image (not an init container). The launch file brings up
+the policy node, the DMA bridge, and the IMU receiver.
 
 You should see ROS2 nodes spinning up and policy inference logs
 printing. The DMA bridge connects to the bare-metal `dma-ethercat`
@@ -843,7 +851,7 @@ machine drops back to ready.
 | `dma-ethercat` won't reach OP | `journalctl -u dma-ethercat -b`; verify `INTERFACE`, `DMA_CONFIG`, slave power |
 | ArgoCD app stuck `OutOfSync` | `k0s kubectl -n argocd get application phantomos-<robot> -o yaml` events tail |
 | Pod `ImagePullBackOff` | `curl http://localhost:5443/v2/_catalog`; re-prime; check `~/.docker/config.json` |
-| `load-models` init container fails | `positronic.sh logs --init`; check `phantom-models` tag in overlay |
+| positronic-control `Pending`/`FailedMount` on `/root/models`, or empty `/policy/list` | host `/root/models` not populated; run `sudo bash scripts/bootstrap-robot.sh --extract-models`; check `phantom-models`/`phantom-policies` tags in `host-config.yaml` |
 | `libcuda.so` missing in pod | `runtimeClassName: nvidia` not applied; re-run `configure-k0s-nvidia-runtime.sh` |
 | `/dev/shm` queues not appearing | `dma-ethercat` not running, or pod missing `hostIPC: true` |
 | Policy starts but X does nothing | `ros2 topic echo /joy`; `/dev/input/js*` permissions |

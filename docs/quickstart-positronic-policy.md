@@ -17,6 +17,52 @@ up and the positronic-control pod is Running.
 
 ---
 
+## Where models and policies live (read this first)
+
+Models and policies are **not** baked into the pod and are **not** copied
+in by an init container. They live on the **host** at `/root/models`, and
+the pods bind-mount that directory read-only:
+
+| Consumer | Host path | Mounted at | hostPath type |
+|---|---|---|---|
+| positronic-control | `/root/models` | `/root/models` (`$PHANTOM_MODELS`) | `Directory` — **must pre-exist** |
+| phantomos-api-server (policy picker) | `/root/models` | `/home/operator/models`, read-only | `DirectoryOrCreate` |
+| phantom-locomotion | `/root/models/policies` | `/data/policies`, read-only | `DirectoryOrCreate` |
+
+The host tree is populated **once** from the `phantom-models` /
+`phantom-policies` carrier images by bootstrap's **phase 14c
+extract-models** ([`scripts/extract-models-to-host.sh`](../scripts/extract-models-to-host.sh)),
+driven by the `images.phantom-models` / `images.phantom-policies` refs in
+`host-config.yaml`. It is idempotent (a `.extracted-ref` marker makes an
+unchanged-ref re-run a no-op) and self-versioned (a new image tag
+re-extracts in place).
+
+> **Important — positronic-control needs `/root/models` to exist.** Its
+> mount is `type: Directory`, so the pod will not schedule on a host where
+> `/root/models` is missing. The extract-models phase creates and populates
+> it; if you skip that phase you must `mkdir -p /root/models` (and supply
+> the model tree yourself) before positronic-control can run. The
+> locomotion and api-server mounts are `DirectoryOrCreate`, so they tolerate
+> an empty/absent dir and self-recover once it's populated.
+
+To (re-)populate the host tree manually — e.g. after pinning a new model
+tag — re-run just that bootstrap phase:
+
+```bash
+sudo bash scripts/bootstrap-robot.sh --extract-models
+```
+
+or invoke the extractor directly:
+
+```bash
+sudo bash scripts/extract-models-to-host.sh \
+  --models-ref   foundationbot/phantom-models:<tag> \
+  --policies-ref foundationbot/phantom-policies:<tag>
+# add --dry-run to preview, --force to re-extract an unchanged ref
+```
+
+---
+
 ## Why sleep-infinity?
 
 The container's args block dispatches on the `PHANTOM_CMD` environment
@@ -159,11 +205,11 @@ Follows the pod's stdout/stderr (`kubectl logs -f`). Works whether the
 pod is in dev or prod mode; in dev mode the output is empty
 (sleep-infinity prints nothing), in prod mode it's the policy's output.
 
-For init containers (`load-models`), pass the container name:
-
-```bash
-sudo bash positronic.sh logs -c load-models
-```
+> **Note:** positronic-control no longer has a `load-models` init
+> container — models are read off the host `/root/models` mount (see
+> [Where models and policies live](#where-models-and-policies-live-read-this-first)),
+> so there is no init-container log to follow. To inspect a named sidecar
+> on another workload, pass `-c <container>`.
 
 ---
 
@@ -213,9 +259,10 @@ the ConfigMap and use `set-cmd` for changes.
 
 | Symptom | Cause / fix |
 |---|---|
-| Pod in `Init:0/1` forever | phantom-models image not in containerd. Check `/var/lib/k0s/images/foundationbot-phantom-models_*.tar` exists; if missing, the bundle didn't extract. Re-run the install wrapper. |
+| Pod stuck `Pending` / `FailedMount` referencing `/root/models` | The host `/root/models` directory is missing. positronic-control mounts it `type: Directory`, so it must pre-exist. Run `sudo bash scripts/bootstrap-robot.sh --extract-models` (or `mkdir -p /root/models` and populate it). See [Where models and policies live](#where-models-and-policies-live-read-this-first). |
+| Policy picker / `/policy/list` empty, or policy not found at runtime | The host model/policy tree wasn't extracted. Verify `ls /root/models` and `ls /root/models/policies` are populated; if empty, run `sudo bash scripts/bootstrap-robot.sh --extract-models`. Confirm `images.phantom-models` / `images.phantom-policies` are pinned (not `:PLACEHOLDER`) in `host-config.yaml`. |
 | Pod `CrashLoopBackOff` after `set-cmd` | Your command exited non-zero. Kubernetes restarts the pod and re-runs it. Either fix the command or `clear-cmd` to fall back to sleep-infinity for debugging. |
-| `positronic.sh exec` fails with `container not found` | Pod isn't Running yet. Check `positronic.sh status` — if it's `Init:`, wait for the load-models init container to finish. |
+| `positronic.sh exec` fails with `container not found` | Pod isn't Running yet. Check `positronic.sh status` and wait for it to reach `Running`. |
 | GPU not visible inside the pod | `positronic.sh gpu-test` to verify CUDA libraries are mounted in. Most common cause: the NVIDIA runtime isn't registered with k0s containerd. Run `sudo bash scripts/configure-k0s-nvidia-runtime.sh` from the repo and restart k0s. |
 | `set-cmd` doesn't take effect | The ConfigMap update is async — `positronic.sh status` will show ConfigMap vs. pod views diverging. Pod restarts automatically on the rollout, but if it didn't, use `positronic.sh redeploy`. |
 | Policy can't find data partition / camera config | The positronic-control pod mounts hostPaths from the host's filesystem. Check `host-config.yaml`'s `deployments.positronic-control.mounts` block — that's where mount points like `/data`, `/data2`, `/recordings`, torch cache, etc. are configured. |
