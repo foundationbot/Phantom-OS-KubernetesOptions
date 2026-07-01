@@ -152,12 +152,24 @@ images:
     image: foundationbot/positronic-control:REPLACE-WITH-LOCAL-BUILD-TAG
   phantom-models:
     image: foundationbot/phantom-models:REPLACE-WITH-MODEL-BUILD-DATE
-  operator-ui:
-    image: foundationbot/argus.operator-ui:qa
+  # operator-ui is intentionally NOT pinned here — the base manifest's
+  # in-tree default (foundationbot/argus.operator-ui:gaia-chat) is the
+  # fleet default. A host-config override WINS over the manifest, so
+  # listing it here would silently downgrade every robot off gaia-chat
+  # (configure-host auto-fills an empty row when no image bundle is
+  # present, which is the correct "no override, manifest applies" path).
+  # Pin it per-host only on a robot that must run a different operator-ui.
   dma-streams:
-    image: foundationbot/dma-streams:SOF-1167
+    # SOF-1167-latest is the multi-arch branch tag CI publishes (resolves arm64
+    # on the Jetson). The bare :SOF-1167 tag is NOT published — CI emits
+    # <branch>-latest + per-build <branch>-<version>. dma-recorder runs this.
+    image: foundationbot/dma-streams:SOF-1167-latest
   dma-ethercat:
-    image: foundationbot/dma-ethercat:SOF-1167
+    # Jetson/arm64 fleet: CI publishes per-arch tags (NOT multi-arch), so the
+    # bare :SOF-1167 does NOT exist and :SOF-1167-latest is the amd64 build —
+    # the arm64 installer Job needs the -aarch64 suffix. (amd64 robots: drop the
+    # suffix / use :SOF-1167-latest.)
+    image: foundationbot/dma-ethercat:SOF-1167-latest-aarch64
   # ik-mk2 is default-off (nodeLabels has-ik-mk2: 'false'); uncomment and
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
@@ -247,6 +259,20 @@ images:
 #                              # OR {driver: igc, index: 0}
 #   dmaRtCpu: 11               # SOEM cyclic loop core (nohz_full target)
 #   installAffinityDefaults: true
+#   podPins:                   # pin k0s pods ONTO isolated cores (opt-in).
+#                              # systemd's CPUAffinity= drop-in can't reach
+#                              # pods (they run under containerd/kubepods),
+#                              # so a small phantom-pod-affinity.timer applies
+#                              # these by cmdline match. match = `pgrep -f`
+#                              # pattern; cpus = taskset -c list.
+#     - {match: "dma_recorder",       cpus: "12"}   # .rrd shm recorder
+#     - {match: "dma_video.recorder", cpus: "12"}   # camera recorder
+#     - {match: "run_residual_locomotion_supervisor", cpus: "13"}  # positronic
+#                              # CAVEAT: only works while the target cores stay
+#                              # in the pod cgroup cpuset (plain isolcpus= /
+#                              # non-exclusive partitions). If a robot makes the
+#                              # isolated cores EXCLUSIVE cgroup partitions, the
+#                              # pin fails (WARN) — see docs/internal/cpu-isolation.md.
 
 # Per-host phantom-locomotion config. Bootstrap phase locomotion-config
 # renders /etc/phantomos/phantom-locomotion-config.yaml from this
@@ -635,6 +661,9 @@ nodeLabels:
   # every run. Edit a value to (de)schedule the workload on this host.
   # dma-video stack (mediamtx, camera-params, rtsp-streamer, producer, viewer)
   foundation.bot/has-cameras: 'true'
+  # gaia observability stack (otel-collector, prometheus, grafana, jaeger, loki,
+  # node/process/tegra exporters, shm-stats, docker-events-watcher)
+  foundation.bot/has-gaia: 'true'
   # phantom-locomotion DaemonSet (mutually exclusive with has-positronic)
   foundation.bot/has-locomotion: 'false'
   # positronic-control Deployment

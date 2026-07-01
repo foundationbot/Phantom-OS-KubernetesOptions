@@ -522,6 +522,51 @@ is a bootstrap-only artifact. If you're setting up isolation entirely by
 hand (the Steps 0-5 procedure above), you also need to write the slice
 unit and drop-ins yourself.
 
+### Pods on isolated cores (`podPins`)
+
+The slice trick above only works for **systemd units**. k0s pods run under
+containerd/`kubepods.slice`, so `Slice=` and the manager-wide `CPUAffinity=`
+drop-in never reach them. To place a *pod* workload (the shm/video
+recorders, the locomotion supervisor) onto an isolated core, declare it
+under `cpuIsolation.podPins`:
+
+```yaml
+cpuIsolation:
+  podPins:
+    - {match: "dma_recorder",       cpus: "12"}   # .rrd shm recorder
+    - {match: "dma_video.recorder", cpus: "12"}   # camera recorder
+    - {match: "run_residual_locomotion_supervisor", cpus: "13"}
+```
+
+Phase 10 (Step 8) renders `/etc/phantom-pod-affinity.conf` from these and
+installs `phantom-pod-affinity.timer`, which runs
+`scripts/cpusets/apply_pod_affinity.sh apply` on boot and every 30s. That
+script `pgrep -f`-matches each `match`, skips wrapper shells / the
+`kubectl exec` client (by `comm`), and `taskset -a -c`-pins the real
+target and all its threads onto `cpus`. The timer re-asserts so a pod that
+restarts (or an operator-launched supervisor started later) is re-pinned
+within 30s.
+
+**CAVEAT — the cgroup ceiling still applies.** `taskset` onto an isolated
+core only succeeds while that core is still in the pod's cgroup `cpuset`.
+This holds under plain `isolcpus=` (kubepods spans every cpu, as on
+mk11test). But if the isolated cores are made **exclusive cgroup-v2
+partitions** (`manage_cpusets.sh apply` sets
+`cpuset.cpus.partition=isolated`), the `cpuset.cpus.exclusive` cascade
+removes them from `kubepods.slice` too — exactly as it does for
+`system.slice` above — and the pin fails with `EINVAL`. `apply_pod_affinity.sh`
+logs a `WARN` per failed pin and continues rather than aborting. So
+`podPins` is for the plain-`isolcpus=` layout; on a fully-partitioned robot
+a pod cannot be placed on an isolated core without also carving it a
+non-exclusive slice (not currently automated).
+
+Manual control:
+```bash
+/opt/phantom-cpusets/apply_pod_affinity.sh status     # desired vs current
+/opt/phantom-cpusets/apply_pod_affinity.sh apply      # pin now
+/opt/phantom-cpusets/apply_pod_affinity.sh uninstall  # remove the timer
+```
+
 ### Skipping the phase
 
 `--skip-cpu-isolation` opts out for one bootstrap run (e.g. when

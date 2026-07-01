@@ -341,12 +341,14 @@ SELECTED_PHASES=()
 # These are the namespaces the bootstrap script itself creates / seeds.
 # Kept in sync with PULL_SECRET_NAMESPACES + the argocd namespace owned
 # by the gitops phase's terraform/helm install.
-WORKLOAD_NAMESPACES=(argocd argus dma-video nimbus phantom positronic)
+WORKLOAD_NAMESPACES=(argocd argus dma-video gaia nimbus phantom positronic)
 
 # Namespaces that pull `foundationbot/*` images and therefore need the
 # dockerhub-creds Secret. Kept in sync with REQUIREMENTS.md and with the
-# `imagePullSecrets:` references in manifests/base/{argus,dma-video,nimbus}/.
-PULL_SECRET_NAMESPACES=(argus dma-video nimbus phantom positronic)
+# `imagePullSecrets:` references in manifests/base/{argus,dma-video,gaia,nimbus}/.
+# gaia pulls foundationbot/{gaia-vector,dma-common,...} — without its creds the
+# gaia stack ImagePullBackOffs on "authorization failed".
+PULL_SECRET_NAMESPACES=(argus dma-video gaia nimbus phantom positronic)
 PULL_SECRET_NAME="dockerhub-creds"
 
 # Host-systemd services to stop + disable before bringing up the cluster.
@@ -2115,38 +2117,44 @@ operator_ui_config() {
     info "created ns/$PAIRING_NS"
   fi
 
-  # Determine AI_PC_HOST: --ai-pc-url overrides; otherwise read the
-  # existing PAIRING_FILE (which auto-migrates pre-FIR-330 files that
-  # still hold AI_PC_URL).
-  local ai_pc_host=""
-  if [ -n "$AI_PC_URL" ]; then
-    case "$AI_PC_URL" in
-      http://*|https://*) ;;
-      *) fail "--ai-pc-url must start with http:// or https:// (got: $AI_PC_URL)"; return ;;
-    esac
-    ai_pc_host=$(_url_to_host "$AI_PC_URL") || {
-      fail "could not extract host from --ai-pc-url '$AI_PC_URL'"
-      return
-    }
-  elif [ -r "$PAIRING_FILE" ]; then
-    ai_pc_host=$(_read_ai_pc_host_from_file) || {
-      fail "cannot derive AI_PC_HOST from $PAIRING_FILE — re-run with --ai-pc-url"
-      return
-    }
-  else
-    fail "$PAIRING_FILE missing — first bringup needs --ai-pc-url <url>"
-    return
-  fi
-
-  # CONTROL_PC_HOST is always resolved fresh — the robot's reachable
-  # address can shift (Tailscale rejoin, NIC change), and there's no
-  # cost to rewriting since we rollout-restart operator-ui below.
+  # CONTROL_PC_HOST — the robot's own reachable (tailscale) address. Resolved
+  # fresh each run (it can shift on a Tailscale rejoin / NIC change).
   local control_pc_host
   control_pc_host=$(_resolve_control_pc_host) || {
     fail "could not resolve CONTROL_PC_HOST (no tailscale IP, no default IPv4 route)"
     info "  set CONTROL_PC_HOST_OVERRIDE=<ip-or-fqdn> and re-run"
     return
   }
+
+  # These robots run everything (gaia, rerun, AI-API, control) on the ONE host,
+  # so move EVERYTHING to the host's own tailscale IP: AI_PC_HOST defaults to
+  # CONTROL_PC_HOST. An explicit --ai-pc-url still overrides for the rare split
+  # AI-PC topology. (No more reading a stale placeholder out of the pairing
+  # file — that left AI_PC_HOST=REPLACE-WITH-AI-PC-TAILSCALE-IP and emerg'd nginx.)
+  local ai_pc_host="$control_pc_host"
+  if [ -n "$AI_PC_URL" ]; then
+    case "$AI_PC_URL" in
+      http://*|https://*) ai_pc_host=$(_url_to_host "$AI_PC_URL") || ai_pc_host="$control_pc_host" ;;
+      *) fail "--ai-pc-url must start with http:// or https:// (got: $AI_PC_URL)"; return ;;
+    esac
+  fi
+
+  # If AI_PC_HOST is unset or still the template placeholder, this robot has
+  # NO separate AI PC — point it at the robot's own reachable address so the
+  # operator-ui/argus-nginx upstreams resolve (an unsubstituted
+  # REPLACE-WITH-AI-PC-TAILSCALE-IP makes nginx emerg "host not found in
+  # upstream"). Prefer host-config aiPcUrl when it carries a real host,
+  # otherwise reuse the freshly-resolved CONTROL_PC_HOST.
+  case "$ai_pc_host" in
+    ""|*REPLACE-WITH*)
+      _hc_ai_host=""
+      _hc_ai="$(python3 "$HOST_CONFIG_HELPER" "$HOST_CONFIG_FILE" get aiPcUrl 2>/dev/null || true)"
+      case "$_hc_ai" in http://*|https://*) _hc_ai_host="$(_url_to_host "$_hc_ai" 2>/dev/null || true)" ;; esac
+      case "$_hc_ai_host" in ""|*REPLACE-WITH*) _hc_ai_host="$control_pc_host" ;; esac
+      ai_pc_host="$_hc_ai_host"
+      info "AI_PC_HOST was unset/placeholder — using $ai_pc_host (robot's own address; no separate AI PC)"
+      ;;
+  esac
 
   # ROBOT identifier for operator-ui's robotConfig.ts lookup
   # (drives camera server URL resolution). Defaults to $(hostname).
@@ -2928,6 +2936,9 @@ cpu_isolation() {
     if [ -n "$_nic_iface" ] && [ -n "$_nic_irq" ]; then
       info "DRY-RUN  pin $_nic_iface IRQs to core $_nic_irq + governor lock + workqueue mask + boot service"
     fi
+    if python3 -c "import json,sys; sys.exit(0 if (json.loads(sys.argv[1] or '{}').get('podPins')) else 1)" "$ci_json" 2>/dev/null; then
+      info "DRY-RUN  render /etc/phantom-pod-affinity.conf + install phantom-pod-affinity.timer (cpuIsolation.podPins)"
+    fi
     info "DRY-RUN  warn REBOOT REQUIRED if cmdline changed"
     return
   fi
@@ -3060,6 +3071,30 @@ cpu_isolation() {
     fi
   else
     skip "cpuIsolation.nic not set — skipping NIC IRQ pinning"
+  fi
+
+  # ---- Step 8: pin selected k0s pods onto isolated cores ----------------
+  # k0s pods run under containerd/kubepods, so the systemd CPUAffinity=
+  # drop-in (step 5) cannot place them. cpuIsolation.podPins[] drives a
+  # small timer service (scripts/cpusets/apply_pod_affinity.sh) that pins
+  # named workloads (e.g. the shm/video recorders, the locomotion
+  # supervisor) ONTO their cores. Opt-in: absent podPins => skipped.
+  # CAVEAT: only works while the target cores remain in the pod's cgroup
+  # cpuset (plain isolcpus= / non-exclusive partitions). See
+  # docs/internal/cpu-isolation.md.
+  local pod_aff_conf pod_aff_rc pod_aff_script
+  pod_aff_script="$(dirname "$CPUSETS_SCRIPT")/apply_pod_affinity.sh"
+  pod_aff_conf="$(cpusets_render_pod_affinity_conf "$ci_json")"; pod_aff_rc=$?
+  if [ "$pod_aff_rc" -eq 2 ]; then
+    skip "no cpuIsolation.podPins — pod CPU affinity service not installed"
+  elif [ "$pod_aff_rc" -ne 0 ] || [ -z "$pod_aff_conf" ]; then
+    fail "failed to render pod-affinity conf"
+  elif [ ! -x "$pod_aff_script" ]; then
+    fail "$pod_aff_script not found or not executable"
+  elif "$pod_aff_script" install "$pod_aff_conf" >/dev/null; then
+    pass "pod CPU affinity service installed (phantom-pod-affinity.timer)"
+  else
+    fail "apply_pod_affinity.sh install failed"
   fi
 
   # ---- Step 7: reboot marker --------------------------------------------
@@ -3602,7 +3637,16 @@ install_dma_ethercat() {
   fi
   note "found .deb on host: $(basename "$deb")"
   note "running dpkg -i..."
-  if dpkg -i "$deb"; then
+  # Non-interactive conffile handling: the dma-ethercat .deb ships
+  # /etc/dma/{dma-ethercat,dma-bridges}.env + the debug.conf drop-in as dpkg
+  # conffiles. On a reinstall/upgrade where the operator (or a cutover step)
+  # modified one, a plain `dpkg -i` blocks on the interactive
+  # "install the package maintainer's version? [Y/n/d]" prompt. --force-confdef
+  # + --force-confold keeps the operator's existing conffile and takes the
+  # maintainer default only for untouched ones — no prompt, edits preserved.
+  # (The dma-bridges.env collector-endpoint cutover is a documented manual
+  # step; see architecture.md "Cutover gotcha".)
+  if DEBIAN_FRONTEND=noninteractive dpkg -i --force-confdef --force-confold "$deb"; then
     pass "dpkg -i $(basename "$deb")"
   else
     fail "dpkg -i $deb"
@@ -3655,6 +3699,37 @@ install_dma_ethercat() {
     systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/      /' || true
     ethercat_die "service did not start — check systemctl status / journalctl -u dma-ethercat for the underlying cause"
   fi
+
+  # Telemetry bridges (dma-{boundary,loop-event}-bridge) ship in the
+  # dma-ethercat .deb but DISABLED: their [Install] WantedBy=dma-ethercat.service
+  # only takes effect once the unit is `enable`d, and nothing else enables them.
+  # Without this a clean deploy never starts the otel/event bridges and
+  # Tempo/Loki show zero dma traces (k8s container logs via vector still
+  # appear, masking the gap). enable --now so they run now AND auto-start
+  # with dma-ethercat thereafter. Non-fatal: telemetry must never block RT
+  # control bringup.
+  note "enabling + starting telemetry bridges..."
+  for _br in dma-boundary-bridge dma-loop-event-bridge; do
+    if ! systemctl cat "${_br}.service" >/dev/null 2>&1; then
+      note "${_br}.service not present (older dma-ethercat .deb?) — skipping"
+      continue
+    fi
+    # Best-effort: clear an orphaned nerdctl name reservation left by a prior
+    # reinstall. Restart=always cycling can strand the name->ID file under the
+    # nerdctl data root after the containerd container is already gone; the unit
+    # then fatals "name already used by ID …" forever. `nerdctl rm` by name
+    # can't clear it (no such container), so remove the stale name file only
+    # when no live container actually owns the name.
+    if ! nerdctl --address /run/k0s/containerd.sock --namespace dma ps -a \
+           --format '{{.Names}}' 2>/dev/null | grep -qx "$_br"; then
+      rm -f /var/lib/nerdctl/*/dma/"$_br" 2>/dev/null || true
+    fi
+    if systemctl enable --now "${_br}.service" >/dev/null 2>&1; then
+      pass "${_br}.service enabled and started"
+    else
+      warn "${_br}.service did not start (telemetry bridge; non-fatal) — check journalctl -u ${_br}"
+    fi
+  done
 }
 
 # Resolve the per-robot DMA_CONFIG path and write it to
@@ -4464,6 +4539,56 @@ _gitops_render_app() {
 
 gitops() {
   if [ "$SKIP_GITOPS" = 1 ]; then phase "phase 13: gitops  (skipped)"; return; fi
+
+  # Resolve host-config path up front (mirror the dry-run fallback used below).
+  local hc="$HOST_CONFIG_FILE"
+  if [ "$DRY_RUN" = 1 ] && [ ! -r "$hc" ] && [ -n "$HOST_CONFIG_INPUT" ] && [ -r "$HOST_CONFIG_INPUT" ]; then
+    hc="$HOST_CONFIG_INPUT"
+  fi
+
+  # OFFLINE DIRECT APPLY — gitSource=local with no embedded .git.
+  # The .deb ships the manifests to $LOCAL_GIT_TREE; with no .git there is
+  # nothing for ArgoCD to track, and _resolve_git_source would fall back to
+  # GitHub main (= stale upstream manifests: positronic-control,
+  # phantom-models:PLACEHOLDER, legacy dma_bridge). Instead apply the LOCAL
+  # stacks directly with kubectl — matches architecture.md ("No ArgoCD —
+  # kubectl apply -k") and keeps the .deb the offline source of truth.
+  # Per-host kustomize image overrides are an ArgoCD-mode feature and are NOT
+  # applied here; the shipped manifests' pinned image tags win.
+  local _git_source
+  _git_source="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-git-source 2>/dev/null || printf 'local')"
+  if [ "$_git_source" = "local" ] && [ ! -d "${LOCAL_GIT_TREE}/.git" ]; then
+    phase "phase 13: gitops — offline direct apply (gitSource=local, no embedded .git)"
+
+    # Stop any ArgoCD from a prior run reconciling stale github manifests over
+    # what we're about to apply. Orphan (don't cascade-delete) so we never
+    # disturb live workloads; then drop the argocd namespace entirely.
+    if [ "$DRY_RUN" = 0 ] && "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1; then
+      info "removing stale ArgoCD (it tracked github main, not local manifests)"
+      "${KUBECTL[@]}" -n argocd delete applications --all --cascade=orphan --ignore-not-found >/dev/null 2>&1 || true
+      "${KUBECTL[@]}" delete ns argocd --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    fi
+
+    local _stacks
+    _stacks="$(python3 "$HOST_CONFIG_HELPER" "$hc" get-enabled-stacks 2>/dev/null || true)"
+    [ -z "$_stacks" ] && _stacks=$'core\noperator'
+    local _s _path
+    while IFS= read -r _s; do
+      [ -z "$_s" ] && continue
+      _path="$REPO_ROOT/manifests/stacks/$_s"
+      if [ ! -d "$_path" ]; then warn "stack path missing: $_path — skipping"; continue; fi
+      if [ "$DRY_RUN" = 1 ]; then note "DRY-RUN  ${KUBECTL[*]} apply -k $_path"; continue; fi
+      info "applying stack/$_s  (kubectl apply -k $_path)"
+      if "${KUBECTL[@]}" apply -k "$_path" >/dev/null 2>&1; then
+        pass "applied stack/$_s"
+      else
+        "${KUBECTL[@]}" apply -k "$_path" 2>&1 | tail -6 >&2
+        fail "apply stack/$_s"
+      fi
+    done <<< "$_stacks"
+    return
+  fi
+
   phase "phase 13: gitops (install argocd + apply per-host Application)"
 
   # argocd-repo-server mounts $LOCAL_GIT_TREE (/opt/Phantom-OS-KubernetesOptions)
@@ -4791,6 +4916,11 @@ _stack_for_image() {
 
 image_overrides() {
   if [ "$SKIP_IMAGE_OVERRIDES" = 1 ]; then phase "phase 15: image overrides  (skipped)"; return; fi
+  # Offline direct-apply mode has no Argo Applications to inject into; the
+  # shipped manifests' pinned image tags are authoritative.
+  if [ "$DRY_RUN" = 0 ] && ! "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1; then
+    phase "phase 15: image overrides  (skipped — no argocd namespace; offline direct-apply)"; return
+  fi
   phase "phase 15: image overrides (inject kustomize.images per stack)"
 
   # In dry-run before --host-config has actually been installed, fall
@@ -5306,6 +5436,11 @@ _argocd_default_password="1984"
 
 argocd_admin() {
   if [ "$SKIP_ARGOCD_ADMIN" = 1 ]; then phase "phase 14: argocd admin  (skipped)"; return; fi
+  # Offline direct-apply mode (gitSource=local, no embedded .git) deploys no
+  # ArgoCD — there is nothing to administer. Detect by the absent namespace.
+  if [ "$DRY_RUN" = 0 ] && ! "${KUBECTL[@]}" get ns argocd >/dev/null 2>&1; then
+    phase "phase 14: argocd admin  (skipped — no argocd namespace; offline direct-apply)"; return
+  fi
   phase "phase 14: argocd admin (install CLI + set admin password)"
 
   # 1) install argocd CLI if missing
