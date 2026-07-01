@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Owns the shared `phantom` namespace used by all robot-side Phantom
+# services (yovariable-server, dma-recorder, ...). Split out of the
+# former base/phantomos-api-server so the namespace survives that
+# component's removal. Other bases targeting `phantom` do not redeclare
+# the namespace — overlays assume this base is pulled in.
+resources:
+  - namespace.yaml

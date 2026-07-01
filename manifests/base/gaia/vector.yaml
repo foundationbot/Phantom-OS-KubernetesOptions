@@ -29,7 +29,7 @@ spec:
         runAsGroup: 0
       containers:
         - name: vector
-          image: foundationbot/gaia-vector:SOF-1167
+          image: foundationbot/gaia-vector:beta
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/vector/vector.yaml"]
           # Probes hit Vector's api (config: api.enabled, :8686). host:127.0.0.1

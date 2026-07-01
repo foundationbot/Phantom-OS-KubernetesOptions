@@ -1,0 +1,52 @@
+[Unit]
+Description=Phantom Control API Server (robot orchestration / systemd control)
+Documentation=https://github.com/foundationbot/Phantom-OS-KubernetesOptions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=phantom-api
+Group=phantom-api
+WorkingDirectory=/opt/phantom-control-api
+# Per-host overrides (API_PORT, PHANTOM_CONTROLLER_*, SERVICE_NAME) are written
+# by install-phantom-control-api.sh. Leading '-' = optional.
+EnvironmentFile=-/etc/phantom-control-api/phantom-control-api.env
+Environment=PATH=/opt/phantom-control-api/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=/opt/phantom-control-api/src
+Environment=API_HOST=0.0.0.0
+Environment=API_PORT=5000
+Environment=LOG_LEVEL=INFO
+Environment=LOG_FILE=/var/log/phantom-control-api/phantom_control_api.log
+Environment=SERVICE_NAME=phantom-positronic-control.service
+Environment=STATS_COLLECTION_INTERVAL=3600
+Environment=STATS_HISTORY_SIZE=24
+Environment=DASHBOARD_AUTO_REFRESH=30
+Environment=PHANTOM_CONTROLLER_RUNNER_PATH=./phantom/bin/PhantomControllerRunner
+Environment=PHANTOM_CONTROLLER_JSON_FILE=phantom-0001.json
+Environment=PHANTOM_CONTROLLER_INTERFACE=ecat1
+Environment=STATIC_DIR=/opt/phantom-control-api/static
+ExecStart=/opt/phantom-control-api/venv/bin/python /opt/phantom-control-api/src/phantom_control_api_simple.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=phantom-control-api
+# Filesystem hardening kept; D-Bus systemctl control is granted via the
+# scoped polkit rule (49-phantom-control-api.rules), not via setuid, so
+# NoNewPrivileges stays on.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/phantom-control-api /opt/phantom-control-api
+ProtectKernelTunables=true
+ProtectKernelModules=true
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

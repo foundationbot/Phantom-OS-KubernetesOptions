@@ -1093,9 +1093,11 @@ cmd_uninstall_runtime() {
 # adds rt flags, shows a diff, and applies atomically after confirmation.
 cmd_migrate_cmdline() {
     local add_rt_flags=0
+    local nohz_full_cpus=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --add-rt-flags) add_rt_flags=1; shift ;;
+            --nohz-full) nohz_full_cpus="${2:-}"; shift 2 ;;
             --yes) SKIP_PROMPTS=1; shift ;;
             -*) die "Unknown flag: $1" ;;
             *)  die "Unexpected argument: $1" ;;
@@ -1167,6 +1169,16 @@ cmd_migrate_cmdline() {
         #   on isolated cores at driver probe time.
         if [[ -n "$managed" ]]; then
             need+=("isolcpus=domain,managed_irq,$managed")
+            # rcu_nocbs over the isolated set: offload RCU callbacks off the
+            # RT cores (pairs with the rcu_nocb_poll flag added above).
+            need+=("rcu_nocbs=$managed")
+        fi
+        # nohz_full over the dma RT core(s): stop the per-CPU scheduler tick
+        # there when a single RT thread runs — the last jitter source that
+        # isolcpus alone leaves on the isolated cores. Caller passes the RT
+        # core via --nohz-full (host-config cpuIsolation.dmaRtCpu).
+        if [[ -n "$nohz_full_cpus" ]]; then
+            need+=("nohz_full=$nohz_full_cpus")
         fi
         local flag
         for flag in "${need[@]}"; do

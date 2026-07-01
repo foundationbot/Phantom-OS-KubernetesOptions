@@ -406,6 +406,7 @@ SKIP_ECAT_INTERFACE=0
 SKIP_CPU_ISOLATION=0
 SKIP_LOG_MANAGEMENT=0
 SKIP_GAIA_HOST=0
+SKIP_PHANTOM_CONTROL_API=0
 # dma-ethercat install runs by default. Combined with the default-on
 # uninstall pre-phase, a routine bootstrap re-run gives you a clean
 # reinstall of the realtime stack. Pass --skip-ethercat-install to
@@ -453,6 +454,7 @@ while [ $# -gt 0 ]; do
     --cpu-isolation)     SELECTED_PHASES+=(cpu-isolation); shift ;;
     --log-management)    SELECTED_PHASES+=(log-management); shift ;;
     --gaia-host)         SELECTED_PHASES+=(gaia-host); shift ;;
+    --phantom-control-api) SELECTED_PHASES+=(phantom-control-api); shift ;;
     --gitops)            SELECTED_PHASES+=(gitops); shift ;;
     --argocd-admin)      SELECTED_PHASES+=(argocd-admin); shift ;;
     --load-image-tars)   SELECTED_PHASES+=(load-image-tars); shift ;;
@@ -488,6 +490,8 @@ while [ $# -gt 0 ]; do
     --skip-log-management)
                          SKIP_LOG_MANAGEMENT=1; shift ;;
     --skip-gaia-host)    SKIP_GAIA_HOST=1; shift ;;
+    --skip-phantom-control-api)
+                         SKIP_PHANTOM_CONTROL_API=1; shift ;;
     --skip-operator-ui-config)
                          SKIP_OPERATOR_UI_CONFIG=1; shift ;;
     --skip-ethercat-install)
@@ -689,6 +693,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   SKIP_CPU_ISOLATION=1
   SKIP_LOG_MANAGEMENT=1
   SKIP_GAIA_HOST=1
+  SKIP_PHANTOM_CONTROL_API=1
   SKIP_GITOPS=1
   SKIP_ARGOCD_ADMIN=1
   SKIP_LOAD_IMAGE_TARS=1
@@ -719,6 +724,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
       cpu-isolation)     SKIP_CPU_ISOLATION=0 ;;
       log-management)    SKIP_LOG_MANAGEMENT=0 ;;
       gaia-host)         SKIP_GAIA_HOST=0 ;;
+      phantom-control-api) SKIP_PHANTOM_CONTROL_API=0 ;;
       gitops)            SKIP_GITOPS=0 ;;
       argocd-admin)      SKIP_ARGOCD_ADMIN=0 ;;
       load-image-tars)   SKIP_LOAD_IMAGE_TARS=0 ;;
@@ -741,7 +747,7 @@ if [ "${#SELECTED_PHASES[@]}" -gt 0 ]; then
   _needs_robot=0
   for _p in "${SELECTED_PHASES[@]}"; do
     case "$_p" in
-      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|ecat-interface|load-image-tars|extract-models) ;;
+      deps|seed-pull-secrets|argocd-admin|validate|install-dma-ethercat|cpu-isolation|log-management|gaia-host|phantom-control-api|ecat-interface|load-image-tars|extract-models) ;;
       *) _needs_robot=1; break ;;
     esac
   done
@@ -1390,6 +1396,18 @@ host_config() {
   if [ "$SKIP_HOST" = 1 ]; then phase "phase 4: host config  (skipped)"; return; fi
   phase "phase 4: host config"
 
+  # Ensure /etc/phantom exists so the dma-video cameras-config hostPath
+  # (type: FileOrCreate, /etc/phantom/head_camera.json) can be created by
+  # the kubelet. FileOrCreate creates the file but NOT its parent dir, so
+  # without this the camera pods stick in ContainerCreating with
+  # "head_camera.json: no such file or directory" even on a robot with no
+  # OAK config. ArgoCD does not manage this host path.
+  if [ "$DRY_RUN" = 1 ]; then
+    info "DRY-RUN  mkdir -p /etc/phantom"
+  else
+    mkdir -p /etc/phantom && pass "/etc/phantom present (dma-video hostPath parent)"
+  fi
+
   # Always run — the script is internally idempotent (hosts.toml insert
   # is no-op when already present, daemon.json merge is no-op when the
   # entry exists). A previous skip-on-hosts.toml-only check could leave
@@ -2035,7 +2053,15 @@ seed_pull_secrets() {
     fi
   fi
 
-  # Pick a source file (explicit override, then ~/.docker/config.json).
+  # Pick a source file: explicit override, then root's docker config,
+  # then (when run via sudo) the invoking user's. Operators commonly
+  # `docker login` as themselves and then run bootstrap with sudo, which
+  # leaves the creds in /home/$SUDO_USER/.docker — not /root/.docker that
+  # this (root) process sees as $HOME. Without the SUDO_USER fallback,
+  # dockerhub-creds gets created in no namespace and every private pull
+  # dies with insufficient_scope / ImagePullBackOff. credsStore-backed
+  # configs have no inline auths (would authenticate to nothing), so each
+  # candidate must have a non-empty .auths.
   local secret_file=""
   if [ -n "$DOCKERHUB_SECRET_FILE" ]; then
     if [ ! -r "$DOCKERHUB_SECRET_FILE" ]; then
@@ -2044,15 +2070,19 @@ seed_pull_secrets() {
     fi
     secret_file="$DOCKERHUB_SECRET_FILE"
     info "source: $secret_file (--dockerhub-secret-file)"
-  elif [ -r "$HOME/.docker/config.json" ]; then
-    # credsStore-backed configs have no inline auths, so the resulting
-    # Secret would authenticate to nothing. Detect that and fall through.
-    if jq -e '(.auths // {}) | length > 0' "$HOME/.docker/config.json" >/dev/null 2>&1; then
-      secret_file="$HOME/.docker/config.json"
-      info "source: $secret_file (default)"
-    else
-      info "$HOME/.docker/config.json has no inline auths (credsStore?); falling back to phantom ns"
-    fi
+  else
+    local _cand
+    for _cand in "$HOME/.docker/config.json" \
+                 "${SUDO_USER:+/home/$SUDO_USER/.docker/config.json}"; do
+      [ -n "$_cand" ] && [ -r "$_cand" ] || continue
+      if jq -e '(.auths // {}) | length > 0' "$_cand" >/dev/null 2>&1; then
+        secret_file="$_cand"
+        info "source: $secret_file"
+        break
+      fi
+    done
+    [ -n "$secret_file" ] || \
+      info "no docker config with inline auths under /root or \$SUDO_USER (credsStore?); falling back to phantom ns"
   fi
 
   # Build the secret YAML from whichever source resolved.
@@ -3290,7 +3320,7 @@ cpu_isolation() {
   # the cgroup-v2 partition created in step 2, not the cmdline.
   local cmdline_changed=0
   local migrate_out migrate_rc
-  migrate_out="$(cpusets_run migrate-cmdline --add-rt-flags --yes 2>&1)"
+  migrate_out="$(cpusets_run migrate-cmdline --add-rt-flags --nohz-full "$_ci_dma_rt" --yes 2>&1)"
   migrate_rc=$?
   printf '%s\n' "$migrate_out"
   if [ $migrate_rc -ne 0 ]; then
@@ -3784,6 +3814,35 @@ gaia_host() {
   fi
 }
 
+# The robot control API (phantom-control-api.service on :5000) is a HOST
+# process, not a k8s workload: it drives host systemd units (dma-ethercat,
+# positronic, ...) and is what argus nginx /api/control/ + /api/ai/ proxy
+# to. install-phantom-control-api.sh lays down the vendored payload
+# (host-services/phantom-control-api/), builds the venv, installs the unit +
+# scoped polkit rule, and enables it. Idempotent. Per-host values
+# (ecat interface, controller json) come from cpuIsolation.nic / host-config.
+phantom_control_api() {
+  if [ "${SKIP_PHANTOM_CONTROL_API:-0}" = 1 ]; then
+    phase "phase: phantom-control-api host service  (skipped — --skip-phantom-control-api)"
+    return
+  fi
+  phase "phase: phantom-control-api host service"
+  local installer="$REPO_ROOT/scripts/install-phantom-control-api.sh"
+  if [ ! -f "$installer" ]; then
+    info "no $installer — skipping phantom-control-api"
+    return
+  fi
+
+  # The EtherCAT NIC is renamed to `ecat1` by the ecat-interface udev rule
+  # fleet-wide, which is the installer's default PCA_CONTROLLER_IFACE — so no
+  # per-host interface needs to be threaded here.
+  if DRY_RUN="$DRY_RUN" bash "$installer"; then
+    pass "phantom-control-api installed"
+  else
+    fail "install-phantom-control-api.sh"
+  fi
+}
+
 install_dma_ethercat() {
   if [ "$SKIP_INSTALL_DMA_ETHERCAT" = 1 ]; then
     phase "phase 12: install dma-ethercat  (skipped — --skip-ethercat-install)"
@@ -4016,6 +4075,25 @@ install_dma_ethercat() {
     systemctl --no-pager status dma-ethercat.service 2>&1 | sed 's/^/      /' || true
     ethercat_die "service did not start — check systemctl status / journalctl -u dma-ethercat for the underlying cause"
   fi
+
+  # Spine bridges (boundary + loop-event) ship in the dma-ethercat .deb
+  # as separate units with WantedBy=dma-ethercat.service, but install
+  # *disabled* — and PartOf= only propagates stop/restart, not start. So
+  # enable them explicitly here; otherwise they sit inactive and the
+  # control-event spine is silently down. Non-fatal: a bridge that can't
+  # start must not halt the realtime stack.
+  local _bridge
+  for _bridge in dma-boundary-bridge dma-loop-event-bridge; do
+    if systemctl cat "${_bridge}.service" >/dev/null 2>&1; then
+      if systemctl enable --now "${_bridge}.service" 2>/dev/null; then
+        pass "${_bridge}.service enabled and started"
+      else
+        warn "${_bridge}.service present but failed to enable/start (non-fatal) — journalctl -u ${_bridge}"
+      fi
+    else
+      note "${_bridge}.service not shipped by this dma-ethercat .deb — skipping"
+    fi
+  done
 }
 
 # Resolve the per-robot DMA_CONFIG path and write it to
@@ -6131,6 +6209,7 @@ print_plan() {
   _step $([ "$SKIP_CPU_ISOLATION"        = 0 ] && echo 1 || echo 0) "phase 10  cpu-isolation (gates 12)"        "--skip-cpu-isolation"
   _step $([ "$SKIP_LOG_MANAGEMENT"       = 0 ] && echo 1 || echo 0) "phase 11  log-management"                  "--skip-log-management"
   _step $([ "${SKIP_GAIA_HOST:-0}"       = 0 ] && echo 1 || echo 0) "phase     gaia-host services (outside k0s)" "--skip-gaia-host"
+  _step $([ "${SKIP_PHANTOM_CONTROL_API:-0}" = 0 ] && echo 1 || echo 0) "phase     phantom-control-api (host :5000)" "--skip-phantom-control-api"
   _step $([ "$SKIP_INSTALL_DMA_ETHERCAT" = 0 ] && echo 1 || echo 0) "phase 12  install dma-ethercat (gates 13)"  "--skip-ethercat-install passed"
   _step $([ "$SKIP_GITOPS"               = 0 ] && echo 1 || echo 0) "phase 13  gitops"                          "--gitops not selected"
   _step $([ "$SKIP_ARGOCD_ADMIN"         = 0 ] && echo 1 || echo 0) "phase 14  argocd-admin"                    "--argocd-admin not selected"
@@ -6210,6 +6289,7 @@ extract_models     ; guard
 image_overrides    ; guard
 deployments_phase  ; guard
 gaia_host          ; guard
+phantom_control_api ; guard
 setup_positronic   ; guard
 validate
 

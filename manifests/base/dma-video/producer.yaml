@@ -60,11 +60,12 @@ spec:
         # Per-robot OAK config (MXIDs + socket map + intrinsics) lives
         # on the host at /etc/phantom/head_camera.json — the
         # phantom-jetson convention this fleet already uses. ArgoCD
-        # does NOT reconcile it. hostPath type: File makes the pod
-        # fail to schedule when the file is missing, which is the
-        # right loud-failure mode (no silent fallback to a stale
-        # fleet default).
+        # does NOT reconcile it. hostPath type: FileOrCreate lets the
+        # pod schedule even when the file is absent (the producer
+        # auto-detects / runs without it) — an empty file is created
+        # rather than blocking the whole camera stack on a missing
+        # per-host config.
         - name: cameras-config
           hostPath:
             path: /etc/phantom/head_camera.json
-            type: File
+            type: FileOrCreate

@@ -1,0 +1,29 @@
+"""
+Configuration settings for the Simplified Phantom Control API
+
+This file provides backward compatibility by re-exporting all settings
+from the centralized robotConfig.py. New code should import directly
+from robotConfig.RobotConfig.
+"""
+
+from .robotConfig import RobotConfig
+
+# Re-export all configuration for backward compatibility
+API_HOST = RobotConfig.API_HOST
+API_PORT = RobotConfig.API_PORT
+SERVICE_NAME = RobotConfig.SERVICE_NAME
+DOCKER_SOCKET_PATH = RobotConfig.DOCKER_SOCKET_PATH
+LOG_LEVEL = RobotConfig.LOG_LEVEL
+LOG_FILE = RobotConfig.LOG_FILE
+WEBSOCKET_MAX_CONNECTIONS = RobotConfig.WEBSOCKET_MAX_CONNECTIONS
+STATS_COLLECTION_INTERVAL = RobotConfig.STATS_COLLECTION_INTERVAL
+STATS_HISTORY_SIZE = RobotConfig.STATS_HISTORY_SIZE
+DASHBOARD_AUTO_REFRESH = RobotConfig.DASHBOARD_AUTO_REFRESH
+PHANTOM_CONTROLLER_RUNNER_PATH = RobotConfig.PHANTOM_CONTROLLER_RUNNER_PATH
+PHANTOM_CONTROLLER_JSON_FILE = RobotConfig.PHANTOM_CONTROLLER_JSON_FILE
+PHANTOM_CONTROLLER_INTERFACE = RobotConfig.PHANTOM_CONTROLLER_INTERFACE
+USE_SUPERVISORD = RobotConfig.USE_SUPERVISORD
+COMPOSE_PROJECTS = RobotConfig.COMPOSE_PROJECTS
+POSITRONIC_CONTROL_PATH = RobotConfig.POSITRONIC_CONTROL_PATH
+PHANTOM_CONTAINER_NAME = RobotConfig.PHANTOM_CONTAINER_NAME
+PHANTOM_DEFAULT_CPUSET = RobotConfig.PHANTOM_DEFAULT_CPUSET
