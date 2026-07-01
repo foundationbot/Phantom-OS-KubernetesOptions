@@ -83,3 +83,69 @@ groups:
             rt_preempted_by has been firing steadily for 5m — an isolated core is
             repeatedly being stolen. Identify the offender (Loki / the dashboard
             panel) and move it off the isolated cores (cpuset / IRQ affinity).
+
+  # AL2 metric-threshold alerts (alerting_console_plan.md). Complementary to the incident_store
+  # event path — these fire off Prometheus for Grafana/Alertmanager. All are rate/`for`-throttled
+  # (AL5: alert on a SUSTAINED condition, not every occurrence) so they don't storm. No paging
+  # sink wired yet (pre-prod): they surface in Prometheus /alerts + Grafana. Over-temperature is
+  # deliberately omitted until the motor temp-limit=0 config bug is fixed (would fire on every read).
+  - name: gaia_transport
+    interval: 30s
+    rules:
+      - alert: QueueStale
+        expr: max by (queue) (dma_shmq_staleness_ms) > 2000
+        for: 2m
+        labels: { severity: warning, subsystem: transport }
+        annotations:
+          summary: "shm queue stale >2s for 2m"
+          description: >
+            A /dev/shm queue has had no fresh writes for over 2s, sustained 2m — the producer may
+            have stalled. See the Queue-bus tab (Staleness) / Ask Gaia "which queue is most stale?".
+      - alert: QueueDrops
+        expr: increase(dma_shmq_wraparounds_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning, subsystem: transport }
+        annotations:
+          summary: "shm queue dropping (ring wraparounds) for 5m"
+          description: >
+            A queue is wrapping its ring past unread slots — a consumer is falling behind the
+            producer and losing data. Queue-bus → Drops column, or Ask Gaia "which queue is dropping?".
+      - alert: DevShmFull
+        expr: max(dma_shmq_devshm_used_pct) > 90
+        for: 5m
+        labels: { severity: high, subsystem: transport }
+        annotations:
+          summary: "/dev/shm over 90% full"
+          description: >
+            The shared-memory filesystem is nearly full — queue allocations may start failing.
+  - name: gaia_rt
+    interval: 30s
+    rules:
+      - alert: MissedDeadlines
+        expr: rate(dma_debug_dma_missed_deadlines_total[5m]) > 0
+        for: 5m
+        labels: { severity: high, subsystem: control }
+        annotations:
+          summary: "RT loop missing deadlines (sustained 5m)"
+          description: >
+            The control loop is missing cycle deadlines steadily — a determinism problem. Check the
+            RT-preemption panel (a CPU thief?) and the ecat-exchange phase (bus wait?).
+      - alert: WkcErrorRate
+        expr: rate(dma_debug_dma_wkc_errors_total[5m]) > 1
+        for: 2m
+        labels: { severity: high, subsystem: control }
+        annotations:
+          summary: "EtherCAT WKC errors climbing (bus corruption)"
+          description: >
+            Working-counter errors are accumulating >1/s for 2m — EtherCAT frames are being
+            corrupted / slaves dropping. Check the bus (cabling, a specific slave branch) and
+            dma-ethercat logs.
+      - alert: BridgeDropped
+        expr: increase(dma_debug_dma_bridge_consumer_dropped_total[5m]) > 0
+        for: 5m
+        labels: { severity: warning, subsystem: system }
+        annotations:
+          summary: "a bridge is dropping events (5m)"
+          description: >
+            A boundary/loop-event bridge is dropping events — its consumer can't keep up, so
+            telemetry/events are being lost downstream.
