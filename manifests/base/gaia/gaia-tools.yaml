@@ -1,0 +1,186 @@
+# gaia-tools — the RAG / incident-intelligence read-side, migrated from host
+# `docker run` systemd units to k0s workloads (2026-07-01). All hostNetwork so
+# they reach the hostNetwork gaia backends on localhost host-ports (Loki :10310,
+# Prometheus :10390, Jaeger :10386, Ollama :11434) exactly as `--network host`
+# did, and mount /data (vault, incidents, logs) via hostPath. Image standardized
+# on :beta. NB: as k0s workloads these now depend on k0s/ArgoCD being healthy
+# (accepted trade-off — was previously host-side to survive cluster outages).
+#
+# ask-server exposes host-port :8200 (operator-ui /gaia proxy + SHM-bus tab),
+# so it uses strategy: Recreate to avoid a hostNetwork port clash on rollout.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaia-ask-server
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gaia-ask-server }
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: gaia-ask-server }
+    spec:
+      imagePullSecrets: [{ name: dockerhub-creds }]
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector: { foundation.bot/has-gaia: "true" }
+      securityContext: { runAsUser: 0, runAsGroup: 0 }
+      containers:
+        - name: ask-server
+          image: foundationbot/gaia-tools:beta
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "ask_server.py", "--host", "0.0.0.0", "--port", "8200"]
+          env:
+            - { name: OLLAMA_HOST,    value: "http://localhost:11434" }
+            - { name: LOKI_URL,       value: "http://localhost:10310" }
+            - { name: PROM_URL,       value: "http://localhost:10390" }
+            - { name: JAEGER_URL,     value: "http://localhost:10386" }
+            - { name: CLIP_URL,       value: "http://10.110.7.238/api/clip" }
+            - { name: VAULT_DIR,      value: "/data/incidents/vault" }
+            - { name: VAULT_DB,       value: "/data/incidents/vault-index.db" }
+            - { name: REFERENCE_DB,   value: "/data/incidents/reference-index.db" }
+            - { name: EVENTS_ARCHIVE, value: "/data/logs/boundary.jsonl" }
+          readinessProbe:
+            httpGet: { path: /health, port: 8200, host: 127.0.0.1 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: 8200, host: 127.0.0.1 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "50m",  memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+      volumes:
+        - name: data
+          hostPath: { path: /data, type: DirectoryOrCreate }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaia-monitor
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gaia-monitor }
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: gaia-monitor }
+    spec:
+      imagePullSecrets: [{ name: dockerhub-creds }]
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector: { foundation.bot/has-gaia: "true" }
+      securityContext: { runAsUser: 0, runAsGroup: 0 }
+      containers:
+        - name: monitor
+          image: foundationbot/gaia-tools:beta
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "monitor.py"]
+          env:
+            - { name: PROM_URL,          value: "http://localhost:10390" }
+            - { name: LOKI_URL,          value: "http://localhost:10310" }
+            - { name: INCIDENT_DB,       value: "/data/incidents/incident_state.db" }
+            - { name: MONITOR_INTERVAL_S, value: "20" }
+            - { name: GAIA_NOTIFY_MIN_SEV, value: "high" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "25m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+      volumes:
+        - name: data
+          hostPath: { path: /data, type: DirectoryOrCreate }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaia-incident-learner
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gaia-incident-learner }
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: gaia-incident-learner }
+    spec:
+      imagePullSecrets: [{ name: dockerhub-creds }]
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector: { foundation.bot/has-gaia: "true" }
+      securityContext: { runAsUser: 0, runAsGroup: 0 }
+      containers:
+        - name: incident-learner
+          image: foundationbot/gaia-tools:beta
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "incident_learner.py"]
+          env:
+            - { name: OLLAMA_HOST,    value: "http://localhost:11434" }
+            - { name: LOKI_URL,       value: "http://localhost:10310" }
+            - { name: VAULT_DIR,      value: "/data/incidents/vault" }
+            - { name: VAULT_DB,       value: "/data/incidents/vault-index.db" }
+            - { name: EVENTS_ARCHIVE, value: "/data/logs/boundary.jsonl" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "25m",  memory: "64Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+      volumes:
+        - name: data
+          hostPath: { path: /data, type: DirectoryOrCreate }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaia-log-extractor
+  namespace: gaia
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gaia-log-extractor }
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: gaia-log-extractor }
+    spec:
+      imagePullSecrets: [{ name: dockerhub-creds }]
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector: { foundation.bot/has-gaia: "true" }
+      securityContext: { runAsUser: 0, runAsGroup: 0 }
+      containers:
+        - name: log-extractor
+          image: foundationbot/gaia-tools:beta
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "log_event_extractor.py", "--archive", "/data/logs/boundary.jsonl"]
+          env:
+            - { name: OLLAMA_HOST,    value: "http://localhost:11434" }
+            - { name: LOKI_URL,       value: "http://localhost:10310" }
+            - { name: VAULT_DIR,      value: "/data/incidents/vault" }
+            - { name: VAULT_DB,       value: "/data/incidents/vault-index.db" }
+            - { name: EVENTS_ARCHIVE, value: "/data/logs/boundary.jsonl" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "25m",  memory: "64Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+      volumes:
+        - name: data
+          hostPath: { path: /data, type: DirectoryOrCreate }

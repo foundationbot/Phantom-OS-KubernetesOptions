@@ -23,6 +23,7 @@ resources:
   - loki.yaml
   - grafana.yaml
   - vector.yaml
+  - gaia-tools.yaml
   - node-exporter.yaml
   - process-exporter.yaml
   - shm-stats.yaml
