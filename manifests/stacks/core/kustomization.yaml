@@ -28,6 +28,7 @@ resources:
   - ../../base/yovariable-server
   - ../../base/dma-streams
   - ../../base/phantom-locomotion
+  - ../../base/policy-diagnostics
   - ../../base/phantom-sonic
   - ../../base/phantom-psi
   - ../../base/psi0-dma-walking
