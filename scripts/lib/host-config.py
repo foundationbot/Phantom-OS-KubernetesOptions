@@ -172,6 +172,10 @@ NODE_LABEL_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("foundation.bot/has-streamer",
      "false",
      "rerun-streamer Deployment (dma-streams)"),
+    ("foundation.bot/has-vpad",
+     "false",
+     "bt-joystick-bridge DaemonSet (remote Bluetooth joystick → virtual "
+     "uinput gamepad; netevent sidecar + Python relay, positronic ns)"),
     ("foundation.bot/has-wm-inference",
      "false",
      "wm-inference DaemonSet (world-model z_ref service; feeds "
@@ -1730,6 +1734,18 @@ CONTAINER_TARGETS: dict[str, dict[str, "str | None"]] = {
         # siblings merged by the manifest job).
         "stack": "core",
         "manifest_image": "foundationbot/ik-mk2",
+    },
+    "bt-joystick-bridge": {
+        # bt-joystick-bridge DaemonSet (foundation.bot/has-vpad gated,
+        # positronic ns, default-off): bridges a remote Bluetooth joystick
+        # onto the robot as a virtual uinput gamepad (netevent sidecar +
+        # Python relay). Key matches the DaemonSet + has-vpad label and the
+        # published image repo (no key/image indirection, same as ik-mk2).
+        # Both containers share the one image. Not yet published — the base
+        # manifest pins :PLACEHOLDER; a host overrides via
+        # images.bt-joystick-bridge once a real tag exists.
+        "stack": "core",
+        "manifest_image": "foundationbot/bt-joystick-bridge",
     },
     "phantom-motion-replay": {
         # motion-replay container of the phantom-sonic DaemonSet

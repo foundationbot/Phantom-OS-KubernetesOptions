@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# bt-joystick-bridge — remote Bluetooth joystick → virtual uinput gamepad
+# bridge DaemonSet (netevent sidecar + Python relay). Always rendered, gated
+# on foundation.bot/has-vpad (default-off → zero pods until a host opts in).
+# Namespace `positronic` is created by manifests/base/positronic
+# (namespace.yaml) in the same core stack. See daemonset.yaml for the full
+# design notes.
+resources:
+  - daemonset.yaml
