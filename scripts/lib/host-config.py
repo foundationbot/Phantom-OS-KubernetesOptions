@@ -1292,6 +1292,13 @@ DEFAULT_POLICY_DIAGNOSTICS: dict[str, str] = {
     "mjOrderFromConfig": "",
     "mjOrderFile":       "/etc/policy-diagnostics-tools/mj_order.json",
     "imuRolesFile":      "/etc/policy-diagnostics-tools/imu_roles.json",
+    # Node self-management at test start (policy-diagnostics-tools node):
+    # enableMotors -> ENABLE_MOTORS at start / DISABLE_MOTORS on exit; record
+    # -> arm the dma-streams recorder (RECORDING_START/STOP). Default "true" so
+    # a sweep energizes the drive it commands and the run is captured; set
+    # "false" to opt out. launch.py forwards them as --enable-motors/--record.
+    "enableMotors": "true",
+    "record":       "true",
     # ── host-pd-tune sweep (testMode: host-pd-tune) — CST host-side-PD gain
     # tuner. All default "" and are OMITTED from the ConfigMap unless the
     # operator sets them (DIAG_OMIT_IF_EMPTY); launch.py forwards each
@@ -1393,6 +1400,9 @@ DIAG_FIELD_TO_ENV: dict[str, str] = {
     # keeps DEFAULT_POLICY_DIAGNOSTICS <-> DIAG_FIELD_TO_ENV in sync (the shared
     # dict carries enabledMotors, so without this the kv render KeyErrors).
     "enabledMotors": "DIAG_ENABLED_MOTORS",
+    # Node self-management at test start (bool; launch.py passthrough default true).
+    "enableMotors": "DIAG_ENABLE_MOTORS",
+    "record":       "DIAG_RECORD",
     # host-pd-tune sweep. Emitted RAW; launch.py forwards each only-when-set.
     "hostPdConfig": "DIAG_HOST_PD_CONFIG",
     "tuneProfile":  "DIAG_TUNE_PROFILE",
@@ -1446,6 +1456,8 @@ DIAG_OMIT_IF_EMPTY: frozenset[str] = frozenset({
 DIAG_BOOL_FIELDS: frozenset[str] = frozenset({
     "waitForStart",
     "skipImuTests",
+    "enableMotors",
+    "record",
 })
 
 
