@@ -105,6 +105,15 @@ spec:
           # a TTY also lets an operator `kubectl exec -it` in and drive a sweep.
           stdin: true
           tty: true
+          # The launcher (policy-diagnostic-launch) forks the web console
+          # in-image (no separate sidecar container). Expose it on the node so
+          # it's reachable at http://<robot-ip>:8088. Disable by setting
+          # DIAG_WEB_CONSOLE=false in the config ConfigMap.
+          ports:
+            - { name: webconsole, containerPort: 8088, hostPort: 8088 }
+          env:
+            - { name: WEB_PORT,  value: "8088" }
+            - { name: WEB_TOKEN, value: "" }   # empty => open, no token to type
           envFrom:
             # Per-host DIAG_* selection (test mode, robot, naming, iterations,
             # out path, joint bias overrides, gains, wait-for-start, …). Created
@@ -142,45 +151,19 @@ spec:
             # phantom-locomotion / dma-bridge posture.
             privileged: true
 
-        # ── web-console sidecar (browser control — ships WITH policy-diagnostics)
-        # Start / Stop / E-Stop buttons + a live desired-vs-actual plot for the
-        # host-PD sweep. Same image, entry policy-diagnostic-webconsole. It owns
-        # /velocity_cmd (create=True) and publishes the start_count/stop_count
-        # the sweep's --wait-for-start gate watches; it reads the tuner's status
-        # file over shared /dev/shm for the plot.
-        #
-        # URL: hostPort 8088 exposes it directly on the robot node, so the
-        # console is at   http://<robot-node-ip>:8088   (no port-forward needed).
-        #
-        # WEB_TOKEN empty => OPEN: just press Start, no token to type. Set it to
-        # require an operator token for Start (Stop/E-Stop stay always-allowed).
-        #
-        # MUTUALLY EXCLUSIVE with joystick-publisher below (both own
-        # /velocity_cmd) — run one. This robot has no gamepad, so the console is
-        # the active control and the joystick sidecar is left commented out.
-        - name: web-console
-          image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
-          imagePullPolicy: Always
-          command: [/entrypoint.sh]
-          args: [policy-diagnostic-webconsole]
-          env:
-            - { name: WEB_PORT,  value: "8088" }
-            - { name: WEB_TOKEN, value: "" }   # empty => OPEN (no token to type)
-          ports:
-            - { name: webconsole, containerPort: 8088, hostPort: 8088 }
-          volumeMounts:
-            - { name: shm, mountPath: /dev/shm }
-          resources:
-            requests: { cpu: "100m", memory: "128Mi" }
-            limits:   { cpu: "500m", memory: "256Mi" }
-          securityContext:
-            privileged: true   # cross-IPC /dev/shm (status file + /velocity_cmd)
+        # ── web console ──────────────────────────────────────────────────────
+        # NOT a separate container: the launcher (policy-diagnostic-launch)
+        # forks policy-diagnostic-webconsole IN-IMAGE alongside the node, so the
+        # browser Start/Stop gate + live desired-vs-actual plot come up whenever
+        # this pod runs — no sidecar to deploy. Exposed via the main container's
+        # ports/env above (http://<robot-ip>:8088). DIAG_WEB_CONSOLE=false
+        # disables it (e.g. when using the joystick sidecar below).
 
         # ── joystick-publisher sidecar (ALTERNATIVE — gamepad control) ───────
         # For robots WITH a physical controller: reads /dev/input and publishes
         # VelocityCommandData on /velocity_cmd. Mutually exclusive with the
-        # web-console above (both own /velocity_cmd) — uncomment this and comment
-        # web-console to drive from a gamepad instead.
+        # in-image web console (both own /velocity_cmd) — uncomment this AND set
+        # DIAG_WEB_CONSOLE=false to drive from a gamepad instead.
         #- name: joystick-publisher
         #  image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
         #  imagePullPolicy: Always
