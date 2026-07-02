@@ -92,7 +92,7 @@ spec:
       containers:
         - name: policy-diagnostics
           image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           # /entrypoint.sh is a passthrough (exec "$@"). The launcher reads the
           # DIAG_* env from the optional ConfigMap below; with no ConfigMap
           # present the launcher's built-in defaults apply so the pod still
@@ -160,7 +160,7 @@ spec:
         # the active control and the joystick sidecar is left commented out.
         - name: web-console
           image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command: [/entrypoint.sh]
           args: [policy-diagnostic-webconsole]
           env:
@@ -183,7 +183,7 @@ spec:
         # web-console to drive from a gamepad instead.
         #- name: joystick-publisher
         #  image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
-        #  imagePullPolicy: IfNotPresent
+        #  imagePullPolicy: Always
         #  command: [/entrypoint.sh]
         #  args: [policy-diagnostic-joystick]
         #  env:
