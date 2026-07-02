@@ -39,6 +39,17 @@
 # mutual-exclusion group (an operator who enables it on a robot is expected
 # to have stopped the policy node first).
 #
+# ── Host-PD gain sweep (testMode: host-pd-tune) ───────────────────────────
+# The CST host-side-PD gain tuner runs as THIS same DaemonSet — no new node
+# label; the existing has-policy-diagnostics gate covers it. Selected with
+# phantomPolicyDiagnostics.testMode: host-pd-tune. It drives one joint at a
+# time with a sine/chirp at candidate kp/kd (pushed over /desired as command
+# stiffness/damping), scores tracking off /actuals, and reports the best
+# gains. Its extra knobs (objective, sinePeriods/sineAgg, host-pd kp/kd box,
+# osc/overshoot caps, mrCapDb) render as DIAG_* in host-config.py and are
+# forwarded only-when-set by launch.py. hostPdConfig points at the DMA
+# host-PD JSON mounted from the policy-diagnostics-hostpd ConfigMap below.
+#
 # ── No GPU ───────────────────────────────────────────────────────────────
 # Pure Python + numpy/scipy; onnxruntime (imu-debug mode) is CPU-only. No
 # runtimeClassName: nvidia, unlike phantom-locomotion.
@@ -81,7 +92,7 @@ spec:
       containers:
         - name: policy-diagnostics
           image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           # /entrypoint.sh is a passthrough (exec "$@"). The launcher reads the
           # DIAG_* env from the optional ConfigMap below; with no ConfigMap
           # present the launcher's built-in defaults apply so the pod still
@@ -94,6 +105,15 @@ spec:
           # a TTY also lets an operator `kubectl exec -it` in and drive a sweep.
           stdin: true
           tty: true
+          # The launcher (policy-diagnostic-launch) forks the web console
+          # in-image (no separate sidecar container). Expose it on the node so
+          # it's reachable at http://<robot-ip>:8088. Disable by setting
+          # DIAG_WEB_CONSOLE=false in the config ConfigMap.
+          ports:
+            - { name: webconsole, containerPort: 8088, hostPort: 8088 }
+          env:
+            - { name: WEB_PORT,  value: "8088" }
+            - { name: WEB_TOKEN, value: "" }   # empty => open, no token to type
           envFrom:
             # Per-host DIAG_* selection (test mode, robot, naming, iterations,
             # out path, joint bias overrides, gains, wait-for-start, …). Created
@@ -109,6 +129,13 @@ spec:
             # tests are skipped when imu_roles.json is absent; mj naming
             # falls back to /config when mj_order.json is absent.
             - { name: tables,    mountPath: /etc/policy-diagnostics-tools, readOnly: true }
+            # host-pd-tune sweep only: the DMA host-PD config JSON (per-joint
+            # kp/kd, tauMaxNm, limits) the tuner reads via DIAG_HOST_PD_CONFIG
+            # (--host-pd-config). Dedicated ConfigMap so it stays separate from
+            # the robot tables; optional so non-sweep hosts still schedule.
+            # Point phantomPolicyDiagnostics.hostPdConfig at a file under here,
+            # e.g. /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+            - { name: hostpd-config, mountPath: /etc/policy-diagnostics-tools/hostpd, readOnly: true }
             # Diagnostic JSON reports land here (DIAG_OUT_PATH default lives
             # under /recordings/diag_reports). Same host tree dma-recorder
             # uses, so an operator `kubectl cp`s reports off the robot from
@@ -124,32 +151,34 @@ spec:
             # phantom-locomotion / dma-bridge posture.
             privileged: true
 
-        # ── joystick-publisher sidecar ───────────────────────────────────
-        # Same image, different entry: reads the gamepad at /dev/input and
-        # publishes VelocityCommandData on /velocity_cmd (create=True owner).
-        # The diagnostic container reads start_count/stop_count from it over
-        # shared /dev/shm. Long-running (the diagnostic launcher exits +
-        # restarts per sweep; this stays up). Replaces the ROS joystick node.
-        - name: joystick-publisher
-          image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
-          imagePullPolicy: IfNotPresent
-          command:
-            - /entrypoint.sh
-          args:
-            - policy-diagnostic-joystick
-          env:
-            # pygame needs a video driver even headless. (The module also sets
-            # this itself; kept explicit for clarity.)
-            - { name: SDL_VIDEODRIVER, value: "dummy" }
-          volumeMounts:
-            - { name: shm,       mountPath: /dev/shm }
-            - { name: dev-input, mountPath: /dev/input }
-          resources:
-            requests: { cpu: "100m", memory: "128Mi" }
-            limits:   { cpu: "500m", memory: "256Mi" }
-          securityContext:
-            # /dev/input device access + cross-IPC /dev/shm.
-            privileged: true
+        # ── web console ──────────────────────────────────────────────────────
+        # NOT a separate container: the launcher (policy-diagnostic-launch)
+        # forks policy-diagnostic-webconsole IN-IMAGE alongside the node, so the
+        # browser Start/Stop gate + live desired-vs-actual plot come up whenever
+        # this pod runs — no sidecar to deploy. Exposed via the main container's
+        # ports/env above (http://<robot-ip>:8088). DIAG_WEB_CONSOLE=false
+        # disables it (e.g. when using the joystick sidecar below).
+
+        # ── joystick-publisher sidecar (ALTERNATIVE — gamepad control) ───────
+        # For robots WITH a physical controller: reads /dev/input and publishes
+        # VelocityCommandData on /velocity_cmd. Mutually exclusive with the
+        # in-image web console (both own /velocity_cmd) — uncomment this AND set
+        # DIAG_WEB_CONSOLE=false to drive from a gamepad instead.
+        #- name: joystick-publisher
+        #  image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
+        #  imagePullPolicy: Always
+        #  command: [/entrypoint.sh]
+        #  args: [policy-diagnostic-joystick]
+        #  env:
+        #    - { name: SDL_VIDEODRIVER, value: "dummy" }
+        #  volumeMounts:
+        #    - { name: shm,       mountPath: /dev/shm }
+        #    - { name: dev-input, mountPath: /dev/input }
+        #  resources:
+        #    requests: { cpu: "100m", memory: "128Mi" }
+        #    limits:   { cpu: "500m", memory: "256Mi" }
+        #  securityContext:
+        #    privileged: true
 
       volumes:
         - name: shm
@@ -162,6 +191,13 @@ spec:
         - name: tables
           configMap:
             name: policy-diagnostics-tables
+            optional: true
+        # host-pd-tune sweep config (DMA host-PD JSON). Not in the GitOps
+        # tree — operator/bootstrap-provided per host (the same file dma_main
+        # runs), so a host without it still schedules. See the container mount.
+        - name: hostpd-config
+          configMap:
+            name: policy-diagnostics-hostpd
             optional: true
         # DirectoryOrCreate matches dma-recorder so the mount succeeds on
         # robots that have never written recordings.

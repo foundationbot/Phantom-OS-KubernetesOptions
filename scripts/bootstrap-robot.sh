@@ -278,8 +278,10 @@
 #                    render+apply the policy-diagnostics-config ConfigMap from
 #                    host-config's phantomPolicyDiagnostics block (DIAG_*
 #                    diagnostic tunables incl. per-joint motor-gain
-#                    overrides). Rolls the policy-diagnostics DaemonSet if
-#                    present.
+#                    overrides). Also renders the policy-diagnostics-hostpd
+#                    ConfigMap from the host file named by hostPdConfig (the
+#                    host-pd-tune sweep's DMA host-PD JSON) when set. Rolls the
+#                    policy-diagnostics DaemonSet if present.
 #    9. ecat-interface (gates phase 10)
 #                    resolve the EtherCAT NIC adapter and rename it to
 #                    cpuIsolation.nic.iface via a persistent udev rule
@@ -2927,9 +2929,22 @@ policy_diagnostics_config() {
     kv_text=""
   fi
 
+  # host-pd-tune sweep: the HOST source path to the DMA host-PD JSON. Empty
+  # when the block/field is unset (helper prints "" exit 0). Rendered into the
+  # policy-diagnostics-hostpd ConfigMap further below.
+  local hostpd_src=""
+  if [ -r "$hc" ]; then
+    hostpd_src=$(python3 "$HOST_CONFIG_HELPER" "$hc" get-policy-diagnostics-hostpd-src 2>/dev/null || true)
+  fi
+
   if [ "$DRY_RUN" = 1 ]; then
     info "DRY-RUN  write $POLICY_DIAGNOSTICS_FILE  ($(printf '%s\n' "$kv_text" | grep -c '^DIAG_' || true) DIAG_* keys)"
     info "DRY-RUN  kubectl apply -f $POLICY_DIAGNOSTICS_FILE"
+    if [ -n "$hostpd_src" ]; then
+      info "DRY-RUN  render policy-diagnostics-hostpd ConfigMap from $hostpd_src"
+    else
+      info "DRY-RUN  host-pd-tune not configured — skip policy-diagnostics-hostpd ConfigMap"
+    fi
     return
   fi
 
@@ -2954,6 +2969,27 @@ policy_diagnostics_config() {
     return
   fi
   pass "$POLICY_DIAGNOSTICS_CM_NAME applied to $POLICY_DIAGNOSTICS_NS"
+
+  # host-pd-tune sweep: render the DMA host-PD JSON into the
+  # policy-diagnostics-hostpd ConfigMap (optional:true mount at
+  # /etc/policy-diagnostics-tools/hostpd in the DaemonSet). hostPdConfig is the
+  # HOST source path; the node reads the DERIVED container path emitted as
+  # DIAG_HOST_PD_CONFIG by get-policy-diagnostics-config-kv. Keyed by basename
+  # so the container path matches. Without this CM the sweep pod still starts
+  # (optional:true) but --host-pd-config points at a missing in-container file.
+  if [ ${#KUBECTL[@]} -eq 0 ]; then
+    fail "no kubectl/k0s available — cannot apply policy-diagnostics-hostpd ConfigMap"
+  elif [ -z "$hostpd_src" ]; then
+    info "host-pd-tune not configured (phantomPolicyDiagnostics.hostPdConfig unset) — skipping policy-diagnostics-hostpd ConfigMap"
+  elif [ ! -r "$hostpd_src" ]; then
+    fail "hostPdConfig points at unreadable path: $hostpd_src — fix phantomPolicyDiagnostics.hostPdConfig (policy-diagnostics-hostpd ConfigMap NOT rendered)"
+  elif "${KUBECTL[@]}" create configmap policy-diagnostics-hostpd -n "$POLICY_DIAGNOSTICS_NS" \
+      --from-file="$(basename "$hostpd_src")=$hostpd_src" \
+      --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null; then
+    pass "policy-diagnostics-hostpd applied to $POLICY_DIAGNOSTICS_NS (from $hostpd_src)"
+  else
+    fail "kubectl apply configmap policy-diagnostics-hostpd (from $hostpd_src)"
+  fi
 
   # If the DaemonSet is already running, restart it so the new options take
   # effect. envFrom does NOT auto-roll on CM updates.

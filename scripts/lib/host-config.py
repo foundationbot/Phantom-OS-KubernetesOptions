@@ -23,6 +23,7 @@ Usage:
   host-config.py <path> get-phantom-sonic-config-kv
   host-config.py <path> get-phantom-psi-config-kv
   host-config.py <path> get-policy-diagnostics-config-kv
+  host-config.py <path> get-policy-diagnostics-hostpd-src  # raw host path to DMA host-PD JSON ('' if unset)
   host-config.py <path> get-images-json
   host-config.py <path> get-image-for-container <container>
   host-config.py <path> get-deployment-patches-json
@@ -44,6 +45,7 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1266,6 +1268,16 @@ def cmd_get_phantom_locomotion_config_kv(cfg: dict) -> int:
 # omitted — launch.py has no DIAG_CHIRP_RRD_DIR knob. Defaults mirror
 # launch.py's _PASSTHROUGH / _TOL_TO_BAND / file defaults exactly so a bare
 # (or absent) phantomPolicyDiagnostics block renders a working ConfigMap.
+# Container mountPath of the policy-diagnostics-hostpd ConfigMap in the
+# policy-diagnostics DaemonSet (manifests/base/policy-diagnostics/
+# policy-diagnostics.yaml). phantomPolicyDiagnostics.hostPdConfig is the HOST
+# source path to the DMA host-PD JSON; bootstrap phase 8c renders that file
+# into the policy-diagnostics-hostpd ConfigMap keyed by basename, and the node
+# reads it from this dir (see cmd_get_policy_diagnostics_config_kv, which emits
+# the DERIVED container path as DIAG_HOST_PD_CONFIG, not the host path).
+POLICY_DIAGNOSTICS_HOSTPD_MOUNT = "/etc/policy-diagnostics-tools/hostpd"
+
+
 DEFAULT_POLICY_DIAGNOSTICS: dict[str, str] = {
     # The shared diagnostic defaults (bias/holds/IMU tols/chirp/gains/…)
     # minus chirpRrdDir, which the policy-diagnostics launcher does not
@@ -1280,6 +1292,24 @@ DEFAULT_POLICY_DIAGNOSTICS: dict[str, str] = {
     "mjOrderFromConfig": "",
     "mjOrderFile":       "/etc/policy-diagnostics-tools/mj_order.json",
     "imuRolesFile":      "/etc/policy-diagnostics-tools/imu_roles.json",
+    # ── host-pd-tune sweep (testMode: host-pd-tune) — CST host-side-PD gain
+    # tuner. All default "" and are OMITTED from the ConfigMap unless the
+    # operator sets them (DIAG_OMIT_IF_EMPTY); launch.py forwards each
+    # only-when-set, and the node supplies its own tune-profile / code
+    # default when a flag is absent. hostPdConfig points at the host-PD JSON
+    # mounted from the policy-diagnostics-hostpd ConfigMap.
+    "hostPdConfig": "",
+    "tuneProfile":  "",
+    "objective":    "",
+    "sinePeriods":  "",
+    "sineAgg":      "",
+    "sineAmpRad":   "",
+    "hostPdKpBox":  "",
+    "hostPdKdBox":  "",
+    "oscSoftCap":   "",
+    "oscHardCap":   "",
+    "overshootCap": "",
+    "mrCapDb":      "",
 }
 
 # Map host-config camelCase field names -> the DIAG_* environment-variable
@@ -1355,6 +1385,27 @@ DIAG_FIELD_TO_ENV: dict[str, str] = {
     "velocityKiOverrides": "DIAG_VELOCITY_KI_OVERRIDES",
     "velocityKdOverrides": "DIAG_VELOCITY_KD_OVERRIDES",
     "torqueKpOverrides":   "DIAG_TORQUE_KP_OVERRIDES",
+    # Per-motor enable (inherited from the shared diagnostic defaults). Blank
+    # emits nothing; a comma list of motor names/indices scopes the enable.
+    # NOTE: the policy-diagnostics node/launch must consume DIAG_ENABLED_MOTORS
+    # to actually send ENABLE_MOTORS at test start (follow-up in
+    # policy-diagnostics-tools); this entry stages the host-config knob and
+    # keeps DEFAULT_POLICY_DIAGNOSTICS <-> DIAG_FIELD_TO_ENV in sync (the shared
+    # dict carries enabledMotors, so without this the kv render KeyErrors).
+    "enabledMotors": "DIAG_ENABLED_MOTORS",
+    # host-pd-tune sweep. Emitted RAW; launch.py forwards each only-when-set.
+    "hostPdConfig": "DIAG_HOST_PD_CONFIG",
+    "tuneProfile":  "DIAG_TUNE_PROFILE",
+    "objective":    "DIAG_OBJECTIVE",
+    "sinePeriods":  "DIAG_SINE_PERIODS",
+    "sineAgg":      "DIAG_SINE_AGG",
+    "sineAmpRad":   "DIAG_SINE_AMP_RAD",
+    "hostPdKpBox":  "DIAG_HOST_PD_KP_BOX",
+    "hostPdKdBox":  "DIAG_HOST_PD_KD_BOX",
+    "oscSoftCap":   "DIAG_OSC_SOFT_CAP",
+    "oscHardCap":   "DIAG_OSC_HARD_CAP",
+    "overshootCap": "DIAG_OVERSHOOT_CAP",
+    "mrCapDb":      "DIAG_MR_CAP_DB",
 }
 
 # Policy-diagnostics fields whose rendered value should be omitted when
@@ -1373,6 +1424,20 @@ DIAG_OMIT_IF_EMPTY: frozenset[str] = frozenset({
     "velocityKiOverrides",
     "velocityKdOverrides",
     "torqueKpOverrides",
+    "enabledMotors",
+    # host-pd-tune sweep — all optional; omit unless the operator sets them.
+    "hostPdConfig",
+    "tuneProfile",
+    "objective",
+    "sinePeriods",
+    "sineAgg",
+    "sineAmpRad",
+    "hostPdKpBox",
+    "hostPdKdBox",
+    "oscSoftCap",
+    "oscHardCap",
+    "overshootCap",
+    "mrCapDb",
 })
 
 # Policy-diagnostics bool fields. launch.py compares DIAG_SKIP_IMU_TESTS /
@@ -1430,9 +1495,37 @@ def cmd_get_policy_diagnostics_config_kv(cfg: dict) -> int:
             value = str(raw)
         if field in DIAG_OMIT_IF_EMPTY and value == "":
             continue
+        # hostPdConfig is the HOST source path to the DMA host-PD JSON. The
+        # node opens the file INSIDE the container, where bootstrap phase 8c
+        # mounts it via the policy-diagnostics-hostpd ConfigMap keyed by
+        # basename. So emit the DERIVED container path, not the host path.
+        if field == "hostPdConfig":
+            value = f"{POLICY_DIAGNOSTICS_HOSTPD_MOUNT}/{os.path.basename(value)}"
         lines.append(f"{DIAG_FIELD_TO_ENV[field]}={value}")
 
     print("\n".join(lines))
+    return 0
+
+
+def cmd_get_policy_diagnostics_hostpd_src(cfg: dict) -> int:
+    """Print the raw phantomPolicyDiagnostics.hostPdConfig HOST source path.
+
+    This is the un-transformed host path to the DMA host-PD JSON (the value
+    the operator set), NOT the derived container path that
+    get-policy-diagnostics-config-kv emits as DIAG_HOST_PD_CONFIG. Bootstrap
+    phase 8c uses it to render the policy-diagnostics-hostpd ConfigMap from
+    the file on disk. Prints an empty line (exit 0) when the block is absent
+    or the field is unset/empty, so bash can treat empty as 'not configured'.
+    """
+    block = cfg.get("phantomPolicyDiagnostics") or {}
+    if not isinstance(block, dict):
+        print(
+            "error: 'phantomPolicyDiagnostics' must be a mapping",
+            file=sys.stderr,
+        )
+        return 2
+    src = block.get("hostPdConfig") or ""
+    print(str(src))
     return 0
 
 
@@ -3719,6 +3812,8 @@ def main() -> int:
         return cmd_get_phantom_psi_config_kv(cfg)
     if cmd == "get-policy-diagnostics-config-kv":
         return cmd_get_policy_diagnostics_config_kv(cfg)
+    if cmd == "get-policy-diagnostics-hostpd-src":
+        return cmd_get_policy_diagnostics_hostpd_src(cfg)
     if cmd == "get-cpu-isolation-json":
         return cmd_get_cpu_isolation_json(cfg)
     if cmd == "set-cpu-isolation-json":
