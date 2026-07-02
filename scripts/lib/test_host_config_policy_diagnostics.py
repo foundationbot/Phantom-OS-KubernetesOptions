@@ -161,7 +161,7 @@ def test_host_pd_tune_sweep_fields_render_when_set_omitted_when_empty():
     cfg = {
         "phantomPolicyDiagnostics": {
             "testMode": "host-pd-tune",
-            "hostPdConfig": "/etc/policy-diagnostics-tools/hostpd/mk2.json",
+            "hostPdConfig": "/usr/share/dma-ethercat/config/mk2_full_robot/mk2_full_robot_hostpd.json",
             "joints": "LeftElbowPitch",
             "objective": "bode",
             "sinePeriods": "4,2,1",
@@ -172,7 +172,10 @@ def test_host_pd_tune_sweep_fields_render_when_set_omitted_when_empty():
     }
     kv = _diag_kv(cfg)
     assert kv["DIAG_TEST_MODE"] == "host-pd-tune"
-    assert kv["DIAG_HOST_PD_CONFIG"] == "/etc/policy-diagnostics-tools/hostpd/mk2.json"
+    # hostPdConfig is the HOST source path; the emitted DIAG_HOST_PD_CONFIG is
+    # the DERIVED container path where the policy-diagnostics-hostpd ConfigMap
+    # mounts the file (keyed by basename) — NOT the raw host path.
+    assert kv["DIAG_HOST_PD_CONFIG"] == "/etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json"
     assert kv["DIAG_JOINTS"] == "LeftElbowPitch"
     assert kv["DIAG_OBJECTIVE"] == "bode"
     assert kv["DIAG_SINE_PERIODS"] == "4,2,1"

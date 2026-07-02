@@ -687,12 +687,16 @@ images:
 #
 # Sweep options (all optional unless marked REQUIRED; shown with defaults):
 #   testMode:      host-pd-tune     # REQUIRED to select the sweep (else joint-sweep)
-#   hostPdConfig:  ""               # REQUIRED. Path to the DMA host-PD JSON
-#                                   #   (per-joint kp/kd, tauMaxNm, limits) —
-#                                   #   the SAME file dma_main runs. Delivered
-#                                   #   by the policy-diagnostics-hostpd
-#                                   #   ConfigMap, mounted at
-#                                   #   /etc/policy-diagnostics-tools/hostpd/ .
+#   hostPdConfig:  ""               # REQUIRED. HOST path to the DMA host-PD
+#                                   #   JSON (per-joint kp/kd, tauMaxNm,
+#                                   #   limits) — the SAME file dma_main runs.
+#                                   #   Bootstrap phase 8c renders this host
+#                                   #   file into the policy-diagnostics-hostpd
+#                                   #   ConfigMap (keyed by basename), which the
+#                                   #   DaemonSet mounts at
+#                                   #   /etc/policy-diagnostics-tools/hostpd/ ;
+#                                   #   the node reads the derived container
+#                                   #   path (not this host path).
 #   joints:        all              # REQUIRED. One name, a comma list, or
 #                                   #   `all`. Tuned SEQUENTIALLY — one joint
 #                                   #   moves at a time (see the two examples).
@@ -725,7 +729,7 @@ images:
 # Example — tune ONE joint (recommended for first bring-up):
 # phantomPolicyDiagnostics:
 #   testMode: host-pd-tune
-#   hostPdConfig: /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+#   hostPdConfig: /usr/share/dma-ethercat/mk2_full_robot_hostpd.json  # HOST path
 #   joints: LeftElbowPitch
 #   objective: lexicographic
 #   sinePeriods: "2"
@@ -737,7 +741,7 @@ images:
 # waitForStart so the operator arms each run:
 # phantomPolicyDiagnostics:
 #   testMode: host-pd-tune
-#   hostPdConfig: /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+#   hostPdConfig: /usr/share/dma-ethercat/mk2_full_robot_hostpd.json  # HOST path
 #   joints: all
 #   objective: lexicographic
 #   sinePeriods: "2"
@@ -749,15 +753,17 @@ images:
 # Example — bode characterisation on one joint (chirp sweep):
 # phantomPolicyDiagnostics:
 #   testMode: host-pd-tune
-#   hostPdConfig: /etc/policy-diagnostics-tools/hostpd/mk2_full_robot_hostpd.json
+#   hostPdConfig: /usr/share/dma-ethercat/mk2_full_robot_hostpd.json  # HOST path
 #   joints: LeftElbowPitch
 #   objective: bode
 #   chirpFreqMinHz: 0.5
 #   chirpFreqMaxHz: 20.0
 #   mrCapDb: 3.0
 #
-# Provide hostPdConfig via the policy-diagnostics-hostpd ConfigMap (operator/
-# bootstrap-provided per host, like policy-diagnostics-tables):
+# Bootstrap phase 8c (--policy-diagnostics-config) renders the host file named
+# by hostPdConfig into the policy-diagnostics-hostpd ConfigMap automatically
+# (keyed by basename), so normally just set hostPdConfig and re-run bootstrap.
+# To provision it by hand instead (like policy-diagnostics-tables):
 #   kubectl -n positronic create configmap policy-diagnostics-hostpd \
 #     --from-file=mk2_full_robot_hostpd.json=<path-to-the-host-PD-json>
 
