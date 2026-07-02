@@ -1292,6 +1292,9 @@ DEFAULT_POLICY_DIAGNOSTICS: dict[str, str] = {
     "mjOrderFromConfig": "",
     "mjOrderFile":       "/etc/policy-diagnostics-tools/mj_order.json",
     "imuRolesFile":      "/etc/policy-diagnostics-tools/imu_roles.json",
+    # Divergence safety abort (rad): |q_actual-q_desired| over this aborts the
+    # run. Raise to tolerate looser tracking before it trips.
+    "killDivergenceRad": "0.4",
     # Node self-management at test start (policy-diagnostics-tools node):
     # enableMotors -> ENABLE_MOTORS at start / DISABLE_MOTORS on exit; record
     # -> arm the dma-streams recorder (RECORDING_START/STOP). Default "true" so
@@ -1392,6 +1395,7 @@ DIAG_FIELD_TO_ENV: dict[str, str] = {
     "velocityKiOverrides": "DIAG_VELOCITY_KI_OVERRIDES",
     "velocityKdOverrides": "DIAG_VELOCITY_KD_OVERRIDES",
     "torqueKpOverrides":   "DIAG_TORQUE_KP_OVERRIDES",
+    "killDivergenceRad":   "DIAG_KILL_DIVERGENCE_RAD",
     # Per-motor enable (inherited from the shared diagnostic defaults). Blank
     # emits nothing; a comma list of motor names/indices scopes the enable.
     # NOTE: the policy-diagnostics node/launch must consume DIAG_ENABLED_MOTORS
