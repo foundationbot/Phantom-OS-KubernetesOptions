@@ -34,6 +34,7 @@ resources:
   - ../../base/psi0-dma-walking
   - ../../base/omni-wbc
   - ../../base/ik-mk2
+  - ../../base/bt-joystick-bridge
   - ../../base/cpp-robot-state-estimator
   - ../../base/okvis2x
   - ../../base/wm-inference

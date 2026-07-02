@@ -1,0 +1,157 @@
+aiPcUrl: http://100.125.240.74:5000
+cpuIsolation:
+  dmaRtCpu: 11
+  enabled: true
+  installAffinityDefaults: true
+  nic:
+    iface: ecat1
+    irqCore: 13
+    selector:
+      mac: 4c:bb:47:01:c8:16
+  partitions:
+  - cpus: 11-13
+    name: ecat1
+deployments:
+  positronic-control:
+    mounts:
+    - container: /data
+      host: /data
+      name: data
+    - container: /data2
+      host: /data2
+      name: data2
+    - container: /recordings
+      host: /root/recordings
+      name: recordings
+    - container: /root/.cache/torch/hub
+      host: /data/torch
+      name: torch-hub
+    - container: /src
+      host: /root/foundation/DMA/positronic_control
+      name: src
+    - container: /root/.ihmc
+      host: /root/foundation/DMA/positronic_control/workspace/.ihmc
+      name: ihmc-config
+    - container: /trainground
+      host: /root/trainground
+      name: trainground
+    privileged: true
+  rerun-streamer:
+      variant: mk2_lowerbody
+  dma-recorder:
+      variant: mk2_lowerbody
+      explodeJoints: [all]
+  phantom-locomotion:
+    mounts:
+      - {name: recordings, host: /root/recordings, container: /recordings}
+dmaEthercat:
+  configPath: lower_body_bringup/mk2_lower_body_csp.json
+images:
+  # bt-joystick-bridge is default-off (nodeLabels has-vpad: 'false'). The base
+  # manifest defaults to the multi-arch :main-latest tag published by CI, so an
+  # opt-in host need only flip has-vpad: 'true'. Uncomment and pin a specific CI
+  # tag here only to override the default on this host.
+  # bt-joystick-bridge:
+  #   image: foundationbot/bt-joystick-bridge:main-latest
+  dma-ethercat:
+    image: foundationbot/dma-ethercat:feat-slave-reinit-on-enable-20260602T220926-aarch64
+  dma-streams:
+    image: foundationbot/dma-streams:main-20260529T012939-aarch64
+  phantom-locomotion:
+    image: foundationbot/phantom-dma-inference:FIR-285-mk2-full-20260601T182946-aarch64
+  phantom-models:
+    image: localhost:5443/phantom-models:2026-05-05
+  phantom-policies:
+    image: localhost:5443/phantom-policies:2026-05-06-policy-keyed
+  positronic-control:
+    image: foundationbot/phantom-cuda:0.2.46-dev.1-cu130
+  yovariable-server:
+    image: foundationbot/yovariable-server:V-1-0-21-20260527-045141-arm64
+nodeLabels:
+  foundation.bot/has-locomotion: 'true'
+  foundation.bot/has-positronic: 'false'
+  foundation.bot/has-recorder: 'true'
+  foundation.bot/has-streamer: 'false'
+  # bt-joystick-bridge DaemonSet (remote Bluetooth joystick -> virtual uinput gamepad)
+  foundation.bot/has-vpad: 'false'
+  foundation.bot/has-yovariable: 'true'
+  foundation.bot/has-camera: 'false'
+phantomLocomotion:
+  mode: diagnostic
+  # `policy:` is ignored when mode=diagnostic but harmless to leave in
+  # place — flipping mode back to "policy" then reuses it.
+  policy: mk2-walking-lower-body-1imu
+
+  diagnostic:
+    robot:        mk2-lower-body
+    naming:       mj
+    bias:         0.2               # inert in chirp mode; preserved for flip-back
+    masterGain:   1
+    holdBiasS:    1.0                    # shorter plateau OK with ramp providing dynamics signal
+    holdHomeS:    5.0
+    joints:       LeftHipPitch  #LeftHipPitch,LeftHipRoll,LeftHipYaw,LeftKneePitch,LeftAnklePitch,LeftAnkleRoll,RightHipPitch,RightHipRoll,RightHipYaw,RightKneePitch,RightAnklePitch,RightAnkleRoll
+    outPath:      /recordings/joint-sweep/diag_report.json
+    waitForStart: true
+    iterations:   1
+    jointBiasOverrides: "RightHipRoll=-0.30"
+
+    # ── Test mode switch (FIR-345). `chirp` runs the chirp/Bode sweep
+    # and ignores bias/rampS/IMU fields below. `joint-sweep` keeps the
+    # legacy step/ramp + IMU diagnostic. Flip this one line to swap modes.
+    testMode:                 joint-sweep
+    chirpDurationS:           60.0
+    chirpFreqMaxHz:           10.0          # bench cap (default 15 Hz)
+    cycleRateHz:              500           # diag control-loop push rate (Hz); 500 Hz = /actuals ceiling, 50x the 10 Hz chirp
+
+    # ── FIR-345 Kd-ladder profile: per-joint amplitude (1/gear_ratio)
+    # at masterGain=1.0, sweeping drive-side position_kd × {1, 1.25,
+    # 1.5, 1.75, 2.0} via /motor_params. See
+    # docs/diagnostic-chirp-runbook.md "Tuning sweeps" section.
+    chirpGainMultipliers:     "1.0"        # required: must be single
+                                           # rung when positionKd laddfoundationbot/phantom-dma-inference:FIR-285-mk2-full-20260529T004649-aarch64er
+                                           # is active
+
+    # Global fallback amplitude (matches the 22.79 gear_ratio cohort).
+    # The chirpAmplitudeOverrides list below covers all 13 joints
+    # explicitly, so this only kicks in if a joint is dropped from
+    # the override.
+    chirpAmplitudeRad:        0.04388
+
+    # Per-joint amplitudes = 1/gear_ratio from
+    # docs/diagnostics/chirp_amplitudes_mk2_lower_body.json
+    # (host_config_paste_string field).
+    chirpAmplitudeOverrides:  "SpineYaw=0.04388,LeftHipPitch=0.06794,LeftHipRoll=0.04388,LeftHipYaw=0.04388,LeftKneePitch=0.06794,LeftAnklePitch=0.04388,LeftAnkleRoll=0.04388,RightHipPitch=0.06794,RightHipRoll=0.04388,RightHipYaw=0.04388,RightKneePitch=0.06794,RightAnklePitch=0.04388,RightAnkleRoll=0.04388"
+
+    # 5-rung positionKd sweep. Set to "1.0" (single rung) to disable
+    # the ladder and run a single chirp pass at baseline Kd.
+    positionKdMultipliers:    "1.0,1.25,1.5"
+
+    # ── Ramp mode (joint-sweep only; ignored when testMode=chirp) ──
+    rampS:                2.0            # bias / rampS = 0.167 rad/s desired_v
+    returnRampS:          ""             # empty = symmetric, defaults to rampS
+    velTrackingRatioTol:  0.30           # ±band for PASS verdict
+    velTrackingLagMaxMs:  60.0           # LAGGY_VELOCITY warn threshold
+
+    # ── IMU integrity tests (joint-sweep only; ignored when testMode=chirp) ──
+    skipImuTests:      true              # disabled for chirp run
+    gravityTol:        0.05
+    gravityMagTol:     0.05
+    gravityDriftTol:   0.02
+    imuProjGXyTol:     0.10
+    imuPelvisYawTol:   0.30
+    imuQuatDeltaTol:   0.30
+    imuGyroNoiseFloor: 0.10
+    imuIdleGyroTol:    0.30
+    imuIdleProjGTol:   0.05
+    imuPitchRatioTol:  0.30
+    imuPairDeltaTol:   0.20
+
+production: false
+robot: hwthor01
+stacks:
+  core:
+    selfHeal: false
+  operator:
+    enabled: false
+targetRevision: main
+

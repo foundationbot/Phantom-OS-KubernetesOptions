@@ -151,6 +151,15 @@ stacks:
 #                          manifest tag foundationbot/ik-mk2:V-<x-y-z>-<ts>
 #                          from the IK_MK2 repo CI. Only needed on hosts
 #                          that opt in via nodeLabels has-ik-mk2: 'true'.
+#   bt-joystick-bridge     core stack — bt-joystick-bridge DaemonSet
+#                          (has-vpad gated, default-off, positronic ns).
+#                          Bridges a remote Bluetooth joystick onto the robot
+#                          as a virtual uinput gamepad (netevent sidecar +
+#                          Python relay; both containers share the one image).
+#                          manifest uses foundationbot/bt-joystick-bridge —
+#                          NOT yet published, so the base manifest pins
+#                          :PLACEHOLDER. Only needed on hosts that opt in via
+#                          nodeLabels has-vpad: 'true'.
 #   phantom-motion-replay  core stack — motion-replay container of the
 #                          phantom-sonic DaemonSet (has-sonic). Web UI
 #                          :7865 + ZMQ streamer :5557, clips baked in.
@@ -221,6 +230,11 @@ images:
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
   #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
+  # bt-joystick-bridge is default-off (nodeLabels has-vpad: 'false'). The base
+  # manifest defaults to the multi-arch :main-latest tag; uncomment and pin a
+  # specific CI tag here only to override the default on an opt-in host.
+  # bt-joystick-bridge:
+  #   image: foundationbot/bt-joystick-bridge:main-latest
   # wm-inference is default-off (nodeLabels has-wm-inference: 'false');
   # uncomment BOTH on hosts that opt in. Use a local-registry retag (push
   # the arm64 images to localhost:5443 first) or a DockerHub repo-swap.
@@ -917,6 +931,9 @@ nodeLabels:
   foundation.bot/has-state-estimator: 'false'
   # rerun-streamer Deployment (dma-streams)
   foundation.bot/has-streamer: 'false'
+  # bt-joystick-bridge DaemonSet (remote Bluetooth joystick -> virtual uinput
+  # gamepad; netevent sidecar + Python relay, positronic ns)
+  foundation.bot/has-vpad: 'false'
   # wm-inference DaemonSet (world-model z_ref service; feeds positronic —
   # co-schedules with the control brain, NOT in the exclusion group)
   foundation.bot/has-wm-inference: 'false'

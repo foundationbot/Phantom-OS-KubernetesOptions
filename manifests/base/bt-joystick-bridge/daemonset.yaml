@@ -1,0 +1,137 @@
+# bt-joystick-bridge — DaemonSet bridging a remote Bluetooth joystick onto
+# the robot as a virtual uinput gamepad. Gated on foundation.bot/has-vpad.
+#
+# ── Image ────────────────────────────────────────────────────────────────
+# foundationbot/bt-joystick-bridge (private DockerHub repo; pull needs the
+# deployment-account PAT via the dockerhub-creds secret, seeded per-namespace
+# by bootstrap phase 5). The :main-latest tag below is the default (a
+# multi-arch manifest — arm64 + amd64 — published by CI); a host may override
+# it per-robot via host-config.yaml's images.bt-joystick-bridge entry, which
+# Kustomize rewrites (same key/image indirection as ik-mk2). The manifest
+# renders but the has-vpad label is default-off so nothing schedules until a
+# host opts in.
+#
+# ── Two containers ─────────────────────────────────────────────────────────
+#   netevent   sidecar that reconstructs the remote pad as D_raw over a
+#              netevent TCP link.
+#   relay      Python watchdog that owns D_final (the /dev/uinput device the
+#              rest of the robot consumes) and forces neutral on a stale link.
+#
+# Churn hardening (the uinput device lives only as long as the relay's fd,
+# and downstream joystick_node.py grabs Joystick(0) once and does NOT
+# hotplug): restartPolicy Always (DaemonSet default) + a gentle liveness
+# probe so a transient blip does NOT tear the device down and drop the pad.
+#
+# ── Disabled by default ──────────────────────────────────────────────────
+# Gated on TWO node labels:
+#   foundation.bot/robot:      "true"   — only schedule on robot nodes
+#   foundation.bot/has-vpad:   "true"   — opt-in per host (default-off via
+#                                         NODE_LABEL_REGISTRY default "false")
+#
+# ── PREREQUISITE (host, one-time) ──────────────────────────────────────────
+# uinput.ko built + loaded and /dev/uinput present on the host — see
+# scripts/build-uinput-ko.sh. This DaemonSet does NOT load the module.
+#
+# ── Namespace ────────────────────────────────────────────────────────────
+# positronic (created by manifests/base/positronic in the same core stack),
+# alongside positronic-control / phantom-locomotion / ik-mk2.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bt-joystick-bridge
+  namespace: positronic
+  labels:
+    app.kubernetes.io/name: bt-joystick-bridge
+    app.kubernetes.io/part-of: phantomos
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bt-joystick-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bt-joystick-bridge
+    spec:
+      # Schedule only on robot nodes that opted in.
+      nodeSelector:
+        foundation.bot/robot: "true"
+        foundation.bot/has-vpad: "true"   # ← off-switch by default
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+
+      # Bridge connects to the robot's Tailscale IP for the netevent TCP
+      # link + heartbeat UDP — same host-network posture omni-wbc uses for
+      # its console.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 15
+
+      # foundationbot/bt-joystick-bridge is a private DockerHub repo; the
+      # pull needs the deployment-account PAT. dockerhub-creds is seeded
+      # per-namespace by bootstrap phase 5 (seed-pull-secrets).
+      imagePullSecrets:
+        - name: dockerhub-creds
+
+      containers:
+        # ── netevent sidecar: reconstruct the remote pad as D_raw ──
+        - name: netevent
+          # Defaults to the CI-published multi-arch :main-latest; a host may
+          # override per-robot via the overlay's kustomize images: transformer
+          # (bootstrap reads images.bt-joystick-bridge from host-config).
+          image: foundationbot/bt-joystick-bridge:main-latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/netevent"]
+          # TODO: pin exact netevent read invocation once the binary is
+          # built (listen mode; bridge runs `netevent write` and connects in).
+          args: ["read", "--listen", "0.0.0.0:48009"]
+          ports:
+            - name: netevent
+              containerPort: 48009
+              hostPort: 48009
+              protocol: TCP
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: dev-input,  mountPath: /dev/input }
+            - { name: dev-uinput, mountPath: /dev/uinput }
+        # ── relay: watchdog + neutralise, owns D_final (consumed by pods) ──
+        - name: relay
+          image: foundationbot/bt-joystick-bridge:main-latest
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "vpad.relay"]
+          env:
+            - { name: VPAD_SOURCE_NAME, value: "Wireless Controller" }
+            - { name: VPAD_LISTEN_PORT, value: "48010" }
+            - { name: VPAD_TIMEOUT_MS,  value: "200" }
+          ports:
+            - name: heartbeat
+              containerPort: 48010
+              hostPort: 48010
+              protocol: UDP
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: dev-input,  mountPath: /dev/input }
+            - { name: dev-uinput, mountPath: /dev/uinput }
+          # Gentle probe: relay touches /tmp/vpad-alive each tick. Wide
+          # thresholds so a hiccup restarts a wedged process without
+          # flapping (a restart re-creates the pad and needs joystick_node
+          # to re-scan). 5s * 6 = 30s before a restart.
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test $(( $(date +%s) - $(stat -c %Y /tmp/vpad-alive 2>/dev/null || echo 0) )) -lt 5"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+
+      volumes:
+        - name: dev-input
+          hostPath:
+            path: /dev/input
+            type: Directory
+        - name: dev-uinput
+          hostPath:
+            path: /dev/uinput
+            type: CharDevice
