@@ -47,11 +47,12 @@ deployments:
 dmaEthercat:
   configPath: lower_body_bringup/mk2_lower_body_csp.json
 images:
-  # bt-joystick-bridge is default-off (nodeLabels has-vpad: 'false') and not
-  # yet published — the base manifest pins :PLACEHOLDER. Pin a real CI tag
-  # here only on hosts that opt in via has-vpad: 'true'.
-  bt-joystick-bridge:
-    image: foundationbot/bt-joystick-bridge:PLACEHOLDER
+  # bt-joystick-bridge is default-off (nodeLabels has-vpad: 'false'). The base
+  # manifest defaults to the multi-arch :main-latest tag published by CI, so an
+  # opt-in host need only flip has-vpad: 'true'. Uncomment and pin a specific CI
+  # tag here only to override the default on this host.
+  # bt-joystick-bridge:
+  #   image: foundationbot/bt-joystick-bridge:main-latest
   dma-ethercat:
     image: foundationbot/dma-ethercat:feat-slave-reinit-on-enable-20260602T220926-aarch64
   dma-streams:

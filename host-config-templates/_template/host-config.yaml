@@ -230,11 +230,11 @@ images:
   # pin a real CI tag only on hosts that opt in.
   # ik-mk2:
   #   image: foundationbot/ik-mk2:REPLACE-WITH-IK-MK2-BUILD-TAG
-  # bt-joystick-bridge is default-off (nodeLabels has-vpad: 'false') and not
-  # yet published (base manifest pins :PLACEHOLDER); uncomment and pin a real
-  # CI tag only on hosts that opt in.
+  # bt-joystick-bridge is default-off (nodeLabels has-vpad: 'false'). The base
+  # manifest defaults to the multi-arch :main-latest tag; uncomment and pin a
+  # specific CI tag here only to override the default on an opt-in host.
   # bt-joystick-bridge:
-  #   image: foundationbot/bt-joystick-bridge:REPLACE-WITH-VPAD-BUILD-TAG
+  #   image: foundationbot/bt-joystick-bridge:main-latest
   # wm-inference is default-off (nodeLabels has-wm-inference: 'false');
   # uncomment BOTH on hosts that opt in. Use a local-registry retag (push
   # the arm64 images to localhost:5443 first) or a DockerHub repo-swap.

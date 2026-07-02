@@ -4,11 +4,12 @@
 # ── Image ────────────────────────────────────────────────────────────────
 # foundationbot/bt-joystick-bridge (private DockerHub repo; pull needs the
 # deployment-account PAT via the dockerhub-creds secret, seeded per-namespace
-# by bootstrap phase 5). Per-robot tag is rewritten by Kustomize from
-# host-config.yaml's images.bt-joystick-bridge entry — the :PLACEHOLDER
-# below is always overridden (same key/image indirection as ik-mk2). The
-# workload is not yet published, so no host pins a real tag yet; the
-# manifest renders but the label is default-off so nothing schedules.
+# by bootstrap phase 5). The :main-latest tag below is the default (a
+# multi-arch manifest — arm64 + amd64 — published by CI); a host may override
+# it per-robot via host-config.yaml's images.bt-joystick-bridge entry, which
+# Kustomize rewrites (same key/image indirection as ik-mk2). The manifest
+# renders but the has-vpad label is default-off so nothing schedules until a
+# host opts in.
 #
 # ── Two containers ─────────────────────────────────────────────────────────
 #   netevent   sidecar that reconstructs the remote pad as D_raw over a
@@ -76,10 +77,10 @@ spec:
       containers:
         # ── netevent sidecar: reconstruct the remote pad as D_raw ──
         - name: netevent
-          # Image tag rewritten per-robot via the overlay's kustomize
-          # images: transformer (bootstrap reads images.bt-joystick-bridge
-          # from host-config). PLACEHOLDER never runs as-is.
-          image: foundationbot/bt-joystick-bridge:PLACEHOLDER
+          # Defaults to the CI-published multi-arch :main-latest; a host may
+          # override per-robot via the overlay's kustomize images: transformer
+          # (bootstrap reads images.bt-joystick-bridge from host-config).
+          image: foundationbot/bt-joystick-bridge:main-latest
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/netevent"]
           # TODO: pin exact netevent read invocation once the binary is
@@ -97,7 +98,7 @@ spec:
             - { name: dev-uinput, mountPath: /dev/uinput }
         # ── relay: watchdog + neutralise, owns D_final (consumed by pods) ──
         - name: relay
-          image: foundationbot/bt-joystick-bridge:PLACEHOLDER
+          image: foundationbot/bt-joystick-bridge:main-latest
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "vpad.relay"]
           env:
