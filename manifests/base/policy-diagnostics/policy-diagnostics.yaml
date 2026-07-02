@@ -142,32 +142,60 @@ spec:
             # phantom-locomotion / dma-bridge posture.
             privileged: true
 
-        # ── joystick-publisher sidecar ───────────────────────────────────
-        # Same image, different entry: reads the gamepad at /dev/input and
-        # publishes VelocityCommandData on /velocity_cmd (create=True owner).
-        # The diagnostic container reads start_count/stop_count from it over
-        # shared /dev/shm. Long-running (the diagnostic launcher exits +
-        # restarts per sweep; this stays up). Replaces the ROS joystick node.
-        - name: joystick-publisher
+        # ── web-console sidecar (browser control — ships WITH policy-diagnostics)
+        # Start / Stop / E-Stop buttons + a live desired-vs-actual plot for the
+        # host-PD sweep. Same image, entry policy-diagnostic-webconsole. It owns
+        # /velocity_cmd (create=True) and publishes the start_count/stop_count
+        # the sweep's --wait-for-start gate watches; it reads the tuner's status
+        # file over shared /dev/shm for the plot.
+        #
+        # URL: hostPort 8088 exposes it directly on the robot node, so the
+        # console is at   http://<robot-node-ip>:8088   (no port-forward needed).
+        #
+        # WEB_TOKEN empty => OPEN: just press Start, no token to type. Set it to
+        # require an operator token for Start (Stop/E-Stop stay always-allowed).
+        #
+        # MUTUALLY EXCLUSIVE with joystick-publisher below (both own
+        # /velocity_cmd) — run one. This robot has no gamepad, so the console is
+        # the active control and the joystick sidecar is left commented out.
+        - name: web-console
           image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
           imagePullPolicy: IfNotPresent
-          command:
-            - /entrypoint.sh
-          args:
-            - policy-diagnostic-joystick
+          command: [/entrypoint.sh]
+          args: [policy-diagnostic-webconsole]
           env:
-            # pygame needs a video driver even headless. (The module also sets
-            # this itself; kept explicit for clarity.)
-            - { name: SDL_VIDEODRIVER, value: "dummy" }
+            - { name: WEB_PORT,  value: "8088" }
+            - { name: WEB_TOKEN, value: "" }   # empty => OPEN (no token to type)
+          ports:
+            - { name: webconsole, containerPort: 8088, hostPort: 8088 }
           volumeMounts:
-            - { name: shm,       mountPath: /dev/shm }
-            - { name: dev-input, mountPath: /dev/input }
+            - { name: shm, mountPath: /dev/shm }
           resources:
             requests: { cpu: "100m", memory: "128Mi" }
             limits:   { cpu: "500m", memory: "256Mi" }
           securityContext:
-            # /dev/input device access + cross-IPC /dev/shm.
-            privileged: true
+            privileged: true   # cross-IPC /dev/shm (status file + /velocity_cmd)
+
+        # ── joystick-publisher sidecar (ALTERNATIVE — gamepad control) ───────
+        # For robots WITH a physical controller: reads /dev/input and publishes
+        # VelocityCommandData on /velocity_cmd. Mutually exclusive with the
+        # web-console above (both own /velocity_cmd) — uncomment this and comment
+        # web-console to drive from a gamepad instead.
+        #- name: joystick-publisher
+        #  image: foundationbot/policy-diagnostics-tools:PLACEHOLDER
+        #  imagePullPolicy: IfNotPresent
+        #  command: [/entrypoint.sh]
+        #  args: [policy-diagnostic-joystick]
+        #  env:
+        #    - { name: SDL_VIDEODRIVER, value: "dummy" }
+        #  volumeMounts:
+        #    - { name: shm,       mountPath: /dev/shm }
+        #    - { name: dev-input, mountPath: /dev/input }
+        #  resources:
+        #    requests: { cpu: "100m", memory: "128Mi" }
+        #    limits:   { cpu: "500m", memory: "256Mi" }
+        #  securityContext:
+        #    privileged: true
 
       volumes:
         - name: shm
